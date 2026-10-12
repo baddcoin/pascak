@@ -1886,7 +1886,8 @@ type
   procedure InitFSAsyncTasks; forward;
   procedure FreeFSAsyncTasks; forward;
   procedure EnsureGlobalsInit; forward;
-  
+  procedure CheckPendingSignals(CallEnv: TSymbolTable); forward;
+
 { ====================================================================
   IMPLEMENTASI
   ==================================================================== }
@@ -1906,6 +1907,14 @@ var //global
   // Config globals (A.3)
   GConfigStore: TDictValue = nil;
   GConfigLock: TCriticalSection = nil;
+
+  // Signal globals (B.2)
+  GSignalPendingINT: LongInt = 0;
+  GSignalPendingTERM: LongInt = 0;
+  GSignalCallbackINT: TValueList = nil;
+  GSignalCallbackTERM: TValueList = nil;
+  GSignalLock: TCriticalSection = nil;
+  GSignalInstalled: Boolean = False;
 
   ActiveThreads: LongInt = 0;// Menyimpan status jumlah thread aktif
   ThreadEvent: PRTLEvent;
@@ -18546,6 +18555,7 @@ begin
   StuckCount:= 0; 
   try
     repeat
+      CheckPendingSignals(CallEnv);
       if InterlockedCompareExchange(IsShuttingDown, 0, 0) = 1 then Break;
     
       // B.1.4: tick WS event loop (non-blocking, 20ms timeout)
@@ -18774,6 +18784,7 @@ var
   SavedContext: TEngineContext;
 begin
   Result := 0;
+  CheckPendingSignals(CallEnv);
   SavedContext := GCurrentContext;
   if Assigned(CallEnv) then
     try GCurrentContext := CallEnv.GetGlobal.Context;
@@ -32199,6 +32210,116 @@ begin
   end;
 end;//end Config Management
 
+//B.2 — Signal Handling══════════════════════════════════════════
+//═══════════════════════════════════════════════════════════════ }
+
+procedure HandleSigIntCdecl(sig: cint); cdecl;
+begin
+  // async-signal-safe: hanya atomic write
+  InterlockedExchange(GSignalPendingINT, 1);
+end;
+
+procedure HandleSigTermCdecl(sig: cint); cdecl;
+begin
+  InterlockedExchange(GSignalPendingTERM, 1);
+end;
+
+procedure InstallSignalHandlers;
+begin
+  if GSignalInstalled then Exit;
+  {$IFDEF UNIX}
+  fpSignal(SIGINT, @HandleSigIntCdecl);
+  fpSignal(SIGTERM, @HandleSigTermCdecl);
+  {$ENDIF}
+  GSignalInstalled := True;
+end;
+
+function InvokeSignalCallbacks(Cbs: TValueList; const SigName: string;
+  CallEnv: TSymbolTable): Boolean;
+var
+  i: Integer;
+  Snapshot: TValueList;
+  Cb: TValue;
+  MiniVM: TVM;
+  TmpChunk: TChunk;
+  Res: TValue;
+begin
+  Result := False;
+  if (not Assigned(Cbs)) or (Cbs.Count = 0) then Exit;
+
+  Snapshot := TValueList.Create(True);
+  try
+    GSignalLock.Acquire;
+    try
+      for i := 0 to Cbs.Count - 1 do
+        Snapshot.Add(Cbs[i].Clone);
+    finally
+      GSignalLock.Release;
+    end;
+
+    for i := 0 to Snapshot.Count - 1 do
+    begin
+      Cb := Snapshot[i];
+      MiniVM := nil;
+      TmpChunk := nil;
+      Res := nil;
+      try
+        if Assigned(Cb.ClosureEnv) then
+          MiniVM := TVM.Create(Cb.ClosureEnv)
+        else if Assigned(CallEnv) then
+          MiniVM := TVM.Create(CallEnv.GetGlobal)
+        else
+          MiniVM := TVM.Create(nil);
+        TmpChunk := TChunk.Create;
+        TmpChunk.AddInstruction(opcConstant, TmpChunk.AddConstant(Cb.Clone));
+        TmpChunk.AddInstruction(opcCall, 0);
+        TmpChunk.AddInstruction(opcReturn);
+        Res := MiniVM.Run(TmpChunk);
+        if Assigned(Res) then Res.Free;
+      except
+        on E: Exception do
+        begin
+          if Assigned(IOLock) then
+          begin
+            IOLock.Acquire;
+            try Writeln(ErrOutput, '[signal] handler error: ', E.Message);
+            finally IOLock.Release; end;
+          end;
+        end;
+      end;
+      if Assigned(TmpChunk) then TmpChunk.Free;
+      if Assigned(MiniVM) then MiniVM.Free;
+    end;
+  finally
+    Snapshot.Free;
+  end;
+  Result := True;
+end;
+
+procedure CheckPendingSignals(CallEnv: TSymbolTable);
+var E: EScriptFatalError;
+begin
+  if InterlockedExchange(GSignalPendingINT, 0) = 1 then
+  begin
+    if not InvokeSignalCallbacks(GSignalCallbackINT, 'SIGINT', CallEnv) then
+    begin
+      E := EScriptFatalError.Create('Interrupted by SIGINT');
+      E.ExitCode := 130;
+      raise E;
+    end;
+  end;
+
+  if InterlockedExchange(GSignalPendingTERM, 0) = 1 then
+  begin
+    if not InvokeSignalCallbacks(GSignalCallbackTERM, 'SIGTERM', CallEnv) then
+    begin
+      E := EScriptFatalError.Create('Terminated by SIGTERM');
+      E.ExitCode := 143;
+      raise E;
+    end;
+  end;
+end;//end Signal Handling
+
 // A.2 — Structured Logging═══════════════════════════════════════
 //═══════════════════════════════════════════════════════════════ }
 function LogArgsToString(Args: TObjectList): string;
@@ -32405,6 +32526,90 @@ begin
   Result := TValue.CreateNull;
 end;//end Structured Logging
 
+//native Signal Handling════════════════════════════════════════════════════
+//═══════════════════════════════════════════════════════════════ }
+function Native_SignalOn(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  SigName: string;
+  Cb: TValue;
+begin
+  if (Args.Count <> 2) or (TValue(Args[0]).DataType <> dtString) or
+     (TValue(Args[1]).DataType <> dtFunction) then
+  begin
+    errMSG.callerror(140, 'signal.on("SIGINT"|"SIGTERM", fn)',
+                     errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateBool(False));
+  end;
+
+  SigName := UpperCase(Trim(TValue(Args[0]).StrVal));
+  Cb := TValue(Args[1]);
+
+  InstallSignalHandlers;
+
+  GSignalLock.Acquire;
+  try
+    if SigName = 'SIGINT' then
+      GSignalCallbackINT.Add(Cb.Clone)
+    else if SigName = 'SIGTERM' then
+      GSignalCallbackTERM.Add(Cb.Clone)
+    else
+    begin
+      errMSG.callerror(144, 'signal.on: signal tidak didukung — ' + SigName,
+                       errMSG.xrow, errMSG.xcol);
+      Exit(TValue.CreateBool(False));
+    end;
+  finally
+    GSignalLock.Release;
+  end;
+  Result := TValue.CreateBool(True);
+end;
+
+function Native_SignalOff(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var SigName: string;
+begin
+  if (Args.Count <> 1) or (TValue(Args[0]).DataType <> dtString) then
+  begin
+    errMSG.callerror(139, 'signal.off("SIGINT"|"SIGTERM")', errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateBool(False));
+  end;
+  SigName := UpperCase(Trim(TValue(Args[0]).StrVal));
+  GSignalLock.Acquire;
+  try
+    if SigName = 'SIGINT' then
+      GSignalCallbackINT.Clear
+    else if SigName = 'SIGTERM' then
+      GSignalCallbackTERM.Clear
+    else
+      Exit(TValue.CreateBool(False));
+  finally
+    GSignalLock.Release;
+  end;
+  Result := TValue.CreateBool(True);
+end;
+
+function Native_SignalRaise(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var SigName: string; Sig: cint;
+begin
+  if (Args.Count <> 1) or (TValue(Args[0]).DataType <> dtString) then
+  begin
+    errMSG.callerror(139, 'signal.raise("SIGINT"|"SIGTERM")', errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateBool(False));
+  end;
+  SigName := UpperCase(Trim(TValue(Args[0]).StrVal));
+  {$IFDEF UNIX}
+  if SigName = 'SIGINT' then Sig := SIGINT
+  else if SigName = 'SIGTERM' then Sig := SIGTERM
+  else begin
+    errMSG.callerror(144, 'signal.raise: signal tidak didukung — ' + SigName,
+                     errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateBool(False));
+  end;
+  fpKill(fpGetPid, Sig);
+  {$ENDIF}
+  Result := TValue.CreateBool(True);
+end;//end native Signal Handling
+
+
 //native main=============
 //========================
 procedure initNativeCode(GEnvv: TSymbolTable);
@@ -32412,14 +32617,26 @@ var
   MathDef, HardDef, TimeDef, SysDef, 
   CryptoDef, NetDef, HTTPDef, FSDef,
   DLLDef, TLSDef, NativeLibDef, 
-  WSDef, PkgDef, LogDef, ConfigDef : TTypeDefinition; 
+  WSDef, PkgDef, LogDef, ConfigDef,
+  SignalDef : TTypeDefinition; 
   
   MathInst, HardInst, TimeInst, SysInst, 
   CryptoInst, NetInst, HTTPInst, FSInst,
   DLLInst, TLSInst, NativeLibInst, 
-  WSInst, PkgInst, LogInst, ConfigInst : TInstanceValue; 
+  WSInst, PkgInst, LogInst, ConfigInst,
+  SignalInst: TInstanceValue; 
 
 begin
+  SignalDef := TTypeDefinition.Create('SignalLib', tkClass);
+  SignalDef.Methods.Add('on',    TVMFunction.Create);
+  SignalDef.Methods.Add('off',   TVMFunction.Create);
+  SignalDef.Methods.Add('raise', TVMFunction.Create);
+  
+  SignalInst := TInstanceValue.Create(SignalDef);
+  SignalInst.Members.DefineVar('on',    TValue.CreateNative(@Native_SignalOn));
+  SignalInst.Members.DefineVar('off',   TValue.CreateNative(@Native_SignalOff));
+  SignalInst.Members.DefineVar('raise', TValue.CreateNative(@Native_SignalRaise));
+
   ConfigDef := TTypeDefinition.Create('ConfigLib', tkClass);
   ConfigDef.Methods.Add('load',     TVMFunction.Create);
   ConfigDef.Methods.Add('loadJSON', TVMFunction.Create);
@@ -32427,7 +32644,7 @@ begin
   ConfigDef.Methods.Add('set',      TVMFunction.Create);
   ConfigDef.Methods.Add('has',      TVMFunction.Create);
   ConfigDef.Methods.Add('all',      TVMFunction.Create);
-  
+
   ConfigInst := TInstanceValue.Create(ConfigDef);
   ConfigInst.Members.DefineVar('load',     TValue.CreateNative(@Native_ConfigLoad));
   ConfigInst.Members.DefineVar('loadJSON', TValue.CreateNative(@Native_ConfigLoadJSON));
@@ -32888,6 +33105,7 @@ begin
   GEnvv.DefineVar('pkg', TValue.CreateObj(PkgInst));
   GEnvv.DefineVar('log', TValue.CreateObj(LogInst));
   GEnvv.DefineVar('config', TValue.CreateObj(ConfigInst));
+  GEnvv.DefineVar('signal', TValue.CreateObj(SignalInst));
 
   GEnvv.DefineVar('getTick', TValue.CreateNative(@Native_GetTick),true);
   GEnvv.DefineVar('sleep', TValue.CreateNative(@Native_Sleep),true); 
@@ -35336,6 +35554,10 @@ begin
 
   GConfigStore := TDictValue.Create;
   GConfigLock := TCriticalSection.Create;
+
+  GSignalLock := TCriticalSection.Create;
+  GSignalCallbackINT := TValueList.Create(True);
+  GSignalCallbackTERM := TValueList.Create(True);
 
   InitThreadErrors;
 
