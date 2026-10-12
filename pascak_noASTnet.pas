@@ -306,6 +306,7 @@ type
     TriggerTime: QWord;    // Waktu target eksekusi (Timestamp OS)
     IntervalMs: QWord;     // Jeda waktu untuk Interval
     IsActive: Boolean;
+    TimerID: Int64;
   end;
   PHashItem = ^THashItem;
   THashItem = record
@@ -1640,7 +1641,8 @@ type
     
     // Mendaftarkan Timer Asinkron
     function SetTimer(Callback: TValue; DelayMs: QWord; IsInterval: Boolean): Integer;
-    
+    function ClearTimer(TimerID: Int64): Boolean;
+
     // Menerima data dari Background Thread TCP
     procedure PushIOPayload(Callback: TValue; Payload: TValue); 
     
@@ -1891,7 +1893,8 @@ var //global
   BytecodeObfuscationKey: string = 'Pascak-Default-Key-Change-Me-2024!';
   GDangerousEnvAllowed: Boolean = False;
   AES_IVCounter: Integer = 0;
-
+  GTimerCounter: Int64 = 0;
+  
   ActiveThreads: LongInt = 0;// Menyimpan status jumlah thread aktif
   ThreadEvent: PRTLEvent;
 
@@ -18433,7 +18436,7 @@ end;
 function TEventLoop.SetTimer(Callback: TValue; DelayMs: QWord; IsInterval: Boolean): Integer;
 var NewTask: PEventTask;
 begin
-  if Callback.DataType <> dtFunction then errMSG.callerror(137, 'TEventLoop.SetTimer', errMSG.xrow, errMSG.xcol); 
+  if Callback.DataType <> dtFunction then errMSG.callerror(137, 'TEventLoop.SetTimer', errMSG.xrow, errMSG.xcol);
   NewTask := New(PEventTask);
   if IsInterval then NewTask^.TaskType := etInterval else NewTask^.TaskType := etTimer;
   NewTask^.CallbackFunc := Callback.Clone; 
@@ -18442,13 +18445,39 @@ begin
   NewTask^.TriggerTime := GetTickCount64 + DelayMs;
   NewTask^.IsActive := True;
 
+  NewTask^.TimerID := InterlockedIncrement64(GTimerCounter);
+  Result := Integer(NewTask^.TimerID);
+
   FLock.Acquire;
   try
-    Result := FTasks.Add(NewTask);
+    FTasks.Add(NewTask);
   finally
     FLock.Release;
   end;
-  RTLEventSetEvent(FWakeEvent); // Bangunkan instan
+  RTLEventSetEvent(FWakeEvent);
+end;
+
+function TEventLoop.ClearTimer(TimerID: Int64): Boolean;
+var
+  i: Integer;
+  Task: PEventTask;
+begin
+  Result := False;
+  FLock.Acquire;
+  try
+    for i := 0 to FTasks.Count - 1 do
+    begin
+      Task := PEventTask(FTasks[i]);
+      if Assigned(Task) and (Task^.TimerID = TimerID) and Task^.IsActive then
+      begin
+        Task^.IsActive := False;
+        Result := True;
+        Break;
+      end;
+    end;
+  finally
+    FLock.Release;
+  end;
 end;
 
 procedure TEventLoop.PushIOPayload(Callback: TValue; Payload: TValue);
@@ -19027,6 +19056,80 @@ begin
   end;
     
   Result := TValue.CreateNull;
+end;
+
+function Native_SetTimeout(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  Ctx: TEngineContext;
+  FnVal: TValue;
+  DelayMs: Integer;
+begin
+  if (Args.Count <> 2) or (TValue(Args[0]).DataType <> dtFunction) or
+     (TValue(Args[1]).DataType <> dtNumeric) then
+  begin
+    errMSG.callerror(140, 'setTimeout(fn, ms)', errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateNum(-1));
+  end;
+
+  FnVal := TValue(Args[0]);
+  DelayMs := Trunc(TValue(Args[1]).NumVal);
+  if DelayMs < 0 then DelayMs := 0;
+
+  Ctx := GetContextFromEnv(CallEnv);
+  if not Assigned(Ctx) or not Assigned(Ctx.EventLoop) then
+  begin
+    errMSG.callerror(144, 'setTimeout: event loop tidak tersedia', errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateNum(-1));
+  end;
+
+  Result := TValue.CreateNum(Ctx.EventLoop.SetTimer(FnVal, QWord(DelayMs), False));
+end;
+
+function Native_SetInterval(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  Ctx: TEngineContext;
+  FnVal: TValue;
+  DelayMs: Integer;
+begin
+  if (Args.Count <> 2) or (TValue(Args[0]).DataType <> dtFunction) or
+     (TValue(Args[1]).DataType <> dtNumeric) then
+  begin
+    errMSG.callerror(140, 'setInterval(fn, ms)', errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateNum(-1));
+  end;
+
+  FnVal := TValue(Args[0]);
+  DelayMs := Trunc(TValue(Args[1]).NumVal);
+  if DelayMs < 1 then DelayMs := 1;
+
+  Ctx := GetContextFromEnv(CallEnv);
+  if not Assigned(Ctx) or not Assigned(Ctx.EventLoop) then
+  begin
+    errMSG.callerror(144, 'setInterval: event loop tidak tersedia', errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateNum(-1));
+  end;
+
+  Result := TValue.CreateNum(Ctx.EventLoop.SetTimer(FnVal, QWord(DelayMs), True));
+end;
+
+function Native_ClearTimer(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  Ctx: TEngineContext;
+  TimerID: Int64;
+begin
+  if (Args.Count <> 1) or (TValue(Args[0]).DataType <> dtNumeric) then
+  begin
+    errMSG.callerror(138, 'clearTimeout(id)', errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateBool(False));
+  end;
+
+  TimerID := Trunc(TValue(Args[0]).NumVal);
+
+  Ctx := GetContextFromEnv(CallEnv);
+  if not Assigned(Ctx) or not Assigned(Ctx.EventLoop) then
+    Exit(TValue.CreateBool(False));
+
+  Result := TValue.CreateBool(Ctx.EventLoop.ClearTimer(TimerID));
 end;
 
 function Native_SysArgs(Args: TObjectList; CallEnv: TSymbolTable): TValue;
@@ -32314,6 +32417,10 @@ begin
   GEnvv.DefineVar('workerGet', TValue.CreateNative(@Native_WorkerGetMessage), true);
 
   GEnvv.DefineVar('range', TValue.CreateNative(@Native_Range), true);
+  GEnvv.DefineVar('setTimeout', TValue.CreateNative(@Native_SetTimeout), true);
+  GEnvv.DefineVar('setInterval', TValue.CreateNative(@Native_SetInterval), true);
+  GEnvv.DefineVar('clearTimeout', TValue.CreateNative(@Native_ClearTimer), true);
+  GEnvv.DefineVar('clearInterval', TValue.CreateNative(@Native_ClearTimer), true);
 
   //Unit test framework
   GEnvv.DefineVar('assertEqual', TValue.CreateNative(@Native_AssertEqual), true);
