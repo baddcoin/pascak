@@ -1,0 +1,2446 @@
+# Pascak API Reference
+
+Dokumentasi lengkap API standard library Pascak VM.
+
+**Versi**: 1.0
+**Target**: Termux/Android, Linux, macOS, Windows
+
+---
+
+## Daftar Isi
+
+1. [Modul Global](#modul-global)
+2. [FFI (Foreign Function Interface)](#ffi)
+3. [Native Buffer](#native-buffer)
+4. [Native Struct](#native-struct)
+5. [HTTP Client](#http-client)
+6. [HTTP Server](#http-server)
+7. [Network (Level Rendah)](#network)
+8. [TLS](#tls)
+9. [SQLite](#sqlite)
+10. [Crypto](#crypto)
+11. [Filesystem](#filesystem)
+12. [Parser Tips](#parser-tips)
+13. [Sandbox](#sandbox)
+14. [Error Handling](#error-handling)
+15. [Platform Notes](#platform-notes)
+---
+
+## Modul Global
+
+| Nama | Deskripsi |
+|---|---|
+| `sys` | Environment, args, subprocess, memory |
+| `math` | Matematika & statistik |
+| `crypto` | Hash, HMAC, random secure |
+| `time` | Date/time manipulation |
+| `net` | TCP socket, DNS resolver |
+| `http` | HTTP client & server |
+| `fs` | Filesystem helpers |
+| `dll` | Shared library loading & FFI |
+| `tls` | TLS lifecycle management |
+| `native` | Native buffer & struct system |
+| `hardware` | Raw memory access (peek, poke, alloc) |
+
+**Top-level builtins**:
+`print`, `println`, `input`, `len`, `str`, `typeOf`, `toInteger`, `toFloat`, `toString`,
+`push`, `pop`, `delete`, `clear`, `reverse`, `join`, `indexOf`, `map`, `filter`, `reduce`, `sort`,
+`upper`, `lower`, `trim`, `replace`, `copy`, `pos`, `val`,
+`jsonParse`, `jsonStringify`,
+`regExMatch`, `regExReplace`, `base64Encode`, `base64Decode`, `sha1`,
+`fileRead`, `fileWrite`, `fileAppend`, `fileExists`, `fileDelete`,
+`fileWriteRecord`, `fileReadRecord`,
+`getFiles`, `getDirs`, `makeDir`,
+`thread`, `poolRun`, `coroutine_create`, `resume`, `coroutine_free`,
+`on`, `emit`, `Worker`, `workerPost`, `workerGet`,
+`range`, `eval`,
+`assertEqual`, `assertTrue`, `assertFalse`, `assertThrows`,
+`testBegin`, `testEnd`, `testSummary`,
+`runtimeStats`, `profilerEnable`, `profilerDisable`, `profilerReport`
+
+---
+
+## FFI
+
+### `dll.load(path) → dllHandle`
+
+Load shared library. Dedup otomatis — library dengan canonical path sama
+hanya di-load sekali.
+
+```pascal
+var lib := dll.load("libm.so.6");
+```
+
+**Path resolution**:
+- **Bare name** (tanpa `/`): coba sandbox-relative dulu (sebelah script), fallback ke linker
+- **Absolute path**: harus di whitelist sistem (`/system/lib64/`, `/usr/lib/`, `$PREFIX/lib/`)
+- **Relative path**: sandbox-relative saja
+
+### `lib.func(name, sig [, structTypes]) → functionWrapper`
+
+Ambil fungsi dari library dan bungkus jadi callable.
+
+```pascal
+// Simple
+var sqrtFn := lib.func("sqrt", "f->f");
+println(sqrtFn(2.0));
+
+// Dengan struct (butuh array structType)
+var translate := lib.func("point_translate", "Sii->S", [PointType, PointType]);
+```
+
+**Argumen ke-3** (opsional): array `structType` untuk setiap `S` di signature.
+Urutan: argumen struct dulu (kiri ke kanan), lalu return struct (kalau ada).
+
+### `lib.symbol(name) → pointer`
+
+Ambil alamat symbol mentah (variabel global, fungsi tanpa wrapper).
+
+```pascal
+var counterPtr := lib.symbol("global_counter");
+```
+
+### `lib.isValid() / lib.path() / lib.close()`
+
+Lifecycle management.
+
+```pascal
+if lib.isValid() then println(lib.path());
+lib.close();
+```
+
+### `lib.closureAvailable() → bool`
+
+Cek apakah libffi tersedia untuk callback bridge.
+
+```pascal
+if dll.closureAvailable() then
+  println("Callback bridge OK");
+```
+
+### `lib.closureInfo() → dict`
+
+Informasi detail tentang status libffi.
+
+```pascal
+var info := dll.closureInfo();
+println(info.status);       // "libffi loaded"
+println(info.available);    // true
+```
+
+### `lib.callback(sig, fn) → pointer`
+
+Bungkus fungsi script jadi C-compatible callback.
+
+```pascal
+function cmpAsc(a, b) begin
+  if a < b then return -1;
+  if a > b then return 1;
+  return 0
+end;
+
+var cmp := dll.callback("ii->i", cmpAsc);
+qsortFn(native.bufferPtr(buf), native.bufferSize(buf), cmp);
+dll.freeCallback(cmp);
+```
+
+### `lib.freeCallback(ptr) → bool`
+
+Bebaskan callback eksplisit. Kalau tidak dipanggil, auto-cleanup di shutdown.
+
+### `lib.callbackCount() → int`
+
+Jumlah callback aktif (diagnostik).
+
+---
+
+### FFI Signature Syntax
+
+Format: `<args>-><return>`
+
+| Huruf | C Type | Pascal VM |
+|---|---|---|
+| `i` | `int64_t` | `TValue` numeric |
+| `f` | `double` | `TValue` numeric |
+| `s` | `char*` | `string` (UTF-8) |
+| `p` | `void*` | `dtPointer` |
+| `I` | `size_t` | `int64_t` (semantik) |
+| `S` | `struct` | `TNativeStructValue` |
+| `C` | alias `p` (callback) | `dtPointer` |
+| `v` | `void` (return only) | `null` |
+
+**Contoh:**
+
+| Signature | Arti |
+|---|---|
+| `i->i` | `int64(int64)` |
+| `ii->i` | `int64(int64, int64)` |
+| `f->f` | `double(double)` |
+| `s->i` | `int64(const char*)` |
+| `ss->s` | `char*(const char*, const char*)` |
+| `pIp->v` | `void(void*, size_t, void*)` |
+| `pip->v` | `void(void*, int64_t, void*)` — qsort style |
+| `Sii->S` | `Point(Point, int64, int64)` |
+| `SS->i` | `int64(Point, Point)` |
+
+**Penting — `pIp` vs `pip`**:
+
+Keduanya ABI-identik (8-byte register), tapi **marshalling berbeda**:
+
+| Signature | Stub perlakukan arg ke-2 sebagai |
+|---|---|
+| `pIp->v` | `Pointer` (`memcpy` style: dst, src, count) |
+| `pip->v` | `Int64` (qsort style: buf, count, cmp) |
+
+Gunakan `pip` untuk fungsi dengan `(pointer, count, ...)`.
+Gunakan `pIp` untuk `(dst, src, count)` seperti `memcpy`.
+
+---
+
+## Native Buffer
+
+Buffer int64 linear untuk interop C array.
+
+### `native.fromArray(arr) → buffer`
+
+Buat buffer dari array script.
+
+```pascal
+var buf := native.fromArray([10, 20, 30]);
+```
+
+Elemen non-numeric (string, null) di-coerce ke 0.
+
+### `native.bufferPtr(buf) → pointer`
+
+Ambil pointer ke backing storage (`int64[]`).
+
+```pascal
+qsortFn(native.bufferPtr(buf), native.bufferSize(buf), cmp);
+```
+
+### `native.bufferSize(buf) → int`
+
+Jumlah elemen.
+
+### `native.bufferToArray(buf) → array`
+
+Baca balik buffer sebagai array baru.
+
+```pascal
+var sorted := native.bufferToArray(buf);
+```
+
+### `native.bufferFree(buf) → bool`
+
+Free eksplisit. Idempotent — double-free return `false`.
+
+---
+
+## Native Struct
+
+Struct dengan layout C-compatible (POSIX alignment).
+
+### `native.structType(name, fields) → structType`
+
+Deklarasi tipe struct.
+
+```pascal
+var PointType := native.structType("Point", [
+  ["x", "i32"],
+  ["y", "i32"]
+]);
+
+var EntryType := native.structType("Entry", [
+  ["id",     "i64"],
+  ["score",  "f64"],
+  ["active", "bool"],
+  ["rank",   "i32"]
+]);
+```
+
+**Field kinds:**
+
+| Kind | Size | Align | C Type |
+|---|---|---|---|
+| `i8` | 1 | 1 | `int8_t` |
+| `i16` | 2 | 2 | `int16_t` |
+| `i32` | 4 | 4 | `int32_t` |
+| `i64` | 8 | 8 | `int64_t` |
+| `f32` | 4 | 4 | `float` |
+| `f64` | 8 | 8 | `double` |
+| `ptr` | 8 | 8 | `void*` |
+| `bool` | 1 | 1 | `_Bool` |
+
+### `native.newStruct(type) → structValue`
+
+Instantiate struct, zero-initialized.
+
+```pascal
+var p := native.newStruct(PointType);
+```
+
+### `native.structGet(value, fieldName) → any`
+
+Baca field.
+
+```pascal
+var x := native.structGet(p, "x");
+```
+
+### `native.structSet(value, fieldName, val) → bool`
+
+Tulis field.
+
+```pascal
+native.structSet(p, "x", 10);
+```
+
+### `native.structSize(value) → int`
+
+Total size (dengan padding).
+
+### `native.structTypeName(value) → string`
+
+Nama type.
+
+### `native.structFree(value) → bool`
+
+Free struct value. Idempotent.
+
+### `native.structTypeFree(type) → bool`
+
+Free struct type.
+
+### `native.structFFITypeInfo(type) → dict`
+
+Diagnostik `ffi_type` construction:
+
+```pascal
+var info := native.structFFITypeInfo(PointType);
+println(info.totalSize);      // 8
+println(info.ffiTypeTag);     // 13 (FFI_TYPE_STRUCT)
+println(info.elementCount);   // 2
+```
+
+**Contoh lengkap**:
+
+```pascal
+// 1. Deklarasi struct Point
+var PointType := native.structType("Point", [
+  ["x", "i32"],
+  ["y", "i32"]
+]);
+
+// 2. Load library
+var lib := dll.load("libgeom.so");
+
+// 3. Ambil fungsi yang terima/kembalikan struct
+var translate := lib.func("point_translate", "Sii->S", [PointType, PointType]);
+
+// 4. Buat instance
+var p := native.newStruct(PointType);
+native.structSet(p, "x", 10);
+native.structSet(p, "y", 20);
+
+// 5. Panggil
+var r := translate(p, 5, 7);
+println(native.structGet(r, "x"));   // 15
+println(native.structGet(r, "y"));   // 27
+
+// 6. Cleanup
+native.structFree(p);
+native.structFree(r);
+native.structTypeFree(PointType);
+lib.close();
+```
+
+---
+
+## HTTP Client
+
+### `http.get(url [, headers]) → dict`
+
+Sync HTTPS request.
+
+```pascal
+var res := http.get("https://example.com");
+println(res.status);      // 200
+println(res.headers);     // dict header
+println(res.body);        // string body
+println(res.tls_verify);  // true (default)
+```
+
+### `http.post(url [, headers] [, body]) → dict`
+
+POST request.
+
+### `http.request(method, url [, headers] [, body]) → dict`
+
+Request dengan method custom.
+
+### `http.getAsync(url, callback) → null`
+
+Async request. Callback dipanggil di main thread via event loop.
+
+```pascal
+http.getAsync("https://example.com", lambda res : begin
+  if res.hasKey("error") then
+    println("FAIL: ", res.error)
+  else
+    println("OK: ", res.status);
+end);
+```
+
+**Callback menerima**:
+- **Sukses**: `{status, headers, body, tls_verify}`
+- **Error**: `{error: "message"}`
+
+**Batasan**: max 8 concurrent request (worker pool size). Request ke-9 antri.
+
+### Env override untuk TLS verify
+
+```bash
+PASCAK_TLS_NO_VERIFY=1 ./pascak_noASTnet script.pas
+```
+
+Atau per-request via header:
+```pascal
+http.get("https://self-signed.example.com", {
+  "X-Pascak-No-Verify": "1"
+});
+```
+
+---
+
+## HTTP Server
+
+### `http.serve(port, handler) → serverHandle`
+
+Handler = `lambda(req) → resDict`.
+
+```pascal
+function handler(req) begin
+  var method := req["method"];    // ← indexing (method = keyword)
+  var path := req["path"];        // ← indexing (bisa juga req.path)
+  var body := req["body"];
+  
+  if path == "/" and method == "GET" then
+    return {
+      "status": 200,
+      "headers": {"Content-Type": "text/html"},
+      "body": "<h1>Hello!</h1>"
+    };
+  
+  return {
+    "status": 404,
+    "body": "Not Found"
+  };
+end;
+
+var server := http.serve(8080, handler);
+http.listen(server);   // blocking
+```
+
+### `http.listen(serverHandle) → int`
+
+Blocking serve loop. Return jumlah request yang di-serve.
+
+Serve loop non-blocking — accept di main thread, eksekusi handler di worker pool (8 concurrent). Mendukung plain HTTP dan HTTPS.
+
+```markdown
+### `http.listenAsync(serverHandle) → int`
+
+Serve loop non-blocking — accept di main thread, eksekusi handler di worker pool (8 concurrent). Mendukung plain HTTP dan HTTPS.
+
+```pascal
+var server := http.serve(8080, handler);
+var n := http.listenAsync(server);
+println("Total dispatched: ", n);
+```
+
+Aspek http.listen http.listenAsync
+Handler execution Main thread (serial) Worker pool (8 concurrent)
+Throughput 1× ~5-8×
+Blocking Ya Tidak (accept timeout 500ms)
+TLS support Tidak Ya (via serveTLS)
+Cocok untuk Prototype Production
+
+Benchmark — handler sleep(100), 10 concurrent request:
+
+Setup Waktu total
+http.listen ~1.8s
+http.listenAsync ~0.35s
+Speedup ~5×
+
+Graceful shutdown: http.stop(server).
+
+### `http.serveTLS(port, certPath, keyPath, handler) → serverHandle`
+
+HTTPS server. Butuh certificate + private key format PEM.
+
+```pascal
+var home := sys.env("HOME");
+var server := http.serveTLS(8443,
+  home + "/server.crt",
+  home + "/server.key",
+  handler);
+
+http.listenAsync(server);
+```
+
+Generate self-signed cert:
+
+```bash
+openssl req -x509 -newkey rsa:2048 -keyout server.key -out server.crt \
+    -days 365 -nodes -subj "/CN=localhost"
+```
+
+Test:
+
+```bash
+curl -sk https://localhost:8443/health
+```
+
+Cert validation di startup: cert readable, private key readable, key cocok dengan cert.
+
+Sandbox: absolute path di $HOME diizinkan. Path lain relative terhadap direktori script.
+
+Protokol: TLS 1.3 dengan forward secrecy.
+
+Contoh: examples/rest_api_tls.pas.
+
+```
+
+### `http.stop(serverHandle) → bool`
+
+Graceful shutdown — selesaikan request aktif, lalu exit loop.
+
+### `http.closeServer(serverHandle) → bool`
+
+Close server paksa.
+
+---
+```markdown
+### Keep-Alive (HTTP/1.1 persistent connections)
+
+Server yang dibuat via `http.serve` + `http.listen` atau `http.listenAsync` otomatis mendukung HTTP/1.1 keep-alive. Satu TCP connection melayani hingga **100 request** atau sampai client idle **30 detik**, mana yang lebih dulu.
+
+**Manfaat:**
+- Throughput ~21× lebih tinggi dari serial-close per request
+- Hemat TLS handshake pada HTTPS (1 handshake untuk 100 request)
+- Mengurangi latensi round-trip pada client-side HTTP pipelining
+
+**Headers otomatis:**
+```
+
+Connection: keep-alive
+Keep-Alive: timeout=30, max=100
+
+```
+
+Client yang mengirim `Connection: close` akan dipaksa disconnect setelah request itu selesai.
+
+**Tuning (constant di `pascak_http.pas`):**
+- `KEEPALIVE_MAX_REQUESTS = 100`
+- `KEEPALIVE_TIMEOUT_MS = 30000`
+
+**Catatan:** `http.listenAsync` menggunakan worker pool untuk handler, tapi TLS handshake tetap di-accept thread. Setelah handshake, satu worker melayani seluruh lifecycle connection (semua request dalam satu keep-alive session).
+
+---
+```
+```markdown
+## Module: ws — WebSocket Server
+
+WebSocket (RFC 6455) server dengan dukungan penuh text/binary frame, fragmentasi, ping/pong, close handshake. Plain (`ws://`) dan TLS (`wss://`).
+
+### `ws.serve(port: int, config: dict) → int`
+
+Buat WebSocket server plain.
+
+**Config keys:**
+
+| Key | Tipe | Default | Keterangan |
+|-----|------|---------|------------|
+| `onOpen` | function | `nil` | Callback saat client connect. Signature: `fn(conn)` |
+| `onMessage` | function | `nil` | Callback saat frame text/binary diterima. Signature: `fn(conn, msg)` |
+| `onClose` | function | `nil` | Callback saat client disconnect. Signature: `fn(conn, code)` |
+| `onError` | function | `nil` | Opsional. Callback saat protocol error. Signature: `fn(conn, msg)` |
+| `pingInterval` | int (ms) | `30000` | Interval auto-ping. `0` = disabled |
+| `maxPayload` | int (byte) | `16777216` (16 MB) | Batas fragmentasi payload |
+
+**Return:** server handle (≥ 0) atau `-1` jika gagal.
+
+**Contoh:**
+```pascal
+var srv := ws.serve(9001, {
+  "onOpen":    onOpen,
+  "onMessage": onMessage,
+  "onClose":   onClose
+});
+```
+
+### `ws.serveTLS(port: int, cert: str, key: str, config: dict) → int`
+
+Sama seperti `ws.serve` tapi dengan TLS 1.2/1.3. Format `cert` dan `key`: PEM.
+
+**Return:** server handle (≥ 0) atau `-1` jika gagal.
+
+**Contoh:**
+
+```pascal
+var home := sys.env("HOME");
+var srv := ws.serveTLS(9443,
+  home + "/server.crt",
+  home + "/server.key",
+  {"onMessage": onMessage});
+```
+
+**Batasan event mode:** `ws.serveTLS` **tidak bekerja** dengan `ws.listenAsync` (B.1 belum support TLS event loop). Gunakan `ws.listenThreads` untuk `wss://`.
+
+### `ws.listenAsync(handle: int) → bool`
+
+**Event-driven mode (B.1+)** — non-blocking, event loop internal di main thread. Skala 10.000+ concurrent di 1 thread.
+
+```pascal
+var srv := ws.serve(9001, {"onMessage": onMessage});
+ws.listenAsync(srv);
+println("event-driven");
+while true do sleep(1000);   // main loop tick event
+```
+
+**Batasan:** `wss://` (TLS) tidak didukung di event mode. Pakai `ws.listenThreads` untuk TLS.
+
+**Return:** `True` jika berhasil register ke event loop.
+
+**Stop:** `ws.stop(handle)` untuk remove dari event loop.
+
+**Catatan penting:** Setelah `ws.listenAsync`, thread utama **harus tetap tick** event loop. Pattern standar: `while true do sleep(1000);`. `sleep()` otomatis tick event loop.
+
+### `ws.listenThreads(handle: int) → bool`
+
+**Legacy thread-per-connection** — kompatibel dengan A.2.1, mendukung `wss://`.
+
+```pascal
+ws.listenThreads(srv);   // spawn listener thread internal
+```
+
+**Kapan pakai:**
+- Butuh `wss://` (TLS) — event mode belum support (B.2 nanti)
+- Butuh isolasi penuh per connection
+- Concurrent < 500 (thread overhead signifikan di atas itu)
+
+**Return:** `True` jika listener thread berhasil di-spawn.
+
+**Perbandingan performa:**
+
+| Concurrent | Event mode | Thread mode |
+|------------|------------|-------------|
+| 10 | ✓ | ✓ |
+| 100 | ✓ | ✓ |
+| 500 | ✓ (1 thread) | ⚠ (~4 GB RAM) |
+| 1000+ | ✓ | ✗ |
+
+### `ws.listen(handle: int) → int`
+
+**Blocking accept loop** — klasik. Cocok untuk script simple tanpa event loop.
+
+Setiap connection dijalankan di worker thread dedicated.
+
+**Cara pakai:** jalankan di thread terpisah via `thread()`:
+
+```pascal
+function serverThread() begin
+  ws.listen(SRV);
+end;
+
+begin
+  var SRV := ws.serve(9001, {...});
+  thread(serverThread);
+  // main thread lanjut
+end.
+```
+
+**Return:** jumlah connection yang diterima selama lifetime server.
+
+**Stop:** `ws.listen` keluar dalam ≤ 500ms setelah `ws.stop(handle)` dipanggil.
+
+### `ws.broadcast(handle: int, msg) → int`
+
+Kirim `msg` (dikonversi ke string jika bukan string) ke **semua** client yang sedang connect ke server `handle`.
+
+**Return:** jumlah client yang berhasil dikirimi.
+
+**Thread-safe:** internal lock per-connection menjamin frame tidak interleave saat broadcast bertemu worker send.
+
+### `ws.stop(handle: int) → bool`
+
+Graceful shutdown. Listen loop keluar pada iterasi berikutnya (≤ 500ms). Semua client aktif menerima close frame `1001 Going Away`.
+
+**Return:** `True` jika handle valid.
+
+### `ws.clients(handle: int) → array`
+
+Return array `ConnID` (string) yang sedang aktif di server `handle`.
+
+**ConnID format:**
+- Thread mode: `ws-NNNNNNNN`
+- Event mode: `nbs-NNN`
+
+Connection Object (conn)
+
+Object yang di-pass ke callback. Bertipe dict dengan field berikut.
+
+Field (read-only):
+
+Field Tipe Keterangan
+conn["id"] string ConnID unik (format ws-NNNNNNNN)
+conn["path"] string Request path (/chat, /ws, ...)
+conn["query"] string Query string
+conn["version"] string HTTP version (HTTP/1.1)
+conn["peerIP"] string Alamat IP client
+conn["peerPort"] number Port client
+conn["protocol"] string Subprotocol yang dinegosiasikan (biasanya '')
+conn["headers"] dict Semua request header
+
+Method:
+
+Method Return Keterangan
+
+| `conn.send(msg)` | bool | Kirim text frame. `msg` dikonversi ke string |
+| `conn.sendBytes(data)` | bool | Kirim binary frame. `data` harus string (raw byte) |
+| `conn.close(code)` | bool | Kirim close frame dengan code (default `1000`) |
+
+Contoh:
+
+```pascal
+function onMessage(conn, msg) begin
+  if msg == "/whoami" then
+    conn.send("id=" + conn["id"] + " peer=" + conn["peerIP"]);
+    return;
+  end;
+  if msg == "/quit" then
+    conn.close(1000);
+    return;
+  end;
+  ws.broadcast(SRV, conn["id"] + ": " + msg);
+end;
+```
+
+Close Codes (RFC 6455 §7.4)
+
+Code Nama Keterangan
+1000 Normal Close normal
+1001 Going Away Server/client shutdown
+1002 Protocol Error Frame malformed
+1003 Unsupported Data Frame type tidak didukung
+1007 Invalid Payload Payload text bukan UTF-8 valid
+1008 Policy Violation Message melanggar policy
+1009 Too Large Frame > maxPayload
+1011 Internal Error Server error
+
+Code 1005 dan 1006 reserved — tidak boleh dikirim di wire (hanya muncul secara implisit).
+
+Catatan Implementasi
+
+· Threading model: setiap connection dijalankan di worker thread dedicated. Bukan worker pool — karena WS connection long-lived, akan memblok pool jika pakai 8-slot pool.
+· Fragmentasi: frame FIN=0 diikuti frame wsContinuation diakumulasi sampai FIN=1. Batas akumulasi = maxPayload.
+· Ping/pong: server otomatis balas pong saat terima ping. Auto-ping dari server datang setiap pingInterval ms.
+· Race condition pada variabel bersama: callback dijalankan di worker thread yang berbeda. Untuk counter bersama, gunakan lock block:
+  ```pascal
+  function onMessage(conn, msg) begin
+    lock begin
+      COUNTER := COUNTER + 1;
+    end;
+    conn.send("msg #" + str(COUNTER));
+  end;
+  ```
+· Broadcast thread-safe: internal SendLock per connection mencegah frame interleave.
+· Bukan scope v1: permessage-deflate compression, subprotocol negotiation response, HTTP/2 WebSocket.
+
+Contoh Lengkap
+
+Lihat examples/ws_echo.pas dan examples/ws_chat.pas.
+
+---
+
+### Request dict
+
+> ⚠️ **Penting**: `method`, `in`, `class`, `record`, dan keyword lain tidak
+> bisa diakses via dot notation. Pakai **indexing** atau ekstrak ke lokal.
+
+```pascal
+// ✅ Pakai indexing untuk keyword
+var method := req["method"];
+var path := req["path"];
+var body := req["body"];
+
+// ✅ Atau dot notation untuk non-keyword
+println(req.status);
+println(req.path);
+// println(req.method);  // ✗ ERROR — 'method' adalah keyword
+```
+
+**Isi dict**:
+
+```pascal
+{
+  "method": "GET",              // keyword — pakai req["method"]
+  "path": "/api/users",         // non-keyword — req.path OK
+  "query": "?page=1",           // non-keyword
+  "version": "HTTP/1.1",
+  "headers": {...},
+  "cookies": {...},
+  "body": "..."
+}
+```
+
+**Daftar keyword yang tidak bisa diakses via dot**:
+`if`, `then`, `else`, `case`, `of`, `while`, `do`, `begin`, `end`,
+`var`, `const`, `function`, `method`, `class`, `record`, `new`, `and`,
+`or`, `for`, `to`, `in`, `return`, `break`, `continue`, `not`, `mod`,
+`try`, `catch`, `finally`, `true`, `false`, `null`, `nil`, `import`,
+`repeat`, `until`, `lambda`, `lock`, `yield`, `defer`, `downto`,
+`step`, `throw`.
+
+### Response dict
+
+```pascal
+{
+  "status": 200,                         // default 200
+  "headers": {"Content-Type": "..."},   // auto Content-Type kalau kosong
+  "body": "response body",
+  "cookies": {"session": "abc123"},      // auto Set-Cookie; Path=/
+  "file": "path/to/file.html"            // static file (opsional, override body)
+}
+```
+
+---
+
+## Network
+
+### `net.listen(host, port) → socketHandle`
+
+Bind dan listen TCP.
+
+```pascal
+var srv := net.listen("0.0.0.0", 8080);
+```
+
+### `net.accept(serverHandle [, timeoutMs]) → clientHandle`
+
+Accept connection. Return -1 kalau timeout.
+
+### `net.connect(host, port [, timeoutMs]) → socketHandle`
+
+Connect TCP. DNS resolution via **pure Pascal resolver** (bypass libc
+kalau libc gagal).
+
+```pascal
+var sock := net.connect("example.com", 443);
+```
+
+### `net.send(sock, data) → int`
+
+Kirim raw bytes.
+
+### `net.recv(sock [, maxBytes]) → string`
+
+Terima raw bytes.
+
+### `net.recvTimeout(sock, maxBytes, timeoutMs) → string`
+
+Terima dengan timeout.
+
+### `net.close(sock) / net.isOpen(sock)`
+
+Lifecycle.
+
+### `net.peerIP(sock) / net.peerPort(sock)`
+
+Peer info.
+
+### `net.setNoDelay(sock, enabled)`
+
+Set `TCP_NODELAY`.
+
+### `net.diagnoseDNS(host) → string`
+
+Diagnostik resolver.
+
+---
+
+## TLS
+
+### `tls.init() / tls.shutdown() / tls.isLoaded() / tls.version()`
+
+Lifecycle manual. Biasanya otomatis saat `http.get` dipanggil.
+
+```pascal
+if not tls.isLoaded() then
+  tls.init();
+println("OpenSSL ", tls.version());
+```
+
+**Default verify**: aktif. Chain + hostname verify via `SSL_set1_host`.
+Override via `PASCAK_TLS_NO_VERIFY=1` + flag `--dev` (lihat
+"Env Variable Override" untuk detail security).
+
+
+**Shutdown safety**: library tidak di-unload saat exit (mencegah crash
+kalau ada koneksi aktif).
+
+---
+
+## SQLite
+
+### `sqliteConnect(path) → handle`
+
+Buka atau buat database SQLite.
+
+```pascal
+var db := sqliteConnect("example.db");
+```
+
+**Path resolution**: sandbox-relative. `libsqlite3.so` auto-configured
+dari `$PREFIX/lib/` di Termux.
+
+### `sqliteExec(handle, sql [, params]) → bool`
+
+Eksekusi SQL (INSERT, UPDATE, DELETE, CREATE).
+
+```pascal
+sqliteExec(db, "CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT)");
+sqliteExec(db, "INSERT INTO users (name) VALUES (?)", ["Alice"]);
+```
+
+**Param binding**: positional `?`, array `[...]`.
+
+### `sqliteQuery(handle, sql [, params]) → array of dict`
+
+SELECT query.
+
+```pascal
+var rows := sqliteQuery(db, "SELECT id, name FROM users WHERE id > ?", [0]);
+var i := 0;
+while i < len(rows) do
+begin
+  var r := rows[i];
+  println(r.id, ": ", r.name);
+  i := i + 1;
+end;
+```
+
+**Batas**: 10.000 baris per query.
+
+### `sqliteClose(handle) → bool`
+
+Tutup koneksi.
+
+**Contoh lengkap**:
+
+```pascal
+var db := sqliteConnect("example.db");
+
+sqliteExec(db, "CREATE TABLE IF NOT EXISTS users (" +
+               "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+               "name TEXT NOT NULL, email TEXT UNIQUE, age INTEGER)");
+
+sqliteExec(db, "DELETE FROM users");
+sqliteExec(db, "INSERT INTO users (name, email, age) VALUES (?, ?, ?)",
+           ["Alice", "alice@example.com", 30]);
+
+var rows := sqliteQuery(db, "SELECT * FROM users");
+println("Total: ", len(rows));
+
+sqliteClose(db);
+```
+
+---
+
+## Crypto
+
+Kriptografi modern, zero external dependency. Semua di `pascak_crypto.pas`.
+
+### Hashing
+
+```pascal
+crypto.sha256(data) → string       // 64 char hex, lowercase
+crypto.sha256Bytes(data) → string  // 32 byte raw
+crypto.sha1Hex(data) → string      // 40 char hex (legacy, prefer SHA-256)
+crypto.hmacSha256(key, msg) → string  // 64 char hex
+```
+
+**Contoh:**
+```pascal
+var h := crypto.sha256("hello");
+// "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+
+var mac := crypto.hmacSha256("secret-key", "message");
+```
+
+### AES (Symmetric Encryption)
+
+```pascal
+crypto.aesEncrypt(data, key, [iv], [mode]) → string
+crypto.aesDecrypt(ciphertext, key, [iv], [mode]) → string
+```
+
+- **Key:** 16 byte (AES-128), 24 byte (AES-192), atau 32 byte (AES-256)
+- **IV:** 16 byte (wajib untuk CBC, diabaikan untuk ECB)
+- **Mode:** `"cbc"` (default, aman) atau `"ecb"` (jangan pakai untuk data baru)
+- **Padding:** PKCS#7 otomatis
+
+**Contoh AES-256-CBC:**
+```pascal
+var key := "0123456789abcdef0123456789abcdef";  // 32 byte
+var iv := "abcdef0123456789";                    // 16 byte
+
+var ct := crypto.aesEncrypt("Rahasia!", key, iv, "cbc");
+var pt := crypto.aesDecrypt(ct, key, iv, "cbc");
+// pt = "Rahasia!"
+```
+
+**Catatan:** ECB **tidak butuh IV**, tapi **tidak recommended** — pola berulang plaintext tetap berulang di ciphertext. Pakai CBC atau CTR (belum ada, backlog).
+
+### PBKDF2 — Password Hashing
+
+```pascal
+crypto.pbkdf2Sha256(password, salt, iterations, keyLen) → string
+```
+
+- **iterations:** minimal 1000, recommended 100.000+ untuk password storage
+- **keyLen:** panjang output (byte)
+- Return: raw bytes (bukan hex)
+
+**Contoh:**
+```pascal
+// Password storage
+var salt := crypto.randomBytes(16);
+var hash := crypto.pbkdf2Sha256("user-password", salt, 100000, 32);
+// Simpan: { salt: base64Encode(salt), hash: base64Encode(hash) }
+
+// Verify
+var derived := crypto.pbkdf2Sha256("user-password", stored_salt, 100000, 32);
+if crypto.constantTimeEqual(derived, stored_hash) then
+  println("OK")
+else
+  println("Invalid");
+```
+
+**RFC 7914 §11 test vector:**
+```pascal
+var v := crypto.pbkdf2Sha256("password", "salt", 1, 32);
+// hex: 120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b
+```
+
+### Secure Random
+
+```pascal
+crypto.randomBytes(n) → string     // n byte raw
+crypto.randomHex(n) → string       // 2n char hex
+```
+
+**Source:** `/dev/urandom` (Unix) atau `CryptGenRandom` (Windows).
+
+**Contoh:**
+```pascal
+var token := crypto.randomHex(32);   // 64 char hex, untuk session token
+var salt := crypto.randomBytes(16);  // 16 byte raw, untuk PBKDF2
+```
+
+### Utilities
+
+```pascal
+crypto.constantTimeEqual(a, b) → bool   // timing-safe compare
+crypto.hexToBytes(hex) → string          // "deadbeef" → 4 raw bytes
+```
+
+`constantTimeEqual` — pakai untuk bandingkan password hash / MAC. Mencegah timing attack yang bisa bocorkan informasi via perbedaan waktu compare.
+
+### Base64
+
+```pascal
+crypto.base64Encode(data) → string
+crypto.base64Decode(s) → string
+```
+
+Standard RFC 4648. Padding `=` included.
+
+### Best Practices
+
+| Skenario | Algoritma |
+|----------|-----------|
+| Password hash | **PBKDF2-SHA256**, iter ≥ 100.000 |
+| Session token | `randomHex(32)` |
+| Symmetric encryption | **AES-256-CBC**, random IV per message |
+| Data integrity | `hmacSha256` |
+| Hash umum | **SHA-256** (jangan MD5, SHA-1) |
+| Legacy compat | SHA-1 (read-only) |
+
+**Anti-pattern:**
+```pascal
+// JANGAN — password tanpa salt
+var h := crypto.sha256(password);
+
+// JANGAN — ECB untuk data multi-block
+var ct := crypto.aesEncrypt(data, key, "", "ecb");
+
+// JANGAN — IV reuse antar message
+var ct1 := crypto.aesEncrypt(msg1, key, iv, "cbc");
+var ct2 := crypto.aesEncrypt(msg2, key, iv, "cbc");
+```
+
+**Pattern yang aman:**
+```pascal
+// Password storage
+var salt := crypto.randomBytes(16);
+var hash := crypto.pbkdf2Sha256(password, salt, 100000, 32);
+
+// Per-message encryption dengan IV acak
+var iv := crypto.randomBytes(16);
+var ct := crypto.aesEncrypt(msg, key, iv, "cbc");
+// Simpan (iv || ct) atau (iv, ct) terpisah
+```
+
+## Filesystem
+
+Filesystem operations — sinkron (`fs.*`) dan asinkron (`fs.*Async`).
+Semua operasi melewati **sandbox**: path absolut & `..` ditolak kecuali
+relative terhadap direktori script.
+
+### Sandbox Rules
+
+| Path pattern | Behaviour |
+|---|---|
+| `"data.txt"` | Relative ke direktori script — ✅ OK |
+| `"sub/file.txt"` | Relative — ✅ OK |
+| `"../secret"` | Escape sandbox — ❌ Raised |
+| `"/etc/passwd"` | Absolute — ❌ Raised |
+| `"file\x00.txt"` | Control chars stripped | 
+| `$HOME/...` | Diizinkan HANYA untuk cert path di `serveTLS` |
+
+Symlink di dalam sandbox yang menunjuk ke luar → **di-resolve via
+`realpath()`** dulu, baru boundary check. Jadi `ln -s /etc escape`
+akan ditolak saat diakses via `fs.read(escape/passwd)`.
+
+---
+
+### Sync API
+
+#### `fs.glob(baseDir, pattern) → array`
+
+Cari file dengan glob pattern.
+
+**Pattern wildcards:**
+
+| Wildcard | Match |
+|---|---|
+| `*` | Semua karakter kecuali `/` |
+| `?` | Satu karakter kecuali `/` |
+| `**` | Semua karakter termasuk `/` (recursive) |
+
+```pascal
+// Semua .pas di direktori script
+var pasc := fs.glob(".", "*.pas");
+println(pasc);   // ["main.pas", "utils.pas", ...]
+
+// Recursive semua .txt di subfolder
+var txts := fs.glob(".", "**/*.txt");
+
+// Satu karakter wildcard
+var single := fs.glob(".", "file?.txt");   // file1.txt, fileA.txt, ...
+```
+
+Return: array string relative ke baseDir. Empty array kalau baseDir tidak ada.
+
+Catatan: . dan .. di-skip otomatis. Direktori di-include kalau pattern match (bukan cuma file).
+
+---
+
+fs.walkDir(path, [maxDepth]) → array
+
+Recursive listing — semua entry (file + directory).
+
+Parameter:
+
+· path (string) — direktori root
+· maxDepth (int, opsional) — 0 = unlimited, N = stop di kedalaman N
+
+```pascal
+// Semua file + dir recursive
+var all := fs.walkDir(".", 0);
+
+// Cuma 2 level pertama
+var shallow := fs.walkDir(".", 2);
+
+for entry in all do
+  println(entry);
+```
+
+Return: array path relative ke path. Direktori berakhiran / (mis. "src/", "src/sub/").
+
+Ordering: tidak dijamin — implementasi pakai OS directory iteration order.
+
+---
+
+fs.stat(path) → dict | null
+
+Metadata file/directory.
+
+```pascal
+var info := fs.stat("main.pas");
+if info != null then begin
+  println("size: ", info.size);           // byte
+  println("mtime: ", info.mtime);         // Unix timestamp (sec)
+  println("isDir: ", info.isDir);         // bool
+  println("isFile: ", info.isFile);       // bool
+  println("perm: ", info.permissions);    // 0..0777 (Unix-style)
+end;
+```
+
+Return: dict atau null kalau tidak ada.
+
+Permissions:
+
+· Unix: raw st_mode & 0777 (mis. 0644 = rw-r--r--)
+· Windows: 0444 untuk readonly, 0755 untuk directory, 0666 untuk file
+
+---
+
+fs.copy(src, dst, [recursive]) → bool
+
+Copy file atau directory.
+
+```pascal
+// Copy file
+fs.copy("input.txt", "output.txt");
+
+// Copy directory (harus recursive=true)
+fs.copy("src", "backup/src", true);
+```
+
+Parameter:
+
+· recursive (bool, opsional) — default false. Directory copy butuh true, kalau tidak akan return false.
+
+Return: True kalau sukses, False kalau gagal.
+
+Behaviour: file di-copy dengan fmCreate (overwrite). Directory target dibuat otomatis.
+
+---
+
+fs.move(src, dst) → bool
+
+Rename / move file atau directory.
+
+```pascal
+fs.move("old.txt", "new.txt");
+fs.move("src", "src-backup");
+```
+
+Return: True kalau sukses.
+
+Catatan: ini rename atomik (syscall rename(2)), bukan copy+delete. Cross-filesystem move akan gagal — pakai fs.copy + fs.rmDir manual.
+
+---
+
+fs.chmod(path, mode) → bool
+
+Ubah permission.
+
+```pascal
+fs.chmod("script.sh", 493);   // 493 = 0755 (rwxr-xr-x)
+fs.chmod("data.txt", 420);    // 420 = 0644 (rw-r--r--)
+```
+
+Parameter:
+
+· mode (int) — permission dalam bentuk decimal dari octal Unix
+  · 0644 octal = 420 decimal
+  · 0755 octal = 493 decimal
+  · 0600 octal = 384 decimal
+
+Return: True kalau sukses.
+
+Windows: hanya readonly bit yang di-honor — mode & 0x80 = 0 → readonly; selain itu writable.
+
+Helper octal → decimal:
+
+```pascal
+// Kalau mau pakai literal octal, hitung manual:
+// 0o755 = 7*64 + 5*8 + 5 = 448 + 40 + 5 = 493
+var mode755 := 493;
+```
+
+---
+
+fs.tempFile([prefix]) → string
+
+Buat file temporary yang kosong dan aman (unique nama).
+
+```pascal
+var path := fs.tempFile("upload_");
+println(path);   // ".pascak_tmp/upload_A3F2B1C8_00000001.tmp"
+
+fileWrite(path, "data sementara");
+// ... gunakan ...
+fileDelete(path);
+```
+
+Parameter:
+
+· prefix (string, opsional) — default "pascak_"
+
+Return: path relative ke direktori script. File sudah dibuat (empty) dengan fmCreate or fmShareExclusive.
+
+Lokasi: <scriptDir>/.pascak_tmp/. Folder dibuat otomatis.
+
+Unique: gabungan tick count + counter atomik. Retry sampai 100× kalau collision (sangat jarang).
+
+---
+
+fs.rmDir(path, [recursive]) → bool
+
+Hapus file atau directory.
+
+```pascal
+// Hapus file
+fs.rmDir("temp.txt");
+
+// Hapus directory kosong
+fs.rmDir("empty-folder");
+
+// Hapus directory recursive
+fs.rmDir("old-project", true);
+```
+
+Parameter:
+
+· recursive (bool, opsional) — default false. Directory non-kosong butuh true.
+
+Return: True kalau sukses.
+
+Naming note: meski namanya rmDir, fungsi ini juga menghapus file. Kalau path adalah file → DeleteFile. Kalau directory → RemoveDir (atau recursive kalau flag true).
+
+Retry logic: file yang di-lock (mobile filesystem) akan di-retry 3× dengan delay 20ms.
+
+---
+
+Async API (Fase 1.3)
+
+Non-blocking filesystem I/O. Untuk file besar atau batch operation
+yang tidak boleh block event loop.
+
+Kapan pakai async FS:
+
+· Baca/tulis file > 1 MB
+· Batch > 10 file
+· Di dalam WS/HTTP callback (jangan block event loop)
+
+Kapan pakai sync FS:
+
+· Script top-level, one-shot
+· File kecil (< 100 KB)
+· Setup/init code
+
+---
+
+fs.readAsync(path, [callback]) → taskID
+
+Baca file di worker thread, return immediately.
+
+```pascal
+// Pattern callback — auto-cleanup
+fs.readAsync("big.log", lambda r : begin
+  if r["ok"] then
+    println("read ", r["bytesRead"], " bytes")
+  else
+    println("error: ", r["error"]);
+end);
+
+// Script lanjut — callback fire saat selesai
+println("reading in background...");
+```
+
+Parameter:
+
+· path (string) — path sandbox-relative
+· callback (function, opsional) — dipanggil di main event loop saat selesai
+
+Return: taskID (integer ≥ 1).
+
+Callback argument (dict):
+
+Field Tipe Kapan ada
+ok bool Selalu
+data string Kalau ok = true
+bytesRead int Kalau ok = true
+path string Kalau ok = true
+error string Kalau ok = false
+
+Batasan: max 64 MB per file. File lebih besar → {ok: false, error: "file too large..."}.
+
+Tanpa callback — pakai poll pattern:
+
+```pascal
+var t := fs.readAsync("data.txt");
+while true do begin
+  var r := fs.pollAsync(t);
+  if r != null then begin
+    if r["ok"] then println(r["data"]);
+    fs.freeAsync(t);   // ← WAJIB
+    break;
+  end;
+  sleep(10);
+end;
+```
+
+---
+
+fs.writeAsync(path, data, [callback]) → taskID
+
+Tulis file (overwrite).
+
+```pascal
+fs.writeAsync("out.txt", "Hello, world!", lambda r : begin
+  if r["ok"] then
+    println("wrote ", r["bytesWritten"], " bytes")
+  else
+    println("error: ", r["error"]);
+end);
+```
+
+Callback fields: {ok, bytesWritten, path} atau {ok: false, error}.
+
+File mode: fmCreate or fmShareDenyWrite — file lama di-truncate.
+
+---
+
+fs.appendAsync(path, data, [callback]) → taskID
+
+Append ke file (buat kalau belum ada).
+
+```pascal
+fs.appendAsync("log.txt", "[INFO] started\n");
+fs.appendAsync("log.txt", "[INFO] ready\n");
+```
+
+Callback fields: {ok, bytesWritten, path} atau {ok: false, error}.
+
+Fallback: kalau file belum ada → open dengan fmCreate.
+
+---
+
+fs.pollAsync(taskID) → dict | null
+
+Non-blocking poll hasil task.
+
+```pascal
+var r := fs.pollAsync(t);
+if r == null then
+  println("masih jalan...")
+else
+  println("selesai: ", r["ok"]);
+```
+
+Return:
+
+· dict — task selesai
+· null — masih pending/running, atau taskID invalid
+
+Catatan: pollAsync tidak auto-free task. Panggil fs.freeAsync(t) setelah selesai (kalau task dibuat tanpa callback).
+
+---
+
+fs.waitAsync(taskID, [timeoutMs]) → dict | null
+
+Blocking wait — untuk script top-level.
+
+```pascal
+var t := fs.readAsync("config.json");
+var r := fs.waitAsync(t, 5000);   // timeout 5 detik
+
+if r != null then
+  println(r["data"])
+else
+  println("timeout");
+
+fs.freeAsync(t);
+```
+
+Return:
+
+· dict — selesai dalam timeout
+· null — timeout, atau taskID invalid
+
+Timeout = 0 → tunggu tanpa batas.
+
+⚠️ Jangan pakai di callback — blocking akan freeze event loop.
+
+---
+
+fs.cancelAsync(taskID) → bool
+
+Batalkan task yang masih PENDING (belum mulai).
+
+```pascal
+var t := fs.readAsync("huge.dat");
+if fs.cancelAsync(t) then
+  println("cancelled")
+else
+  println("sudah jalan, tidak bisa cancel");
+```
+
+Return: True kalau berhasil cancel, False kalau task sudah running/done.
+
+Batasan: task yang sudah RUNNING (worker sudah mulai baca/tulis) tidak bisa di-cancel. Cancel hanya bekerja pada window kecil antara Enqueue dan worker start.
+
+---
+
+fs.freeAsync(taskID) → bool
+
+Free task dari registry. Wajib untuk task tanpa callback.
+
+```pascal
+var t := fs.readAsync("file.txt");   // tanpa callback
+var r := fs.waitAsync(t);
+fs.freeAsync(t);   // ← cleanup
+```
+
+Return: True kalau task valid, False kalau sudah free.
+
+Auto-free: task dengan callback auto-free setelah callback dipanggil. Task tanpa callback → manual free.
+
+---
+
+Contoh Lengkap — Batch Read
+
+Baca 20 file log paralel, agregasi total baris.
+
+```pascal
+var totalLines := 0;
+var done := 0;
+var files := fs.glob("./logs", "*.log");
+
+function onResult(r) begin
+  lock begin
+    done := done + 1;
+  end;
+
+  if r["ok"] then begin
+    var lines := len(r["data"].split("\n"));
+    lock begin
+      totalLines := totalLines + lines;
+    end;
+    println("[", done, "/", len(files), "] ", r["path"], ": ", lines, " lines");
+  end else
+    println("[", done, "/", len(files), "] FAIL: ", r["error"]);
+end;
+
+begin
+  println("reading ", len(files), " files...");
+
+  for f in files do
+    fs.readAsync("./logs/" + f, onResult);
+
+  // Event loop tunggu semua callback
+  while done < len(files) do
+    sleep(100);
+
+  println("Total: ", totalLines, " lines");
+end.
+```
+
+Contoh Lengkap — Copy Recursive Async
+
+```pascal
+var queue := fs.glob("./src", "**/*.txt");
+var pending := len(queue);
+var copied := 0;
+
+function onWrite(r) begin
+  lock begin
+    pending := pending - 1;
+    if r["ok"] then copied := copied + 1;
+  end;
+end;
+
+begin
+  for src in queue do begin
+    var data := fileRead("./src/" + src);      // sync read — atau readAsync
+    var dst := "./backup/" + src;
+    makeDir(extractDirName(dst));               // helper manual
+    fs.writeAsync(dst, data, onWrite);
+  end;
+
+  while pending > 0 do sleep(50);
+  println("Copied ", copied, "/", len(queue), " files");
+end.
+```
+
+Lihat juga: examples/fs_async_demo.pas untuk demo lengkap.
+
+---
+
+```
+
+## Parser Tips
+
+### `if...then...else` adalah STATEMENT, bukan expression
+
+```pascal
+// ❌ Tidak valid di lambda expression body:
+lambda a, b : if a < b then -1 else 1
+
+// ✅ Pakai ternary:
+lambda a, b : a < b ? -1 : 1
+
+// ✅ Atau pakai named function:
+function cmp(a, b) begin
+  if a < b then return -1;
+  return 1
+end;
+```
+
+### Tidak ada `elif`
+
+Gunakan sequential `if`:
+
+```pascal
+// ❌ elif bukan keyword
+if x = 1 then ... elif x = 2 then ...
+
+// ✅ Sequential if
+if x = 1 then begin ... end;
+if x = 2 then begin ... end;
+```
+
+### Tidak ada `var` inline di tengah blok
+
+Deklarasi di awal function:
+
+```pascal
+// ❌ Tidak valid
+if x > 0 then var y := 2;
+
+// ✅
+var y := 0;
+if x > 0 then y := 2;
+```
+
+### F-String
+
+```pascal
+var name := "Pascak";
+var version := 3;
+println(f"Hello {name} v{version}!");
+println(f"2 + 2 = {2 + 2}");
+```
+
+### Dictionary Access
+
+Dot notation tidak bisa dipakai untuk keyword. Pakai indexing:
+
+```pascal
+var d := {"method": "GET", "path": "/"};
+var m := d["method"];       // ✅
+var p := d.path;             // ✅ (non-keyword)
+```
+
+### Named Function vs Lambda
+
+Keduanya bisa dipakai di `dll.callback`:
+
+```pascal
+function cmpAsc(a, b) begin
+  if a < b then return -1;
+  return 1
+end;
+
+// Named
+var cb1 := dll.callback("ii->i", cmpAsc);
+
+// Lambda
+var cb2 := dll.callback("ii->i", lambda a, b : a < b ? -1 : 1);
+```
+
+---
+
+## Sandbox
+
+Script dibatasi:
+
+- File I/O hanya di direktori script dan subdirektori
+- Tidak bisa akses path absolut (kecuali whitelist sistem lib untuk `dll.load`)
+- Tidak bisa akses `/etc/passwd`, `/proc/self/environ`, dll
+- FFI quota: max 10 library loaded
+- Memory quota: default 256 MB
+
+
+**Bypass** (development — membutuhkan `--dev`):
+
+```bash
+PASCAK_TLS_NO_VERIFY=1 ./pascak --dev script.pas     # skip TLS cert verify
+``````
+⚠️ Sejak Fase 1.4, bypass env hanya berlaku dengan --dev. Ini
+mencegah production deployment tidak sengaja mem-bypass security.
+
+---
+
+
+
+## Package Manager
+
+Sistem package manager untuk modul ecosystem. Mirip `npm` / `cargo` / `pub` — tapi sederhana.
+
+### Manifest — `pascak.json`
+
+Setiap project/module punya manifest di root:
+
+```json
+{
+  "name": "@myorg/utils",
+  "version": "1.2.3",
+  "description": "Utility functions",
+  "main": "src/index.pas",
+  "author": "you@example.com",
+  "license": "MIT",
+  "dependencies": {
+    "@pascak/crypto": "^2.0.0",
+    "@pascak/http": "~1.5.0"
+  },
+  "scripts": {
+    "test": "pascak test.pas"
+  }
+}
+```
+
+**Field wajib:** `name`, `version`.
+**Field opsional:** `main` (default `main.pas`), `description`, `author`, `license`, `dependencies`, `scripts`.
+
+**Nama package** — lowercase, alfanumerik, `-`, `_`. Optional scope `@scope/name`.
+
+### Version Constraint — Semver
+
+| Constraint | Arti |
+|------------|------|
+| `1.2.3` | Exact |
+| `^1.2.3` | `>=1.2.3 <2.0.0` (compatible) |
+| `~1.2.3` | `>=1.2.3 <1.3.0` (patch only) |
+| `>=1.2.0` | Range |
+| `<=2.0.0` | Range |
+| `1.x` | `>=1.0.0 <2.0.0` |
+| `1.2.x` | `>=1.2.0 <1.3.0` |
+| `*` | Any |
+| `^1.0.0 \|\| >=2.0.0` | OR |
+
+### Registry Structure (Local)
+
+```
+<registry>/
+  @scope/name/
+    1.0.0/
+      pascak.json
+      main.pas
+    1.5.0/
+      pascak.json
+  simple-pkg/
+    1.0.0/
+      pascak.json
+```
+
+Registry bisa folder lokal, atau HTTP server (implementasi v2). Untuk sekarang, folder lokal.
+
+### Lockfile — `pascak.lock`
+
+Auto-generated saat `pkg.install`. Berisi resolusi pinned:
+
+```json
+{
+  "lockfileVersion": 1,
+  "resolved": {
+    "@a/lib": {
+      "version": "1.0.0",
+      "resolved": "file:///path/to/registry/@a/lib/1.0.0",
+      "integrity": "sha256-..."
+    }
+  }
+}
+```
+
+**Commit lockfile ke VCS** untuk reproducibility.
+
+### Native API
+
+#### `pkg.resolve(registryDir, manifestPath) → dict`
+
+Resolve dependency graph tanpa install. Return:
+```pascal
+{
+  "ok": true,
+  "resolved": {
+    "@a/lib": {
+      "version": "1.0.0",
+      "url": "file://...",
+      "integrity": "sha256-..."
+    }
+  }
+}
+```
+
+#### `pkg.install([registryDir], [projectDir]) → dict`
+
+Resolve + copy packages ke `projectDir/packages/` + write `pascak.lock`.
+
+Default `projectDir` = cwd. Default `registryDir` = `./registry/` (relatif).
+
+Return:
+```pascal
+{"ok": true, "installed": ["@a/lib@1.0.0", ...], "projectDir": "..."}
+```
+
+#### `pkg.list([projectDir]) → dict`
+
+Read `pascak.lock`, return list installed packages:
+
+```pascal
+{"ok": true, "packages": ["@a/lib@1.0.0"], "projectDir": "..."}
+```
+
+### Import Resolution
+
+Setelah `pkg.install`, script bisa `import("@scope/name")`:
+
+```pascal
+begin
+  var lib := import("@a/lib");
+  println(lib["version"]);
+  println(lib["greet"]("World"));
+end.
+```
+
+Engine resolve `@scope/name`:
+1. Cari project root (walk up dari file caller, cari `pascak.json` + `packages/`)
+2. Load `packages/@scope/name/pascak.json`
+3. Resolve ke `main` field (default `main.pas`)
+4. Import sebagai module normal
+
+**Subpath:** `import("@a/lib/utils/format")` → load `packages/@a/lib/utils/format.pas`.
+
+### Workflow
+
+```bash
+# 1. Inisialisasi project
+mkdir my-app && cd my-app
+cat > pascak.json << 'EOF'
+{"name":"my-app","version":"1.0.0","dependencies":{"@a/lib":"^1.0.0"}}
+EOF
+
+# 2. Install (via script)
+cat > install.pas << 'EOF'
+begin
+  var r := pkg.install("/path/to/registry");
+  if r["ok"] then
+    println("installed: ", jsonStringify(r["installed"]))
+  else
+    println("error: ", r["error"]);
+end.
+EOF
+
+PASCAK_EXEC_POLICY=allow-all ~/pascak_noASTnet --dev install.pas
+
+# 3. Gunakan
+cat > main.pas << 'EOF'
+begin
+  var lib := import("@a/lib");
+  println(lib["greet"]("World"));
+end.
+EOF
+
+PASCAK_EXEC_POLICY=allow-all ~/pascak_noASTnet --dev main.pas
+```
+
+### Design Notes
+
+- **Local-first**: v1 fokus folder lokal. HTTP registry v2.
+- **Semver**: cukup untuk ecosystem kecil. DFS+backtracking, bukan SAT solver.
+- **Full trust**: package code punya akses penuh engine API. Sandbox v2.
+- **Lockfile integrity**: SHA-256 dari manifest file (v2: Merkle tree folder).
+
+---
+
+## Security — Exec Policy
+
+`sys.exec` di-deny by default. Semua subprocess harus lulus **exec policy** sebelum spawn.
+
+### Konsep
+
+| Layer | Fungsi |
+|-------|--------|
+| **Whitelist** | Binary harus terdaftar |
+| **Path resolve** | Search di PATH aman, bukan PATH attacker |
+| **rlimit** | CPU / mem / fd / subprocess bounded |
+| **Env sanitize** | Strip `LD_PRELOAD`, `PYTHONPATH`, dll |
+| **Concurrent limit** | Max subprocess paralel |
+| **Output limit** | Max byte stdout+stderr |
+| **Force kill** | SIGTERM → tunggu 1s → SIGKILL |
+| **Audit log** | Opsional — log tiap exec |
+| **Shutdown cleanup** | SIGKILL semua child saat engine exit |
+
+### Default Policy
+
+Deny-all. Tidak ada satu binary pun yang boleh exec sampai host / script mengizinkan.
+
+```
+mode               = "none"
+binaries           = []
+maxConcurrent      = 8
+maxOutputBytes     = 10 MB
+cpuSec             = 60
+memoryBytes        = 512 MB
+fileSizeBytes      = 50 MB
+openFiles          = 256
+subprocesses       = 64
+envAllow           = HOME, LANG, LC_ALL, PATH, PREFIX, TERM, TMPDIR, USER
+envDeny            = LD_PRELOAD, LD_LIBRARY_PATH, LD_AUDIT,
+                     PYTHONPATH, PYTHONSTARTUP,
+                     NODE_OPTIONS, NODE_PATH, RUBYOPT
+auditLog           = ""
+```
+
+### Host-Level API
+
+```pascal
+// Set policy
+Engine.SetExecPolicy({
+  "mode":           "whitelist",
+  "binaries":       ["git", "ls", "python3", "pandoc"],
+  "envAllow":       ["HOME", "PATH", "TMPDIR", "LANG"],
+  "envSet":         {"PATH": "/usr/bin:/bin"},
+  "cwd":            "/sandbox",
+  "maxConcurrent":  8,
+  "maxOutputBytes": 10485760,
+  "limits": {
+    "enabled":       true,
+    "cpuSec":        30,
+    "memoryBytes":   268435456,
+    "fileSizeBytes": 10485760,
+    "openFiles":     64,
+    "subprocesses":  16
+  },
+  "auditLog":       "/var/log/pascak-exec.log"
+});
+
+// Setelah SetExecPolicy, script tidak bisa override
+Engine.LockExecPolicy;
+```
+
+```pascal
+// Set policy dari JSON
+Engine.SetExecPolicyFromJson(
+  '{"mode": "whitelist", "binaries": ["git"]}');
+```
+
+**`Engine.SetExecPolicy` otomatis set `ExecScriptPolicyLocked`.** Kalau script memanggil `sys.execPolicy`, akan raise error "host telah mengunci policy".
+
+### Script-Level API
+
+Untuk dev/test. Hanya bekerja kalau host belum panggil `LockExecPolicy`.
+
+```pascal
+// Convenience: mode=whitelist + daftar binary
+sys.execWhitelist(["python3", "git"]);
+
+// Dev only — disables policy. Warning ke stderr.
+sys.execAllowAll();
+
+// Full config (dict — sama format dengan SetExecPolicy)
+sys.execPolicy({
+  "mode":     "whitelist",
+  "binaries": ["python3"]
+});
+
+// Query policy aktif
+var info := sys.execInfo();
+// info = {
+//   mode: "whitelist",
+//   binaries: [...],
+//   activeProcesses: N,
+//   maxConcurrent: N,
+//   maxOutputBytes: N,
+//   auditLog: ""
+// }
+```
+
+### `sys.exec` Behavior
+
+**Binary di-whitelist:**
+```pascal
+var r := sys.exec("echo", ["hello"]);
+// r = { exitCode: 0, stdout: "hello\n", stderr: "", denied: false }
+```
+
+**Binary di-deny:**
+```pascal
+var r := sys.exec("cat", ["/etc/passwd"]);
+// r = {
+//   exitCode: -1,
+//   stdout: "",
+//   stderr: "",
+//   denied: true,
+//   error: "exec denied: binary \"cat\" tidak ada di whitelist"
+// }
+```
+
+`sys.exec` **tidak raise** saat policy denial — return error dict. Script harus cek `r["denied"]`.
+
+**Kalau binary not found, fork fail, timeout, dll** → tetap raise (bukan policy issue).
+
+
+### `sys.execAsync(cmd, args, [callback], [timeoutMs]) → taskID`
+
+Non-blocking exec. Spawn subprocess di worker thread, return **immediately** dengan taskID (integer ≥ 1).
+
+Callback (opsional) dipanggil dari **main event loop thread** saat subprocess selesai — aman untuk akses TValue.
+
+**Parameter:**
+- `cmd` (string) — binary name
+- `args` (array) — argumen
+- `callback` (function, opsional) — dipanggil dengan result dict saat selesai
+- `timeoutMs` (int, opsional) — timeout dalam ms. `0` = tanpa batas
+
+**Return:** taskID integer.
+
+```markdown
+**Error contract:**
+
+Callback menerima dict dengan field standar:
+
+| Field | Tipe | Deskripsi |
+|-------|------|-----------|
+| `exitCode` | int | -1 kalau di-deny / crash, 0+ untuk exit normal |
+| `stdout` | string | Output stdout (mungkin truncated kalau > maxOutputBytes) |
+| `stderr` | string | Output stderr |
+| `denied` | bool | true kalau exec policy menolak |
+| `error` | string | Pesan error (optional) |
+
+**Crash marker (Fase 1.5):**
+
+Kalau worker thread crash (exception di luar subprocess normal), dict
+berisi marker tambahan:
+
+| Field | Tipe | Deskripsi |
+|-------|------|-----------|
+| `__worker_crash` | bool | true kalau worker crash |
+| `__worker_kind` | string | Nama kelas exception (mis. `EScriptRuntimeError`) |
+
+**Cara pakai:**
+
+```pascal
+sys.execAsync("git", ["status"], lambda r : begin
+  if r.hasKey("__worker_crash") then
+    println("worker crash: ", r["__worker_kind"], ": ", r["error"])
+  else if r["denied"] then
+    println("denied: ", r["error"])
+  else
+    println("exit: ", r["exitCode"]);
+end);
+```
+
+Marker ini juga di-set oleh poolRun dan http.getAsync saat worker
+crash.
+
+```
+
+---
+
+**Mode 1 — Callback (recommended):**
+```pascal
+sys.execWhitelist(["git"]);
+
+sys.execAsync("git", ["status"], lambda r : begin
+  if r["denied"] then
+    println("security block: ", r["error"])
+  else
+    println(r["stdout"]);
+end);
+
+// Script lanjut eksekusi tanpa block.
+// Callback dipanggil saat subprocess selesai.
+```
+
+**Mode 2 — Poll (tanpa callback):**
+```pascal
+var t := sys.execAsync("git", ["status"]);
+
+while true do begin
+  var r := sys.execPoll(t);
+  if r != nil then begin
+    println(r["stdout"]);
+    sys.execFree(t);   // WAJIB — free task
+    break;
+  end;
+  sleep(50);
+end;
+```
+
+### `sys.execPoll(taskID) → dict|null`
+
+Polling non-blocking. Return:
+- **dict** — task selesai, hasil
+- **null** — task masih jalan
+
+**Catatan:** `execPoll` **tidak** auto-free task. Script harus panggil `sys.execFree(t)` setelah selesai.
+
+### `sys.execWait(taskID, [timeoutMs]) → dict|null`
+
+Blocking wait. Return:
+- **dict** — task selesai dalam timeout
+- **null** — timeout atau taskID invalid
+
+**Catatan:** Jangan pakai di callback yang sering — blocking. Untuk script top-level saja.
+
+### `sys.execCancel(taskID) → bool`
+
+Cancel pending task. Hanya bekerja kalau task masih `PENDING` (belum mulai dieksekusi).
+
+**Return:** `True` kalau berhasil cancel, `False` kalau task sudah running/done.
+
+### `sys.execFree(taskID) → bool`
+
+Free task resources. **Wajib** dipanggil untuk task yang dibuat **tanpa callback**.
+
+Task dengan callback auto-free setelah callback dipanggil.
+
+**Return:** `True` kalau task valid, `False` kalau sudah free.
+
+### `sys.execPending() → int`
+
+Jumlah task aktif (pending + running). Berguna untuk backpressure.
+
+```pascal
+while sys.execPending() >= 8 do
+  sleep(50);
+sys.execAsync("worker", []);
+```
+
+### Kapan Pakai `execAsync` vs `exec`
+
+| Skenario | Pakai |
+|----------|-------|
+| Script top-level, blocking OK | `sys.exec` |
+| Event loop aktif (WS, HTTP) | **`sys.execAsync`** |
+| Butuh capture output + wait | `sys.exec` |
+| Fire-and-forget dengan callback | `sys.execAsync` |
+| Parallel N subprocess | `sys.execAsync` × N |
+
+**Jangan** pakai `sys.exec` di callback WS/HTTP — freeze event loop.
+
+**Jangan** pakai `sys.execAsync` di script simple tanpa event loop — overhead thread tidak worth.
+
+### Best Practices
+
+```pascal
+// ✅ BAIK — callback, auto-cleanup
+sys.execAsync("git", ["pull"], lambda r : begin
+  if r["exitCode"] != 0 then
+    println("git pull failed: ", r["stderr"]);
+end);
+
+// ✅ BAIK — parallel dengan pending counter
+var tasks := [];
+var i := 0;
+while i < 10 do begin
+  push(tasks, sys.execAsync("worker", [str(i)]));
+  i := i + 1;
+end;
+// Wait all
+var j := 0;
+while j < len(tasks) do begin
+  sys.execWait(tasks[j], 5000);
+  sys.execFree(tasks[j]);
+  j := j + 1;
+end;
+
+// ❌ BURUK — poll tanpa free → memory leak
+var t := sys.execAsync("echo", ["x"]);
+var r := sys.execPoll(t);
+println(r["stdout"]);
+// lupa sys.execFree(t) — task nyangkut di registry
+
+// ❌ BURUK — exec (blocking) di callback WS
+function onMessage(conn, msg) begin
+  var r := sys.exec("git", ["status"]);   // ← freeze event loop
+  conn.send(r["stdout"]);
+end;
+```
+
+### Lifecycle
+
+| Event | Yang Terjadi |
+|-------|--------------|
+| `execAsync` dipanggil | Task dibuat, worker thread spawn, status = PENDING |
+| Worker mulai | Status = RUNNING |
+| Subprocess selesai | Status = DONE, ResultVal diset |
+| Event loop tick | `ProcessExecCallbacks` cek task DONE dengan callback → invoke + auto-free |
+| `execFree` manual | Task dihapus dari registry + di-free (untuk task tanpa callback) |
+| Engine shutdown | `FreeExecTasks` cancel + free semua task |
+
+### Thread Safety
+
+- Task dijalankan di **worker thread** (isolated)
+- Callback dijalankan di **main event loop thread** (aman TValue)
+- Registry `GExecTasks` dilindungi critical section
+- Result TValue di-`Clone` sebelum di-pass ke callback → ownership caller
+
+---
+
+### Env Sanitization
+
+Default: 8 env var di-allow, 8 di-strip.
+
+**Allow** (pass through parent):
+```
+HOME, LANG, LC_ALL, PATH, PREFIX, TERM, TMPDIR, USER
+```
+
+**Deny** (strip):
+```
+LD_PRELOAD, LD_LIBRARY_PATH, LD_AUDIT,
+PYTHONPATH, PYTHONSTARTUP,
+NODE_OPTIONS, NODE_PATH, RUBYOPT
+```
+
+`EnvDeny` **prioritas di atas** `EnvAllow` — kalau variabel ada di dua list, di-strip.
+
+`EnvSet` **force set** di child — override inherit.
+
+
+```markdown
+### Env Variable Override
+
+> ⚠️ **Sejak versi 2.4 (Fase 1.4):** env override hanya berlaku bila
+> `--dev` di-pass sebagai CLI flag. Tanpa flag ini, `PASCAK_EXEC_POLICY`
+> dan `PASCAK_TLS_NO_VERIFY` **diabaikan total** (production default).
+
+**Alasan:** mencegah privilege escalation via env poisoning. Attacker
+yang bisa mengontrol environment variable (mis. via systemd unit,
+wrapper script, atau parent process) tidak bisa bypass exec policy
+atau TLS verify tanpa juga bisa mengontrol argv proses.
+
+**Cara pakai:**
+
+```bash
+# Development
+PASCAK_EXEC_POLICY=none ./pascak --dev script.pas                     # deny all (default aman)
+PASCAK_EXEC_POLICY=allow-all ./pascak --dev script.pas                # dev mode
+PASCAK_EXEC_POLICY=whitelist:python3,git,ls ./pascak --dev test.pas   # whitelist
+PASCAK_TLS_NO_VERIFY=1 ./pascak --dev debug_https.pas                 # skip TLS verify
+
+# Production (env diabaikan, hanya host-level API yang berlaku)
+./pascak script.pas                                # policy = none
+```
+
+Untuk production/embedded: gunakan Engine.SetExecPolicy +
+Engine.LockExecPolicy dari host code. Ini tidak bisa di-override
+oleh script maupun env.
+
+```
+
+### Exit Code Propagation
+
+`sys.exit(code)` propagate ke OS exit code:
+
+| Statement | `$?` |
+|-----------|------|
+| `sys.exit(0)` | 0 |
+| `sys.exit(1)` | 1 |
+| `sys.exit(42)` | 42 |
+| Unhandled exception | 1 |
+
+### Audit Log Format
+
+```
+[2025-10-07 20:15:30] pid=12345 cmd=git args=status allowed=yes reason=ok
+[2025-10-07 20:15:31] pid=12345 cmd=rm args=-rf / allowed=no reason=binary "rm" tidak ada di whitelist
+```
+
+Log file di-flush per entry. Error saat menulis log tidak block exec.
+
+### Limit Detail
+
+| Limit | Enforcement | Fallback |
+|-------|-------------|----------|
+| CPU time | `setrlimit(RLIMIT_CPU)` | Tidak ada |
+| Memory | `setrlimit(RLIMIT_AS)` | Tidak ada |
+| File size | `setrlimit(RLIMIT_FSIZE)` | Tidak ada |
+| Open files | `setrlimit(RLIMIT_NOFILE)` | Tidak ada |
+| Subprocesses | `setrlimit(RLIMIT_NPROC)` + parent counter | Parent counter |
+| Core dump | `setrlimit(RLIMIT_CORE)` = 0 | Tidak ada |
+
+Semua limit di-apply **di child** antara `fork()` dan `execvp()`.
+
+### Shutdown Cleanup
+
+Saat engine shutdown (`runScript` finally block):
+1. SIGTERM ke semua subprocess aktif
+2. Sleep 200ms untuk graceful exit
+3. Reap + close semua slot
+
+Script yang pakai `sys.exec` tidak akan meninggalkan orphan process.
+
+### Best Practices
+
+| Rule | Alasan |
+|------|--------|
+| Selalu `LockExecPolicy` di production | Script tidak bisa override |
+| Whitelist minimum, just-in-time | Reduce attack surface |
+| Set `cwd` ke sandbox | Prevent access `/` |
+| Aktifkan `auditLog` | Forensik |
+| Handle `r["denied"]` di script | Fail gracefully |
+| Jangan interpolate user input ke `sh -c` | Classic RCE vector |
+
+**Anti-pattern:**
+```pascal
+// DANGEROUS — lewat shell
+sys.exec("sh", ["-c", "cat " + userInput]);
+
+// SAFE — arg terpisah
+sys.exec("cat", [userInput]);
+```
+
+### Threat Model
+
+Dicegah:
+- Arbitrary binary exec → whitelist
+- Sandbox escape → path restrict
+- Fork bomb → concurrent + rlimit
+- Output OOM → size limit
+- Env poisoning (LD_PRELOAD) → sanitize
+- Orphan process → shutdown SIGKILL
+- Zombie accumulation → reap on demand
+- Argument injection → argv (no shell)
+
+**Bukan scope:**
+- Kernel sandbox (chroot/namespace) — butuh root
+- Binary hash verification — Phase 3
+- Network namespace isolation — Phase 3
+
+### Ringkasan API
+
+| API | Return | Keterangan |
+|-----|--------|------------|
+| `Engine.SetExecPolicy(dict)` | void | Host-level config |
+| `Engine.SetExecPolicyFromJson(str)` | void | JSON variant |
+| `Engine.LockExecPolicy` | void | Lock dari script override |
+| `sys.execPolicy(dict)` | bool | Script-level (dev) |
+| `sys.execWhitelist(array)` | bool | Convenience whitelist |
+| `sys.execAllowAll` | bool | Disable policy (dev) |
+| `sys.execInfo()` | dict | Query state |
+
+---
+
+## Error Handling
+
+Semua error dilempar sebagai exception:
+
+```pascal
+try
+  var lib := dll.load("nonexistent.so");
+catch e do
+  if typeOf(e) = "dictionary" then
+  begin
+    println("Error: ", e.message);
+    println("Trace: ", e.trace);
+  end else
+    println("Error: ", e.message);
+end;
+```
+
+**Error dict** (runtime error): `{message, trace}`.
+**User throw** dengan dict: tetap dict aslinya.
+**User throw** dengan non-dict: wrapped dalam exception object.
+
+**HTTP async error**: return dict `{error: "..."}` — tidak raise.
+
+### Error codes (internal, muncul di banner)
+
+- 1–148: parser/runtime errors
+- 149–160: DLL/FFI errors
+- 161+: (reserved untuk T-series)
+
+---
+
+## Platform Notes
+
+### Termux (Android)
+
+- **DNS**: Pure Pascal resolver (libc `getaddrinfo` gagal karena netd socket)
+- **FFI**: system library via bare name (`liblog.so`, `libsqlite3.so`)
+- **TLS**: OpenSSL via `pkg install openssl`
+- **CA bundle**: `/data/data/com.termux/files/usr/etc/tls/cert.pem`
+- **Install dependencies**: `pkg install openssl ca-certificates libffi clang`
+
+### Linux
+
+- **DNS**: libc `getaddrinfo` (fallback ke pure resolver kalau gagal)
+- **FFI**: semua library system via bare name
+- **TLS**: OpenSSL system (`libssl.so.3` atau `.so.1.1`)
+- **CA bundle**: `/etc/ssl/certs/ca-certificates.crt`
+
+### Build
+
+```bash
+fpc -Mobjfpc -Sh pascak_noASTnet.pas
+```
+
+**Debug flags**:
+- `-dHTTP_DEBUG` — log HTTP request/response
+- `-dCALLBACK_DEBUG` — log callback lifecycle
+- `-dTLS_DEBUG` — log SNI/handshake
+
+---
+
+## Referensi Test
+
+Direktori `tests/`:
+
+| File | Fokus |
+|---|---|
+| `test_phase_f1.pas` | DLL load, FFI basics, memory, string |
+| `test_phase_f3a3.pas` | Callback dispatch |
+| `test_phase_f3a4.pas` | Callback alias, string return |
+| `test_qshort.pas` | qsort integration |
+| `test_struct.pas` | Struct type system |
+| `test_struct_ffi.pas` | `ffi_type` construction |
+| `test_struct_call.pas` | Struct by value |
+| `test_phase_t2a_2.pas` | TLS security (chain + hostname) |
+| `test_async.pas` | Async HTTPS |
+| `test_net_diag.pas` | TLS + DNS diagnostic |
+| `test_json.pas` | JSON stringify/parse |
+| `test_ws_fragmentation.pas` | WebSocket fragmentation (`Conn.FragBuf` fix) |
+| `test_sandbox_symlink.pas` | Sandbox symlink escape detection (Fase 0.2) |
+| `test_env_guard.pas` | Env poisoning guard `--dev` (Fase 1.4) |
+| `test_tls_cache.pas` | TLS context cache per-verify-flag (Fase 0.1+0.8) |
+| `test_fs_async.pas` | Async file I/O (Fase 1.3) |
+| `test_engine_leak.pas` | Engine destruction robustness (Fase 1.2) |
+---
+
+## Contoh Praktis
+
+Direktori `examples/`:
+
+| File | Fokus |
+|---|---|
+| `hello_ffi.pas` | FFI dasar (strlen) |
+| `parallel_fetch.pas` | 4 HTTPS request paralel via async |
+| `sqlite_client.pas` | SQLite CRUD |
+| `http_server.pas` | HTTP server 3 endpoint |
+
+
+---
+
+## License
+
+(Diisi oleh pemilik proyek)

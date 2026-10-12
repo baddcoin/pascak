@@ -1,0 +1,137 @@
+# ═══════════════════════════════════════════════════════════
+#  Build artifacts — FPC compiler
+# ═══════════════════════════════════════════════════════════
+pascak_noASTnet
+*.o
+*.ppu
+*.a
+*.compiled
+
+# ═══════════════════════════════════════════════════════════
+#  Bytecode cache
+# ═══════════════════════════════════════════════════════════
+*.pbc
+
+# ═══════════════════════════════════════════════════════════
+#  Runtime temp folder
+# ═══════════════════════════════════════════════════════════
+.pascak_tmp/
+
+# ═══════════════════════════════════════════════════════════
+#  Package manager installed packages
+# ═══════════════════════════════════════════════════════════
+packages/
+
+# ═══════════════════════════════════════════════════════════
+#  Backup files
+# ═══════════════════════════════════════════════════════════
+*.bak-*
+*.bak
+*.orig
+
+# ═══════════════════════════════════════════════════════════
+#  Logs
+# ═══════════════════════════════════════════════════════════
+*.log
+exec-audit.log
+
+# ═══════════════════════════════════════════════════════════
+#  OS junk
+# ═══════════════════════════════════════════════════════════
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ═══════════════════════════════════════════════════════════
+#  Editor
+# ═══════════════════════════════════════════════════════════
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# ═══════════════════════════════════════════════════════════
+#  Test scratch
+# ═══════════════════════════════════════════════════════════
+/test/scratch/
+/tmp/
+# ═══════════════════════════════════════════════════════════
+#  Scratch & development artifacts
+# ═══════════════════════════════════════════════════════════
+aaaTERMUX.pas
+minitest.pas
+ringkasanchat.pas
+pascak_noASTnet.pas.pre_*
+pascak_noASTnetX.pas
+pascak.pas
+/pascak
+test_inflate_big
+test_inflate_big.pas
+test_paszlib
+test_paszlib.pas
+# ═══════════════════════════════════════════════════════════
+#  Documentation backups
+# ═══════════════════════════════════════════════════════════
+docs/*.bak*
+docs/*.bak.*
+docs/backup/
+
+# ═══════════════════════════════════════════════════════════
+#  Database files
+# ═══════════════════════════════════════════════════════════
+*.db
+*.sqlite
+*.sqlite3
+
+# ═══════════════════════════════════════════════════════════
+#  Shared library test artifacts
+# ═══════════════════════════════════════════════════════════
+test/*.so
+test/*.dll
+test/*.dylib
+test/*.html
+
+# ═══════════════════════════════════════════════════════════
+#  Test scratch / debug
+# ═══════════════════════════════════════════════════════════
+test/test_a.pas
+test/test_b.pas
+test/minitest.pas
+test/minimal_exit.pas
+test/test_cmp_debug.pas
+test/diag_tls_server.pas
+test/probe_symlink.pas
+test/test_syntax_err.pas
+test/test_fs
+test/builLibTest/
+test/testError
+
+# ═══════════════════════════════════════════════════════════
+#  Old phase tests
+# ═══════════════════════════════════════════════════════════
+test/test_phase_e*.pas
+test/test_parser_e1.pas
+
+# ═══════════════════════════════════════════════════════════
+#  Duplicate / copy from examples
+# ═══════════════════════════════════════════════════════════
+test/hello_ffi.pas
+test/http_server.pas
+test/sqlite_client.pas
+test/ws_chat.pas
+test/ws_chat_compressed.pas
+test/ws_echo.pas
+
+# ═══════════════════════════════════════════════════════════
+#  Compiled test binaries (root, no extension)
+# ═══════════════════════════════════════════════════════════
+/test_paszlib_xzlib
+/test_pkg_install
+/test_pkg_manifest
+/test_pkg_registry
+/test_pkg_resolver
+/test_pkg_semver
+/test_poller
+/test_poller_tcp
+/test_websocket_unit
