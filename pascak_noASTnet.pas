@@ -1896,6 +1896,13 @@ var //global
   AES_IVCounter: Integer = 0;
   GTimerCounter: Int64 = 0;
   
+  // Log globals (A.2)
+  GLogLevel: Integer = 1;
+  GLogFormat: Integer = 0;
+  GLogOutput: Integer = 0;
+  GLogFilePath: string = '';
+  GLogLock: TCriticalSection = nil;  
+  
   ActiveThreads: LongInt = 0;// Menyimpan status jumlah thread aktif
   ThreadEvent: PRTLEvent;
 
@@ -31912,6 +31919,212 @@ begin
     Result := TValue.CreateStr('');
 end;
 
+// A.2 — Structured Logging═══════════════════════════════════════
+//═══════════════════════════════════════════════════════════════ }
+function LogArgsToString(Args: TObjectList): string;
+var i: Integer;
+begin
+  Result := '';
+  for i := 0 to Args.Count - 1 do
+    Result := Result + TValueToString(TValue(Args[i]), False);
+end;
+
+function LogJsonEscape(const S: string): string;
+var i: Integer; c: Char;
+begin
+  Result := '';
+  for i := 1 to Length(S) do
+  begin
+    c := S[i];
+    case c of
+      '"': Result := Result + '\"';
+      '\': Result := Result + '\\';
+      #10: Result := Result + '\n';
+      #13: Result := Result + '\r';
+      #9:  Result := Result + '\t';
+    else
+      if c < #32 then
+        Result := Result + '\u' + IntToHex(Ord(c), 4)
+      else
+        Result := Result + c;
+    end;
+  end;
+end;
+
+procedure LogWriteInternal(ALevel: Integer; const AMsg: string);
+var
+  LevelStr, TimeStr, Line: string;
+  FS: TFileStream;
+  IsValidTime: Boolean;
+begin
+  if ALevel < GLogLevel then Exit;
+
+  case ALevel of
+    0: LevelStr := 'DEBUG';
+    1: LevelStr := 'INFO';
+    2: LevelStr := 'WARN';
+    3: LevelStr := 'ERROR';
+  else
+    LevelStr := 'INFO';
+  end;
+
+  IsValidTime := True;
+  try
+    TimeStr := FormatDateTime('yyyy-mm-dd hh:nn:ss', Now);
+  except
+    TimeStr := '0000-00-00 00:00:00';
+    IsValidTime := False;
+  end;
+
+  if GLogFormat = 0 then
+    Line := TimeStr + ' [' + LevelStr + '] ' + AMsg
+  else
+    Line := '{"ts":"' + TimeStr + '","level":"' +
+            LowerCase(LevelStr) + '","msg":"' + LogJsonEscape(AMsg) + '"}';
+
+  if not Assigned(GLogLock) then
+  begin
+    try Writeln(Line); except end;
+    Exit;
+  end;
+
+  GLogLock.Acquire;
+  try
+    try
+      case GLogOutput of
+        0: begin Writeln(Line); Flush(Output); end;
+        1: begin Writeln(ErrOutput, Line); Flush(ErrOutput); end;
+        2:
+          begin
+            if GLogFilePath <> '' then
+            begin
+              try
+                if FileExists(GLogFilePath) then
+                  FS := TFileStream.Create(GLogFilePath,
+                        fmOpenWrite or fmShareDenyNone)
+                else
+                  FS := TFileStream.Create(GLogFilePath, fmCreate);
+                try
+                  FS.Position := FS.Size;
+                  Line := Line + #10;
+                  FS.WriteBuffer(Line[1], Length(Line));
+                finally
+                  FS.Free;
+                end;
+              except
+                // fail-silent
+              end;
+            end;
+          end;
+      end;
+    except
+      // fail-silent — log error tidak boleh crash engine
+    end;
+  finally
+    GLogLock.Release;
+  end;
+end;
+
+function Native_LogDebug(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+begin
+  LogWriteInternal(0, LogArgsToString(Args));
+  Result := TValue.CreateNull;
+end;
+
+function Native_LogInfo(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+begin
+  LogWriteInternal(1, LogArgsToString(Args));
+  Result := TValue.CreateNull;
+end;
+
+function Native_LogWarn(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+begin
+  LogWriteInternal(2, LogArgsToString(Args));
+  Result := TValue.CreateNull;
+end;
+
+function Native_LogError(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+begin
+  LogWriteInternal(3, LogArgsToString(Args));
+  Result := TValue.CreateNull;
+end;
+
+function Native_LogSetLevel(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  S: string;
+begin
+  if (Args.Count <> 1) or (TValue(Args[0]).DataType <> dtString) then
+  begin
+    errMSG.callerror(140, 'log.setLevel("debug|info|warn|error")',
+                     errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateNull);
+  end;
+  S := LowerCase(Trim(TValue(Args[0]).StrVal));
+  if      S = 'debug' then GLogLevel := 0
+  else if S = 'info'  then GLogLevel := 1
+  else if S = 'warn'  then GLogLevel := 2
+  else if S = 'error' then GLogLevel := 3;
+  Result := TValue.CreateNull;
+end;
+
+function Native_LogSetFormat(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var S: string;
+begin
+  if (Args.Count <> 1) or (TValue(Args[0]).DataType <> dtString) then
+  begin
+    errMSG.callerror(140, 'log.setFormat("plain|json")', errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateNull);
+  end;
+  S := LowerCase(Trim(TValue(Args[0]).StrVal));
+  if      S = 'plain' then GLogFormat := 0
+  else if S = 'json'  then GLogFormat := 1;
+  Result := TValue.CreateNull;
+end;
+
+function Native_LogSetOutput(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var S, P: string;
+begin
+  if (Args.Count < 1) or (Args.Count > 2) or
+     (TValue(Args[0]).DataType <> dtString) then
+  begin
+    errMSG.callerror(140, 'log.setOutput("stdout|stderr|file", [path])',
+                     errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateNull);
+  end;
+  S := LowerCase(Trim(TValue(Args[0]).StrVal));
+  if S = 'stdout' then
+  begin
+    GLogOutput := 0;
+    GLogFilePath := '';
+  end
+  else if S = 'stderr' then
+  begin
+    GLogOutput := 1;
+    GLogFilePath := '';
+  end
+  else if S = 'file' then
+  begin
+    if (Args.Count < 2) or (TValue(Args[1]).DataType <> dtString) then
+    begin
+      errMSG.callerror(140, 'log.setOutput("file", path)', errMSG.xrow, errMSG.xcol);
+      Exit(TValue.CreateNull);
+    end;
+    P := TValue(Args[1]).StrVal;
+    try
+      P := GetSafeSandboxedPath(P);
+    except
+      on E: Exception do
+      begin
+        errMSG.callerror(144, 'log.setOutput: ' + E.Message, errMSG.xrow, errMSG.xcol);
+        Exit(TValue.CreateNull);
+      end;
+    end;
+    GLogOutput := 2;
+    GLogFilePath := P;
+  end;
+  Result := TValue.CreateNull;
+end;//end Structured Logging
+
 //native main=============
 //========================
 procedure initNativeCode(GEnvv: TSymbolTable);
@@ -31919,14 +32132,32 @@ var
   MathDef, HardDef, TimeDef, SysDef, 
   CryptoDef, NetDef, HTTPDef, FSDef,
   DLLDef, TLSDef, NativeLibDef, 
-  WSDef, PkgDef : TTypeDefinition; 
+  WSDef, PkgDef, LogDef : TTypeDefinition; 
   
   MathInst, HardInst, TimeInst, SysInst, 
   CryptoInst, NetInst, HTTPInst, FSInst,
   DLLInst, TLSInst, NativeLibInst, 
-  WSInst, PkgInst : TInstanceValue; 
+  WSInst, PkgInst, LogInst : TInstanceValue; 
 
 begin
+  LogDef := TTypeDefinition.Create('LogLib', tkClass);
+  LogDef.Methods.Add('debug',     TVMFunction.Create);
+  LogDef.Methods.Add('info',      TVMFunction.Create);
+  LogDef.Methods.Add('warn',      TVMFunction.Create);
+  LogDef.Methods.Add('error',     TVMFunction.Create);
+  LogDef.Methods.Add('setLevel',  TVMFunction.Create);
+  LogDef.Methods.Add('setFormat', TVMFunction.Create);
+  LogDef.Methods.Add('setOutput', TVMFunction.Create);
+  
+  LogInst := TInstanceValue.Create(LogDef);
+  LogInst.Members.DefineVar('debug',     TValue.CreateNative(@Native_LogDebug));
+  LogInst.Members.DefineVar('info',      TValue.CreateNative(@Native_LogInfo));
+  LogInst.Members.DefineVar('warn',      TValue.CreateNative(@Native_LogWarn));
+  LogInst.Members.DefineVar('error',     TValue.CreateNative(@Native_LogError));
+  LogInst.Members.DefineVar('setLevel',  TValue.CreateNative(@Native_LogSetLevel));
+  LogInst.Members.DefineVar('setFormat', TValue.CreateNative(@Native_LogSetFormat));
+  LogInst.Members.DefineVar('setOutput', TValue.CreateNative(@Native_LogSetOutput));
+
   TimeDef := TTypeDefinition.Create('DateTimeLib', tkClass);
   TimeDef.Methods.Add('now', TVMFunction.Create);
   TimeDef.Methods.Add('format', TVMFunction.Create);
@@ -32359,7 +32590,8 @@ begin
   GEnvv.DefineVar('native', TValue.CreateObj(NativeLibInst));
   GEnvv.DefineVar('ws', TValue.CreateObj(TInstanceValue(WSInst)));  
   GEnvv.DefineVar('pkg', TValue.CreateObj(PkgInst));
-  
+  GEnvv.DefineVar('log', TValue.CreateObj(LogInst));
+
   GEnvv.DefineVar('getTick', TValue.CreateNative(@Native_GetTick),true);
   GEnvv.DefineVar('sleep', TValue.CreateNative(@Native_Sleep),true); 
   GEnvv.DefineVar('print', TValue.CreateNative(@Native_Print),true);
@@ -34803,6 +35035,7 @@ begin
 
   GBufferRegistry := TList.Create;
   GBufferLock := TCriticalSection.Create;
+  GLogLock := TCriticalSection.Create;
 
   InitThreadErrors;
 
