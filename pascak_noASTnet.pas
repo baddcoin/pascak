@@ -19573,6 +19573,54 @@ begin
   end;
 end;
 
+function Native_JsonPath(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  Current: TValue;
+  Segments: TStringArray;
+  i: Integer;
+  Seg: string;
+  Item: TValue;
+begin
+  if (Args.Count <> 2) or
+     (TValue(Args[0]).DataType <> dtDict) or
+     (TValue(Args[1]).DataType <> dtString) then
+  begin
+    errMSG.callerror(140, 'jsonPath(dict, "a.b.c")', errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateNull);
+  end;
+
+  Current := TValue(Args[0]).Clone;
+  Segments := TValue(Args[1]).StrVal.Split(['.']);
+
+  try
+    for i := 0 to High(Segments) do
+    begin
+      Seg := Segments[i];
+      if Seg = '' then Continue;
+
+      if Current.DataType <> dtDict then
+      begin
+        Result := TValue.CreateNull;
+        Exit;
+      end;
+
+      Item := Current.DictVal.GetValueClone(Seg);
+      if not Assigned(Item) then
+      begin
+        Result := TValue.CreateNull;
+        Exit;
+      end;
+
+      Current.Free;
+      Current := Item;
+    end;
+
+    Result := Current.Clone;
+  finally
+    Current.Free;
+  end;
+end;
+
 function Native_JSONStringify(Args: TObjectList; CallEnv: TSymbolTable): TValue;
 var
   JData: TJSONData;
@@ -32317,6 +32365,7 @@ begin
   GEnvv.DefineVar('println', TValue.CreateNative(@Native_Println),true);
   GEnvv.DefineVar('input', TValue.CreateNative(@Native_Input),true);  
   GEnvv.DefineVar('jsonParse', TValue.CreateNative(@Native_JSONParse),true);
+  GEnvv.DefineVar('jsonPath', TValue.CreateNative(@Native_JsonPath), true);
   GEnvv.DefineVar('jsonStringify', TValue.CreateNative(@Native_JSONStringify),true);
   GEnvv.DefineVar('sqliteConnect', TValue.CreateNative(@Native_SQLiteConnect),true);
   GEnvv.DefineVar('sqliteExec', TValue.CreateNative(@Native_SQLiteExec),true);
