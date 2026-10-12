@@ -202,6 +202,25 @@ grep -n "Filesystem" pascak_api.md | head -3
 grep -n "Async File I/O" tutorial.md | head -3
 ```
 
+## [Unreleased]
+
+### Added
+- **B.1** — Public Timer API:
+  - `setTimeout(fn, ms) → timerID` — fire callback once after delay
+  - `setInterval(fn, ms) → timerID` — fire callback repeatedly
+  - `clearTimeout(timerID)` / `clearInterval(timerID)` — cancel pending timer
+  - Auto-cleanup via existing RunLoop dead-task sweep
+- **B.2** — Public `jsonPath(dict, "a.b.c") → value | null` helper:
+  - Traverse nested dict via dot-separated path
+  - Returns `null` if segment missing or intermediate not a dict
+  - Thread-safe via GetValueClone ownership
+
+### Notes
+- Git repository initialized. Initial baseline commit: `6019a6d`
+- Test suite: 27/29 PASS + 2 soft-skip (network-dependent)
+
+
+
 Semua 4 langkah di atas selesai → Fase A selesai ✅
 
 ---

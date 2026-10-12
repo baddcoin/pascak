@@ -33,7 +33,7 @@ di folder project.
 22. [Security: Exec Policy](#22-security-exec-policy)
 23. [Async File I/O](#23-async-file-io)
 24. [Parser Quirk](#24-parser-quirk)
-
+25. [Timer & JSON Path](#25-timer--json-path)
 ```
 
 ## 1. Setup & Hello World
@@ -2486,7 +2486,304 @@ sebenarnya.
 
 ---
 ```
+## Bab 25 — Timer & JSON Path
 
+Dua fitur DX kecil tapi sering dipakai: timer asinkron dan path-based access untuk JSON.
+
+### 25.1 — Timer API
+
+Empat fungsi timer yang tersedia global:
+
+| Fungsi | Efek |
+|---|---|
+| `setTimeout(fn, ms) → timerID` | Fire `fn` sekali setelah `ms` |
+| `setInterval(fn, ms) → timerID` | Fire `fn` berulang setiap `ms` |
+| `clearTimeout(timerID)` | Cancel timer |
+| `clearInterval(timerID)` | Alias `clearTimeout` |
+
+Semua callback jalan di **main event loop thread** — aman akses state script langsung, tanpa `lock` (kecuali multi-thread).
+
+#### Contoh — Delayed Message
+
+```pascal
+begin
+  println("start");
+
+  setTimeout(lambda : println("3 detik kemudian"), 3000);
+
+  println("ini jalan duluan");
+end.
+```
+
+Output:
+```
+start
+ini jalan duluan
+3 detik kemudian
+```
+
+#### Contoh — Countdown
+
+```pascal
+var counter := 5;
+var t := 0;
+
+t := setInterval(lambda : begin
+  println(counter);
+  counter := counter - 1;
+
+  if counter < 0 then
+    clearInterval(t);
+end, 1000);
+
+sleep(7000);   // tunggu selesai
+```
+
+Output:
+```
+5
+4
+3
+2
+1
+0
+```
+
+#### Contoh — Cancel Timer
+
+```pascal
+function longOperation() begin
+  println("operasi selesai");
+end;
+
+begin
+  var t := setTimeout(longOperation, 10000);
+  println("timer diset. Cancel dalam 100ms...");
+
+  sleep(100);
+  clearTimeout(t);
+  println("cancelled");
+
+  sleep(500);   // tunggu sebentar untuk buktikan tidak fire
+end.
+```
+
+Output:
+```
+timer diset. Cancel dalam 100ms...
+cancelled
+```
+(tidak ada "operasi selesai" — timer di-cancel)
+
+#### Kapan Pakai Timer
+
+| Skenario | Pakai |
+|---|---|
+| Delay aksi (soft retry, backoff) | `setTimeout` |
+| Background polling | `setInterval` |
+| Cancel timer dari user action | `clearTimeout` |
+| Animasi loop | `setInterval` |
+
+**Jangan pakai timer untuk**:
+- **Precision timing** — `setTimeout(fn, 16)` bisa fire di 20ms, tidak dijamin 16ms
+- **Blocking sleep** — pakai `sleep(ms)` untuk itu
+- **Long-running loop tanpa stop** — pastikan ada `clearInterval` di suatu kondisi
+
+#### Catatan
+
+- `ms < 1` di-clamp ke 1ms untuk `setInterval`
+- Timer auto-cancel saat script selesai
+- Callback tidak punya argumen — closure via lambda
+- `clearTimeout` return `true` kalau timer valid, `false` kalau sudah fire / invalid
+
+---
+
+### 25.2 — JSON Path
+
+`jsonPath(dict, "a.b.c")` — ekstrak nilai nested dict tanpa cek `hasKey` berlapis.
+
+```pascal
+var data := jsonParse('{
+  "user": {
+    "profile": {
+      "name": "Alice",
+      "age": 30
+    }
+  }
+}');
+
+println(jsonPath(data, "user.profile.name"));   // "Alice"
+println(jsonPath(data, "user.profile.age"));    // 30
+println(jsonPath(data, "user.missing"));        // null
+println(jsonPath(data, "nonexistent.deep"));    // null
+```
+
+**Tanpa `jsonPath`**, akses nested butuh:
+
+```pascal
+// ❌ Verbose
+if data.hasKey("user") then
+  var u := data["user"];
+  if u.hasKey("profile") then
+    var p := u["profile"];
+    if p.hasKey("name") then
+      println(p["name"]);
+
+// ✅ Ringkas
+println(jsonPath(data, "user.profile.name"));
+```
+
+#### Perilaku
+
+| Input path | Hasil |
+|---|---|
+| `"user.profile.name"` (ada) | nilai |
+| `"user.profile.name"` (tidak ada) | `null` |
+| `"user.missing.deep"` | `null` |
+| `"a.b.c"` di mana `a` = string | `null` |
+| `"a..b"` (empty segment) | skip, treat sebagai `"a.b"` |
+
+**Selalu return `null`** — bukan raise. Aman untuk probe:
+
+```pascal
+var timeout := jsonPath(config, "server.timeout");
+if timeout == null then
+  timeout := 30000;   // default
+```
+
+#### Contoh — Config Parser
+
+```pascal
+function getConfig() begin
+  return jsonParse('{
+    "database": {
+      "host": "localhost",
+      "port": 5432,
+      "credentials": {
+        "user": "admin",
+        "password": "secret"
+      }
+    },
+    "server": {
+      "port": 8080
+    }
+  }');
+end;
+
+begin
+  var cfg := getConfig();
+
+  var dbHost := jsonPath(cfg, "database.host");
+  var dbPort := jsonPath(cfg, "database.port");
+  var dbUser := jsonPath(cfg, "database.credentials.user");
+  var srvPort := jsonPath(cfg, "server.port");
+
+  println("DB: ", dbUser, "@", dbHost, ":", dbPort);
+  println("Server: :", srvPort);
+end.
+```
+
+Output:
+```
+DB: admin@localhost:5432
+Server: :8080
+```
+
+#### Contoh — API Response Parsing
+
+```pascal
+var res := http.get("https://api.example.com/user/42");
+
+if res.status == 200 then begin
+  var data := jsonParse(res.body);
+
+  var name := jsonPath(data, "data.user.name");
+  var email := jsonPath(data, "data.user.email");
+  var role := jsonPath(data, "data.user.role");
+
+  println("User: ", name);
+  println("Email: ", email);
+  println("Role: ", role);
+end else
+  println("API error: ", res.status);
+```
+
+#### Kapan Pakai `jsonPath`
+
+| Skenario | Pakai |
+|---|---|
+| Config berlapis (2+ level) | `jsonPath` |
+| API response nested | `jsonPath` |
+| Dict flat 1 level | indexing biasa `d["key"]` |
+| Butuh iterate semua keys | `.keys()` + loop |
+
+**Batasan v1**: hanya support dict. Array indexing (`jsonPath(d, "users.0.name")`) belum — pakai indexing manual dulu:
+
+```pascal
+var users := jsonPath(data, "users");
+if users != null then
+  println(users[0].name);
+```
+
+---
+
+### 25.3 — Kombinasi Timer + JSON
+
+Contoh: poll API setiap 5 detik, stop setelah dapat response valid.
+
+```pascal
+var pollTimer := 0;
+
+function pollApi() begin
+  var res := http.get("https://api.example.com/status");
+
+  if res.status != 200 then begin
+    println("API belum siap, retry dalam 5s...");
+    return;   // timer tetap running
+  end;
+
+  var data := jsonParse(res.body);
+  var ready := jsonPath(data, "status.ready");
+
+  if ready == true then begin
+    println("API siap!");
+    println("Version: ", jsonPath(data, "version"));
+    println("Uptime: ", jsonPath(data, "status.uptime"));
+
+    clearInterval(pollTimer);   // stop polling
+  end;
+end;
+
+begin
+  println("Polling API setiap 5 detik...");
+  pollTimer := setInterval(pollApi, 5000);
+
+  sleep(60000);   // safety timeout 60 detik
+  clearInterval(pollTimer);
+end.
+```
+
+**Pattern ini berguna untuk**: startup dependency check, health probe, wait-for-service.
+
+---
+
+### 25.4 — Ringkasan
+
+| API | Signature | Return |
+|---|---|---|
+| `setTimeout` | `(fn, ms)` | `timerID` |
+| `setInterval` | `(fn, ms)` | `timerID` |
+| `clearTimeout` | `(timerID)` | `bool` |
+| `clearInterval` | `(timerID)` | `bool` |
+| `jsonPath` | `(dict, "a.b.c")` | `value \| null` |
+
+**Best practices**:
+1. **Simpan timerID** kalau mau bisa cancel nanti
+2. **jsonPath** untuk config/API nested — jangan untuk dict flat
+3. **Callback timer** jalan di main thread — akses state langsung OK
+4. **Cleanup** timer di script akhir supaya tidak fire setelah selesai
+
+---
 ## Latihan Lanjutan
 
 Setelah tutorial ini, coba bangun:

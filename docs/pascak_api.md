@@ -10,20 +10,22 @@ Dokumentasi lengkap API standard library Pascak VM.
 ## Daftar Isi
 
 1. [Modul Global](#modul-global)
-2. [FFI (Foreign Function Interface)](#ffi)
-3. [Native Buffer](#native-buffer)
-4. [Native Struct](#native-struct)
-5. [HTTP Client](#http-client)
-6. [HTTP Server](#http-server)
-7. [Network (Level Rendah)](#network)
-8. [TLS](#tls)
-9. [SQLite](#sqlite)
-10. [Crypto](#crypto)
-11. [Filesystem](#filesystem)
-12. [Parser Tips](#parser-tips)
-13. [Sandbox](#sandbox)
-14. [Error Handling](#error-handling)
-15. [Platform Notes](#platform-notes)
+2. [Timers] ## Timers
+3. [JSON Path] ## JSON Path
+4. [FFI (Foreign Function Interface)](#ffi)
+5. [Native Buffer](#native-buffer)
+6. [Native Struct](#native-struct)
+7. [HTTP Client](#http-client)
+8. [HTTP Server](#http-server)
+9. [Network (Level Rendah)](#network)
+10. [TLS](#tls)
+11. [SQLite](#sqlite)
+12. [Crypto](#crypto)
+13. [Filesystem](#filesystem)
+14. [Parser Tips](#parser-tips)
+15. [Sandbox](#sandbox)
+16. [Error Handling](#error-handling)
+17. [Platform Notes](#platform-notes)
 ---
 
 ## Modul Global
@@ -59,6 +61,74 @@ Dokumentasi lengkap API standard library Pascak VM.
 `runtimeStats`, `profilerEnable`, `profilerDisable`, `profilerReport`
 
 ---
+## Timers
+
+Timer API publik — non-blocking, berbasis event loop internal.
+
+### `setTimeout(fn, ms) → timerID`
+
+Fire `fn` sekali setelah `ms` milidetik.
+
+```pascal
+setTimeout(lambda : println("fired!"), 1000);
+```
+
+setInterval(fn, ms) → timerID
+
+Fire fn berulang setiap ms milidetik.
+
+```pascal
+var t := setInterval(lambda : println("tick"), 500);
+// ... kemudian ...
+clearInterval(t);
+```
+
+clearTimeout(timerID) → bool
+
+clearInterval(timerID) → bool
+
+Cancel timer. Kedua nama adalah alias — pakai yang sesuai konteks.
+
+```pascal
+var t := setTimeout(cleanup, 5000);
+// user selesai lebih cepat:
+clearTimeout(t);
+```
+
+Catatan:
+
+· Callback jalan di main event loop thread — aman akses state script
+· setInterval dengan ms < 1 di-clamp ke 1ms
+· Timer auto-cancel saat engine shutdown
+· Return -1 kalau argument invalid
+
+```
+## JSON Path
+
+### `jsonPath(dict, "a.b.c") → value | null`
+
+Ekstrak nilai dari nested dict via dot-separated path.
+
+```pascal
+var data := jsonParse('{"user":{"profile":{"name":"Alice"}}}');
+println(jsonPath(data, "user.profile.name"));   // "Alice"
+println(jsonPath(data, "user.missing"));        // null
+println(jsonPath(data, "nonexistent.deep"));    // null
+```
+
+Behavior:
+
+· Traverse dict layer per layer
+· Return null kalau segment tidak ada
+· Return null kalau intermediate bukan dict (mis. string/number)
+· Empty segment ("..") di-skip otomatis
+· Hanya support dict (array indexing belum)
+
+Kapan pakai:
+
+· Config berlapis: jsonPath(config, "database.host")
+· Response API nested: jsonPath(resp, "data.user.id")
+· Safe access tanpa cek hasKey manual berlapis
 
 ## FFI
 
