@@ -1903,6 +1903,10 @@ var //global
   GLogFilePath: string = '';
   GLogLock: TCriticalSection = nil;  
   
+  // Config globals (A.3)
+  GConfigStore: TDictValue = nil;
+  GConfigLock: TCriticalSection = nil;
+
   ActiveThreads: LongInt = 0;// Menyimpan status jumlah thread aktif
   ThreadEvent: PRTLEvent;
 
@@ -31919,6 +31923,282 @@ begin
     Result := TValue.CreateStr('');
 end;
 
+//A.3 — Config Management═════════════════════════════════════════
+//═══════════════════════════════════════════════════════════════ }
+
+procedure ConfigLoadEnvFile(const Path: string);
+var
+  SL: TStringList;
+  i, EqPos: Integer;
+  Line, Key, Val: string;
+begin
+  if not FileExists(Path) then Exit;
+  SL := TStringList.Create;
+  try
+    try
+      SL.LoadFromFile(Path);
+    except
+      Exit;
+    end;
+
+    for i := 0 to SL.Count - 1 do
+    begin
+      Line := Trim(SL[i]);
+      if (Line = '') or (Line[1] = '#') then Continue;
+      EqPos := Pos('=', Line);
+      if EqPos <= 0 then Continue;
+
+      Key := Trim(Copy(Line, 1, EqPos - 1));
+      Val := Trim(Copy(Line, EqPos + 1, Length(Line)));
+
+      // Strip surrounding quotes
+      if (Length(Val) >= 2) and
+         (((Val[1] = '"') and (Val[Length(Val)] = '"')) or
+          ((Val[1] = '''') and (Val[Length(Val)] = ''''))) then
+        Val := Copy(Val, 2, Length(Val) - 2);
+
+      // Strip "export " prefix
+      if (Length(Key) > 7) and (Copy(LowerCase(Key), 1, 7) = 'export ') then
+        Key := Trim(Copy(Key, 8, Length(Key)));
+
+      if Key <> '' then
+        GConfigStore.SetValue(Key, TValue.CreateStr(Val));
+    end;
+  finally
+    SL.Free;
+  end;
+end;
+
+procedure ConfigLoadJsonFile(const Path: string);
+var
+  SL: TStringList;
+  Data: TJSONData;
+  Root: TJSONObject;
+  Val: TValue;
+  i: Integer;
+begin
+  if not FileExists(Path) then Exit;
+
+  SL := TStringList.Create;
+  try
+    try
+      SL.LoadFromFile(Path);
+    except
+      Exit;
+    end;
+
+    Data := nil;
+    try
+      try
+        Data := GetJSON(SL.Text);
+      except
+        Exit;
+      end;
+
+      if not Assigned(Data) or (Data.JSONType <> jtObject) then Exit;
+      Root := TJSONObject(Data);
+      for i := 0 to Root.Count - 1 do
+      begin
+        Val := ConvertJSONToTValue(Root.Items[i], 0);
+        // Store string representation for scalars, JSON for nested
+        if Val.DataType = dtString then
+          GConfigStore.SetValue(Root.Names[i], TValue.CreateStr(Val.StrVal))
+        else if Val.DataType = dtNumeric then
+          GConfigStore.SetValue(Root.Names[i], TValue.CreateStr(
+            FloatToStr(Val.NumVal, FS)))
+        else if Val.DataType = dtBoolean then
+          GConfigStore.SetValue(Root.Names[i], TValue.CreateStr(
+            BoolToStr(Val.BoolVal, 'true', 'false')))
+        else
+          GConfigStore.SetValue(Root.Names[i], TValue.CreateStr(
+            TValueToString(Val, False)));
+        Val.Free;
+      end;
+    finally
+      if Assigned(Data) then Data.Free;
+    end;
+  finally
+    SL.Free;
+  end;
+end;
+
+function Native_ConfigLoad(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var Path: string;
+begin
+  if (Args.Count <> 1) or (TValue(Args[0]).DataType <> dtString) then
+  begin
+    errMSG.callerror(139, 'config.load(".env")', errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateBool(False));
+  end;
+  try
+    Path := GetSafeSandboxedPath(TValue(Args[0]).StrVal);
+  except
+    on E: Exception do
+    begin
+      errMSG.callerror(144, 'config.load: ' + E.Message, errMSG.xrow, errMSG.xcol);
+      Exit(TValue.CreateBool(False));
+    end;
+  end;
+
+  if not Assigned(GConfigLock) then Exit(TValue.CreateBool(False));
+  GConfigLock.Acquire;
+  try
+    ConfigLoadEnvFile(Path);
+  finally
+    GConfigLock.Release;
+  end;
+  Result := TValue.CreateBool(True);
+end;
+
+function Native_ConfigLoadJSON(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var Path: string;
+begin
+  if (Args.Count <> 1) or (TValue(Args[0]).DataType <> dtString) then
+  begin
+    errMSG.callerror(139, 'config.loadJSON("config.json")', errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateBool(False));
+  end;
+  try
+    Path := GetSafeSandboxedPath(TValue(Args[0]).StrVal);
+  except
+    on E: Exception do
+    begin
+      errMSG.callerror(144, 'config.loadJSON: ' + E.Message, errMSG.xrow, errMSG.xcol);
+      Exit(TValue.CreateBool(False));
+    end;
+  end;
+
+  if not Assigned(GConfigLock) then Exit(TValue.CreateBool(False));
+  GConfigLock.Acquire;
+  try
+    ConfigLoadJsonFile(Path);
+  finally
+    GConfigLock.Release;
+  end;
+  Result := TValue.CreateBool(True);
+end;
+
+function Native_ConfigGet(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  Key, DefaultVal: string;
+  EnvVal: string;
+  R: TValue;
+  HasDefault: Boolean;
+begin
+  if (Args.Count < 1) or (Args.Count > 2) or
+     (TValue(Args[0]).DataType <> dtString) then
+  begin
+    errMSG.callerror(139, 'config.get("KEY", [default])', errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateNull);
+  end;
+
+  Key := TValue(Args[0]).StrVal;
+  HasDefault := Args.Count = 2;
+  if HasDefault then
+    DefaultVal := TValueToString(TValue(Args[1]), False)
+  else
+    DefaultVal := '';
+
+  // 1. Runtime store
+  if Assigned(GConfigLock) and Assigned(GConfigStore) then
+  begin
+    GConfigLock.Acquire;
+    try
+      R := GConfigStore.GetValueClone(Key);
+    finally
+      GConfigLock.Release;
+    end;
+    if Assigned(R) and (R.DataType <> dtNull) then Exit(R);
+    if Assigned(R) then R.Free;
+  end;
+
+  // 2. Environment
+  EnvVal := GetEnvironmentVariable(Key);
+  if EnvVal <> '' then Exit(TValue.CreateStr(EnvVal));
+
+  // 3. Default
+  if HasDefault then
+    Result := TValue.CreateStr(DefaultVal)
+  else
+    Result := TValue.CreateNull;
+end;
+
+function Native_ConfigSet(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+begin
+  if (Args.Count <> 2) or (TValue(Args[0]).DataType <> dtString) then
+  begin
+    errMSG.callerror(139, 'config.set("KEY", value)', errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateNull);
+  end;
+  if not Assigned(GConfigLock) or not Assigned(GConfigStore) then
+    Exit(TValue.CreateNull);
+  GConfigLock.Acquire;
+  try
+    GConfigStore.SetValue(TValue(Args[0]).StrVal,
+      TValue.CreateStr(TValueToString(TValue(Args[1]), False)));
+  finally
+    GConfigLock.Release;
+  end;
+  Result := TValue.CreateNull;
+end;
+
+function Native_ConfigHas(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var Key: string; R: TValue;
+begin
+  if (Args.Count <> 1) or (TValue(Args[0]).DataType <> dtString) then
+  begin
+    errMSG.callerror(139, 'config.has("KEY")', errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateBool(False));
+  end;
+  Key := TValue(Args[0]).StrVal;
+
+  if Assigned(GConfigLock) and Assigned(GConfigStore) then
+  begin
+    GConfigLock.Acquire;
+    try
+      if GConfigStore.HasKey(Key) then Exit(TValue.CreateBool(True));
+    finally
+      GConfigLock.Release;
+    end;
+  end;
+
+  if GetEnvironmentVariable(Key) <> '' then
+    Exit(TValue.CreateBool(True));
+
+  Result := TValue.CreateBool(False);
+end;
+
+function Native_ConfigAll(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var Keys: TStringArray; i: Integer;
+    NewDict: TDictValue;
+    R: TValue;
+begin
+  NewDict := TDictValue.Create;
+  try
+    if Assigned(GConfigLock) and Assigned(GConfigStore) then
+    begin
+      GConfigLock.Acquire;
+      try
+        Keys := GConfigStore.GetKeys;
+        for i := 0 to High(Keys) do
+        begin
+          R := GConfigStore.GetValueClone(Keys[i]);
+          if Assigned(R) then
+          begin
+            NewDict.SetValue(Keys[i], R);
+          end;
+        end;
+      finally
+        GConfigLock.Release;
+      end;
+    end;
+    Result := TValue.CreateDict(NewDict);
+  except
+    NewDict.Free;
+    raise;
+  end;
+end;//end Config Management
+
 // A.2 — Structured Logging═══════════════════════════════════════
 //═══════════════════════════════════════════════════════════════ }
 function LogArgsToString(Args: TObjectList): string;
@@ -32132,14 +32412,30 @@ var
   MathDef, HardDef, TimeDef, SysDef, 
   CryptoDef, NetDef, HTTPDef, FSDef,
   DLLDef, TLSDef, NativeLibDef, 
-  WSDef, PkgDef, LogDef : TTypeDefinition; 
+  WSDef, PkgDef, LogDef, ConfigDef : TTypeDefinition; 
   
   MathInst, HardInst, TimeInst, SysInst, 
   CryptoInst, NetInst, HTTPInst, FSInst,
   DLLInst, TLSInst, NativeLibInst, 
-  WSInst, PkgInst, LogInst : TInstanceValue; 
+  WSInst, PkgInst, LogInst, ConfigInst : TInstanceValue; 
 
 begin
+  ConfigDef := TTypeDefinition.Create('ConfigLib', tkClass);
+  ConfigDef.Methods.Add('load',     TVMFunction.Create);
+  ConfigDef.Methods.Add('loadJSON', TVMFunction.Create);
+  ConfigDef.Methods.Add('get',      TVMFunction.Create);
+  ConfigDef.Methods.Add('set',      TVMFunction.Create);
+  ConfigDef.Methods.Add('has',      TVMFunction.Create);
+  ConfigDef.Methods.Add('all',      TVMFunction.Create);
+  
+  ConfigInst := TInstanceValue.Create(ConfigDef);
+  ConfigInst.Members.DefineVar('load',     TValue.CreateNative(@Native_ConfigLoad));
+  ConfigInst.Members.DefineVar('loadJSON', TValue.CreateNative(@Native_ConfigLoadJSON));
+  ConfigInst.Members.DefineVar('get',      TValue.CreateNative(@Native_ConfigGet));
+  ConfigInst.Members.DefineVar('set',      TValue.CreateNative(@Native_ConfigSet));
+  ConfigInst.Members.DefineVar('has',      TValue.CreateNative(@Native_ConfigHas));
+  ConfigInst.Members.DefineVar('all',      TValue.CreateNative(@Native_ConfigAll));
+
   LogDef := TTypeDefinition.Create('LogLib', tkClass);
   LogDef.Methods.Add('debug',     TVMFunction.Create);
   LogDef.Methods.Add('info',      TVMFunction.Create);
@@ -32591,6 +32887,7 @@ begin
   GEnvv.DefineVar('ws', TValue.CreateObj(TInstanceValue(WSInst)));  
   GEnvv.DefineVar('pkg', TValue.CreateObj(PkgInst));
   GEnvv.DefineVar('log', TValue.CreateObj(LogInst));
+  GEnvv.DefineVar('config', TValue.CreateObj(ConfigInst));
 
   GEnvv.DefineVar('getTick', TValue.CreateNative(@Native_GetTick),true);
   GEnvv.DefineVar('sleep', TValue.CreateNative(@Native_Sleep),true); 
@@ -35036,6 +35333,9 @@ begin
   GBufferRegistry := TList.Create;
   GBufferLock := TCriticalSection.Create;
   GLogLock := TCriticalSection.Create;
+
+  GConfigStore := TDictValue.Create;
+  GConfigLock := TCriticalSection.Create;
 
   InitThreadErrors;
 
