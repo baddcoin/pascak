@@ -34600,6 +34600,50 @@ end;
 { ═══════════════════════════════════════════════════════════════
   B.3 — Interactive REPL
   ═══════════════════════════════════════════════════════════════ }
+{$IFDEF UNIX}
+function StdinHasData(TimeoutMs: Integer): Boolean;
+var
+  FDS: TFDSet;
+  TV: TTimeVal;
+begin
+  fpFD_ZERO(FDS);
+  fpFD_SET(0, FDS);
+  TV.tv_sec := TimeoutMs div 1000;
+  TV.tv_usec := (TimeoutMs mod 1000) * 1000;
+  Result := fpSelect(1, @FDS, nil, nil, @TV) > 0;
+end;
+{$ENDIF}
+
+{ Baca satu baris dengan cara non-blocking: selama menunggu input user,
+  tick event loop supaya timer/callback tetap fire di main thread. }
+function ReadLineWithTick(AEngine: TPascakEngine; out ALine: string): Boolean;
+begin
+  ALine := '';
+  while True do
+  begin
+    {$IFDEF UNIX}
+    if StdinHasData(50) then
+    {$ENDIF}
+    begin
+      if EOF(Input) then Exit(False);
+      Readln(ALine);
+      Exit(True);
+    end;
+
+    {$IFDEF UNIX}
+    if Assigned(AEngine) and Assigned(AEngine.Context) and
+       Assigned(AEngine.Context.EventLoop) then
+    begin
+      try
+        AEngine.Context.EventLoop.TickOnce(AEngine.GlobalEnv);
+      except
+        // fail-silent — callback error tidak boleh bunuh REPL
+      end;
+    end;
+    {$ENDIF}
+  end;
+end;
+
 procedure RunREPL;
 var
   Engine: TPascakEngine;
@@ -34645,14 +34689,13 @@ begin
     begin
       Write('pascak> ');
       Flush(Output);
-
-      if EOF(Input) then
+      
+      if not ReadLineWithTick(Engine, Line) then
       begin
         Writeln;
         Break;
       end;
-
-      Readln(Line);
+      
       Line := Trim(Line);
 
       if Line = '' then Continue;
