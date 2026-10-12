@@ -1885,6 +1885,7 @@ type
   procedure ProcessFSAsyncCallbacks; forward;
   procedure InitFSAsyncTasks; forward;
   procedure FreeFSAsyncTasks; forward;
+  procedure EnsureGlobalsInit; forward;
   
 { ====================================================================
   IMPLEMENTASI
@@ -34595,6 +34596,178 @@ begin
 end;
 {$WARN SYMBOL_DEPRECATED ON}
 
+
+{ ═══════════════════════════════════════════════════════════════
+  B.3 — Interactive REPL
+  ═══════════════════════════════════════════════════════════════ }
+procedure RunREPL;
+var
+  Engine: TPascakEngine;
+  Line: string;
+  Res: TValue;
+  Lower: string;
+  i: Integer;
+  IsStatement: Boolean;
+  FirstWord: string;
+  Code: string;
+
+  function IsStatementInput(const S: string): Boolean;
+  var
+    L, FW: string;
+    j: Integer;
+  begin
+    L := LowerCase(S);
+    if (Length(L) > 0) and (L[Length(L)] = ';') then
+      Exit(True);
+
+    j := 1;
+    while (j <= Length(L)) and (L[j] in ['a'..'z', 'A'..'Z', '0'..'9', '_']) do
+      Inc(j);
+    FW := Copy(L, 1, j - 1);
+
+    Result := (FW = 'var') or (FW = 'const') or (FW = 'function') or
+              (FW = 'class') or (FW = 'record') or (FW = 'if') or
+              (FW = 'while') or (FW = 'for') or (FW = 'repeat') or
+              (FW = 'try') or (FW = 'lock') or (FW = 'case') or
+              (FW = 'begin') or (FW = 'print') or (FW = 'println') or
+              (FW = 'return') or (FW = 'throw') or (FW = 'import');
+  end;
+
+begin
+  Writeln('Pascak REPL v1.0 — .help for commands, .exit to quit');
+  Writeln;
+
+  EnsureGlobalsInit;
+  
+  Engine := TPascakEngine.Create;
+  try
+    while True do
+    begin
+      Write('pascak> ');
+      Flush(Output);
+
+      if EOF(Input) then
+      begin
+        Writeln;
+        Break;
+      end;
+
+      Readln(Line);
+      Line := Trim(Line);
+
+      if Line = '' then Continue;
+
+      // Special commands
+      if (Line = '.exit') or (Line = '.quit') then Break;
+
+      if Line = '.help' then
+      begin
+        Writeln('Commands:');
+        Writeln('  .exit, .quit   — exit REPL');
+        Writeln('  .help          — this message');
+        Writeln('  .clear         — clear screen');
+        Writeln;
+        Writeln('Everything else is evaluated as Pascak code.');
+        Writeln('Multi-line: put entire script on one line (use ; separator).');
+        Continue;
+      end;
+
+      if Line = '.clear' then
+      begin
+        Write(#27'[2J'#27'[H');
+        Flush(Output);
+        Continue;
+      end;
+
+      // Detect statement vs expression
+      IsStatement := IsStatementInput(Line);
+
+      // Build code
+      if IsStatement then
+        Code := 'begin ' + Line + #10'end.'
+      else
+        Code := 'begin return ' + Line + '; end.';
+
+      // Execute
+      Res := nil;
+      try
+        try
+          Res := Engine.ExecuteString(Code, '<repl>');
+          if Assigned(Res) and (Res.DataType <> dtNull) then
+            Writeln('=> ', TValueToString(Res, False));
+        except
+          on E: EScriptRuntimeError do
+            Writeln('Error: ', E.Message);
+          on E: EScriptFatalError do
+            Writeln('Fatal: ', E.Message);
+          on E: Exception do
+            Writeln('Error: ', E.ClassName, ': ', E.Message);
+        end;
+      finally
+        if Assigned(Res) then Res.Free;
+      end;
+
+      Writeln;
+    end;
+  finally
+    Engine.Free;
+  end;
+
+  Writeln('Bye.');
+end;
+
+procedure EnsureGlobalsInit;
+begin
+  if Assigned(IOLock) then Exit;
+
+  IOLock := TCriticalSection.Create;
+  MemLock := TCriticalSection.Create;
+  ScriptLock := TCriticalSection.Create;
+  GCLock := TCriticalSection.Create;
+  WorkerRegistryLock := TCriticalSection.Create;
+  GCRootLock := TCriticalSection.Create;
+  SQLiteLock := TCriticalSection.Create;
+  GlobalFreeValueLock := TCriticalSection.Create;
+  GlobalArenaLock := TCriticalSection.Create;
+  ZombieLock := TCriticalSection.Create;
+
+  Gen0Objects := TList.Create;
+  Gen1Objects := TList.Create;
+  ZombieQueue := TList.Create;
+  GlobalDMAPointers := TList.Create;
+  SQLiteConnections := TObjectList.Create(True);
+  GlobalLoadedDLLs := TList.Create;
+
+  ThreadEvent := RTLEventCreate;
+  FFIModuleWhitelist := TStringList.Create;
+
+  GStructTypeRegistry := TList.Create;
+  GStructValueRegistry := TList.Create;
+  GStructLock := TCriticalSection.Create;
+
+  GStructCallRegistry := TStructCallMap.Create;
+  GStructCallRegistry.Sorted := True;
+  GStructCallLock := TCriticalSection.Create;
+
+  GDLLRegistry := TStringList.Create;
+  GDLLRegistry.Sorted := True;
+  GDLLRegistry.Duplicates := dupIgnore;
+  GDLLRegistryLock := TCriticalSection.Create;
+
+  GCallbackRegistry := TCallbackMap.Create;
+  GCallbackRegistry.Sorted := True;
+  GCallbackLock := TCriticalSection.Create;
+
+  GBufferRegistry := TList.Create;
+  GBufferLock := TCriticalSection.Create;
+
+  InitThreadErrors;
+
+  InitWSServers;
+  GWSWorkers := TList.Create;
+  GWSWorkersLock := TCriticalSection.Create;
+end;
+
 procedure runScript(scr: string; DebugMode: Boolean = False);
 var
   Engine: TPascakEngine;
@@ -34633,57 +34806,8 @@ begin
   GlobalInit := False;
   GCurrentContext := nil;
 
-  // Inisialisasi global locks yang masih dipakai oleh arena & GC
-  // (yang TIDAK di-refactor di Phase 7)
-  if not Assigned(IOLock) then
-  begin
-    IOLock := TCriticalSection.Create;
-    MemLock := TCriticalSection.Create;
-    ScriptLock := TCriticalSection.Create;
-    GCLock := TCriticalSection.Create;
-    WorkerRegistryLock := TCriticalSection.Create;
-    GCRootLock := TCriticalSection.Create;
-    SQLiteLock := TCriticalSection.Create;
-    GlobalFreeValueLock := TCriticalSection.Create;
-    GlobalArenaLock := TCriticalSection.Create;
-    ZombieLock := TCriticalSection.Create;
-    
-    Gen0Objects := TList.Create;
-    Gen1Objects := TList.Create;
-    ZombieQueue := TList.Create;
-    GlobalDMAPointers := TList.Create;
-    SQLiteConnections := TObjectList.Create(True);
-    GlobalLoadedDLLs := TList.Create;
-    
-    ThreadEvent := RTLEventCreate;
-    FFIModuleWhitelist := TStringList.Create;
-    GlobalInit := True;
-    
-    // F-3a-5a: struct registry
-    GStructTypeRegistry := TList.Create;
-    GStructValueRegistry := TList.Create;
-    GStructLock := TCriticalSection.Create;
-
-    GStructCallRegistry := TStructCallMap.Create;
-    GStructCallRegistry.Sorted := True;
-    GStructCallLock := TCriticalSection.Create;
-
-    // ✅ F-2a: DLL registry
-    GDLLRegistry := TStringList.Create;
-    GDLLRegistry.Sorted := True;
-    GDLLRegistry.Duplicates := dupIgnore;
-    GDLLRegistryLock := TCriticalSection.Create;
-    
-    GCallbackRegistry := TCallbackMap.Create;
-    GCallbackRegistry.Sorted := True;
-    GCallbackLock := TCriticalSection.Create;    
-    
-    InitThreadErrors;  
-    
-    InitWSServers;
-    GWSWorkers := TList.Create;
-    GWSWorkersLock := TCriticalSection.Create;    
-  end;
+  EnsureGlobalsInit;
+  GlobalInit := True;
 
   Engine := nil;
   NetInit; 
@@ -35229,6 +35353,7 @@ var
   DebugMode: Boolean;
   ScriptArg: string;
   ArgIdx: Integer;
+  ReplMode: Boolean;
 
 begin
   cscript := scriptTest;
@@ -35239,13 +35364,16 @@ begin
   // ✅ TAHAP D-1: parse CLI args
   DebugMode := False;
   ScriptArg := '';
+  ReplMode := False;
   ArgIdx := 1;
   while ArgIdx <= ParamCount do
   begin
     if ParamStr(ArgIdx) = '--debug' then
       DebugMode := True
-    else if ParamStr(ArgIdx) = '--dev' then     // ✅ FASE 1.4
+    else if ParamStr(ArgIdx) = '--dev' then
       GDangerousEnvAllowed := True
+    else if ParamStr(ArgIdx) = '--repl' then
+      ReplMode := True
     else if ScriptArg = '' then
       ScriptArg := ParamStr(ArgIdx);
     Inc(ArgIdx);
@@ -35257,11 +35385,29 @@ begin
             '(PASCAK_EXEC_POLICY, PASCAK_TLS_NO_VERIFY)');
   end;
 
+  // B.3 — REPL mode
+  if ReplMode then
+  begin
+    NetInit;
+    ProcInit;
+    try
+      RunREPL;
+    finally
+      ProcShutdown;
+      NetShutdown;
+    end;
+    {$IFDEF UNIX}
+    libc__exit(0);
+    {$ELSE}
+    Halt(0);
+    {$ENDIF}
+  end;
+  
   if ScriptArg <> '' then
     FileName := ScriptArg
   else 
     FileName := './storage/downloads/test.pas';
-
+  
   if SysUtils.FileExists(FileName) then
     Script := LoadScriptFromFile(FileName)
   else 
@@ -35270,5 +35416,5 @@ begin
   if Script = '' then
     Writeln(FileName + ' [script null]')
   else 
-    runScript(Script, DebugMode);   // ✅ pass debug flag
+    runScript(Script, DebugMode);
 end.
