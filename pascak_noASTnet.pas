@@ -43,6 +43,9 @@ const
   STRUCT_TYPE_MAGIC  = $50414354;   // 'PACT'
   STRUCT_VALUE_MAGIC = $50414356;   // 'PACV'
 
+  METRIC_BUCKETS: array[0..10] of Double = 
+    (1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000);
+
   EXEC_TASK_PENDING = 0;
   EXEC_TASK_RUNNING = 1;
   EXEC_TASK_DONE    = 2;
@@ -115,7 +118,8 @@ type
   TAllocationTracker  = class;
   TEngineContext      = class;
   TWorkerMessageQueue = class;
-  TCallbackContext    = class;  
+  TCallbackContext    = class; 
+  TDictValue          = class;
   EScriptFatalError   = class(Exception)
   public
     ExitCode: Integer;   // -1 = default (1)
@@ -300,6 +304,13 @@ type
     Value: TValue;
     Next: PDictItem;
   end;  
+  PMetricEntry = ^TMetricEntry;
+  TMetricEntry = record
+    Name: string;
+    MType: Integer;
+    Help: string;
+    Values: TDictValue;
+  end;
   PHTTPPooledConn = ^THTTPPooledConn;
   THTTPPooledConn = record
     Key: string;
@@ -1979,6 +1990,10 @@ var //global
   GHTTPPoolMisses: Int64 = 0;
   GHTTPPoolMaxPerHost: Integer = 8;
   GHTTPPoolIdleMs: Integer = 30000;
+
+  // Production Ops (A.4 metrics)
+  GMetrics: TStringList = nil;
+  GMetricsLock: TCriticalSection = nil;
 
   ActiveThreads: LongInt = 0;// Menyimpan status jumlah thread aktif
   ThreadEvent: PRTLEvent;
@@ -33087,6 +33102,396 @@ begin
   Result := TValue.CreateBool(True);
 end;//end HTTP Connection Pool
 
+//A.4 — Metrics (Prometheus-compatible)═══════════════════════════
+//═══════════════════════════════════════════════════════════════ }
+function MetricLabelsToKey(Labels: TValue): string;
+var
+  Keys: TStringArray;
+  i, j: Integer;
+  Tmp: string;
+  V: TValue;
+begin
+  Result := '';
+  if not Assigned(Labels) or (Labels.DataType <> dtDict) then Exit;
+  if Labels.DictVal.Count = 0 then Exit;
+
+  Keys := Labels.DictVal.GetKeys;
+  for i := 0 to High(Keys) - 1 do
+    for j := i + 1 to High(Keys) do
+      if Keys[i] > Keys[j] then
+      begin
+        Tmp := Keys[i]; Keys[i] := Keys[j]; Keys[j] := Tmp;
+      end;
+
+  for i := 0 to High(Keys) do
+  begin
+    if i > 0 then Result := Result + ',';
+    V := Labels.DictVal.GetValueClone(Keys[i]);
+    try
+      if Assigned(V) and (V.DataType = dtString) then
+        Result := Result + Keys[i] + '="' + V.StrVal + '"'
+      else if Assigned(V) and (V.DataType = dtNumeric) then
+        Result := Result + Keys[i] + '="' + FloatToStr(V.NumVal, FS) + '"'
+      else
+        Result := Result + Keys[i] + '=""';
+    finally
+      if Assigned(V) then V.Free;
+    end;
+  end;
+end;
+
+function MetricFindOrNil(const Name: string): PMetricEntry;
+var Idx: Integer;
+begin
+  Result := nil;
+  if not Assigned(GMetrics) then Exit;
+  Idx := GMetrics.IndexOf(Name);
+  if Idx >= 0 then Result := PMetricEntry(GMetrics.Objects[Idx]);
+end;
+
+function MetricGetValue(E: PMetricEntry; const Key: string; DefVal: Double): Double;
+var V: TValue;
+begin
+  Result := DefVal;
+  if not Assigned(E) or not Assigned(E^.Values) then Exit;
+  V := E^.Values.GetValueClone(Key);
+  try
+    if Assigned(V) and (V.DataType = dtNumeric) then Result := V.NumVal;
+  finally
+    if Assigned(V) then V.Free;
+  end;
+end;
+
+procedure MetricSetValue(E: PMetricEntry; const Key: string; Value: Double);
+begin
+  if not Assigned(E) then Exit;
+  E^.Values.SetValue(Key, TValue.CreateNum(Value));
+end;
+
+function Native_MetricsDefine(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var E: PMetricEntry; Idx: Integer; TS: string;
+begin
+  if (Args.Count < 2) or (Args.Count > 3) or
+     (TValue(Args[0]).DataType <> dtString) or (TValue(Args[1]).DataType <> dtString) then
+  begin
+    errMSG.callerror(140, 'metrics.define(name, type, [help])', errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateBool(False));
+  end;
+  if not Assigned(GMetricsLock) then Exit(TValue.CreateBool(False));
+
+  GMetricsLock.Acquire;
+  try
+    Idx := GMetrics.IndexOf(TValue(Args[0]).StrVal);
+    if Idx >= 0 then Exit(TValue.CreateBool(True));
+
+    New(E);
+    E^.Name := TValue(Args[0]).StrVal;
+    TS := LowerCase(TValue(Args[1]).StrVal);
+    if TS = 'counter' then E^.MType := 0
+    else if TS = 'gauge' then E^.MType := 1
+    else if TS = 'histogram' then E^.MType := 2
+    else begin
+      Dispose(E);
+      errMSG.callerror(144, 'metrics.define: type harus counter|gauge|histogram',
+                       errMSG.xrow, errMSG.xcol);
+      Exit(TValue.CreateBool(False));
+    end;
+    if Args.Count >= 3 then E^.Help := TValueToString(TValue(Args[2]), False)
+    else E^.Help := E^.Name;
+    E^.Values := TDictValue.Create;
+    GMetrics.AddObject(E^.Name, TObject(E));
+  finally
+    GMetricsLock.Release;
+  end;
+  Result := TValue.CreateBool(True);
+end;
+
+function Native_MetricsIncrement(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var E: PMetricEntry; Key: string; Labels: TValue; Cur: Double;
+begin
+  if (Args.Count < 1) or (Args.Count > 2) or (TValue(Args[0]).DataType <> dtString) then
+  begin
+    errMSG.callerror(139, 'metrics.increment(name, [labels])', errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateBool(False));
+  end;
+  if not Assigned(GMetricsLock) then Exit(TValue.CreateBool(False));
+
+  Labels := nil;
+  if Args.Count = 2 then Labels := TValue(Args[1]);
+
+  GMetricsLock.Acquire;
+  try
+    E := MetricFindOrNil(TValue(Args[0]).StrVal);
+    if not Assigned(E) or (E^.MType <> 0) then
+    begin
+      errMSG.callerror(144, 'metrics.increment: metric counter belum didefinisikan',
+                       errMSG.xrow, errMSG.xcol);
+      Exit(TValue.CreateBool(False));
+    end;
+    Key := MetricLabelsToKey(Labels);
+    Cur := MetricGetValue(E, Key, 0);
+    MetricSetValue(E, Key, Cur + 1);
+  finally
+    GMetricsLock.Release;
+  end;
+  Result := TValue.CreateBool(True);
+end;
+
+function Native_MetricsAdd(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var E: PMetricEntry; Key: string; Labels: TValue; Cur, Delta: Double;
+begin
+  if (Args.Count < 2) or (Args.Count > 3) or
+     (TValue(Args[0]).DataType <> dtString) or (TValue(Args[1]).DataType <> dtNumeric) then
+  begin
+    errMSG.callerror(140, 'metrics.add(name, value, [labels])', errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateBool(False));
+  end;
+  if not Assigned(GMetricsLock) then Exit(TValue.CreateBool(False));
+
+  Delta := TValue(Args[1]).NumVal;
+  Labels := nil;
+  if Args.Count = 3 then Labels := TValue(Args[2]);
+
+  GMetricsLock.Acquire;
+  try
+    E := MetricFindOrNil(TValue(Args[0]).StrVal);
+    if not Assigned(E) or (E^.MType <> 0) then
+    begin
+      errMSG.callerror(144, 'metrics.add: metric counter belum didefinisikan',
+                       errMSG.xrow, errMSG.xcol);
+      Exit(TValue.CreateBool(False));
+    end;
+    Key := MetricLabelsToKey(Labels);
+    Cur := MetricGetValue(E, Key, 0);
+    MetricSetValue(E, Key, Cur + Delta);
+  finally
+    GMetricsLock.Release;
+  end;
+  Result := TValue.CreateBool(True);
+end;
+
+function Native_MetricsSet(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var E: PMetricEntry; Key: string; Labels: TValue;
+begin
+  if (Args.Count < 2) or (Args.Count > 3) or
+     (TValue(Args[0]).DataType <> dtString) or (TValue(Args[1]).DataType <> dtNumeric) then
+  begin
+    errMSG.callerror(140, 'metrics.set(name, value, [labels])', errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateBool(False));
+  end;
+  if not Assigned(GMetricsLock) then Exit(TValue.CreateBool(False));
+
+  Labels := nil;
+  if Args.Count = 3 then Labels := TValue(Args[2]);
+
+  GMetricsLock.Acquire;
+  try
+    E := MetricFindOrNil(TValue(Args[0]).StrVal);
+    if not Assigned(E) or (E^.MType <> 1) then
+    begin
+      errMSG.callerror(144, 'metrics.set: metric gauge belum didefinisikan',
+                       errMSG.xrow, errMSG.xcol);
+      Exit(TValue.CreateBool(False));
+    end;
+    Key := MetricLabelsToKey(Labels);
+    MetricSetValue(E, Key, TValue(Args[1]).NumVal);
+  finally
+    GMetricsLock.Release;
+  end;
+  Result := TValue.CreateBool(True);
+end;
+
+function Native_MetricsObserve(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  E: PMetricEntry;
+  Key, BKey: string;
+  Labels: TValue;
+  Value: Double;
+  i: Integer;
+  BVal: Double;
+begin
+  if (Args.Count < 2) or (Args.Count > 3) or
+     (TValue(Args[0]).DataType <> dtString) or (TValue(Args[1]).DataType <> dtNumeric) then
+  begin
+    errMSG.callerror(140, 'metrics.observe(name, value, [labels])', errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateBool(False));
+  end;
+  if not Assigned(GMetricsLock) then Exit(TValue.CreateBool(False));
+
+  Value := TValue(Args[1]).NumVal;
+  Labels := nil;
+  if Args.Count = 3 then Labels := TValue(Args[2]);
+
+  GMetricsLock.Acquire;
+  try
+    E := MetricFindOrNil(TValue(Args[0]).StrVal);
+    if not Assigned(E) or (E^.MType <> 2) then
+    begin
+      errMSG.callerror(144, 'metrics.observe: metric histogram belum didefinisikan',
+                       errMSG.xrow, errMSG.xcol);
+      Exit(TValue.CreateBool(False));
+    end;
+    Key := MetricLabelsToKey(Labels);
+
+    // Increment count + sum
+    BVal := MetricGetValue(E, Key + '|c', 0);
+    MetricSetValue(E, Key + '|c', BVal + 1);
+    BVal := MetricGetValue(E, Key + '|s', 0);
+    MetricSetValue(E, Key + '|s', BVal + Value);
+
+    // Update buckets (cumulative: count all buckets >= value)
+    for i := 0 to High(METRIC_BUCKETS) do
+    begin
+      if Value <= METRIC_BUCKETS[i] then
+      begin
+        BKey := Key + '|b' + IntToStr(i);
+        BVal := MetricGetValue(E, BKey, 0);
+        MetricSetValue(E, BKey, BVal + 1);
+      end;
+    end;
+  finally
+    GMetricsLock.Release;
+  end;
+  Result := TValue.CreateBool(True);
+end;
+
+function Native_MetricsExpose(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  SL: TStringList;
+  i, j,kk: Integer;
+  E: PMetricEntry;
+  Keys: TStringArray;
+  K, SeriesKey, TypeStr, LabelPart, Suffix: string;
+  V: Double;
+  AllCount: Double;
+begin
+  SL := TStringList.Create;
+  try
+    if not Assigned(GMetricsLock) then Exit(TValue.CreateStr(''));
+    GMetricsLock.Acquire;
+    try
+      for i := 0 to GMetrics.Count - 1 do
+      begin
+        E := PMetricEntry(GMetrics.Objects[i]);
+        if not Assigned(E) then Continue;
+
+        SL.Add('# HELP ' + E^.Name + ' ' + E^.Help);
+        if E^.MType = 0 then TypeStr := 'counter'
+        else if E^.MType = 1 then TypeStr := 'gauge'
+        else TypeStr := 'histogram';
+        SL.Add('# TYPE ' + E^.Name + ' ' + TypeStr);
+
+        Keys := E^.Values.GetKeys;
+
+        if E^.MType in [0, 1] then
+        begin
+          for j := 0 to High(Keys) do
+          begin
+            V := MetricGetValue(E, Keys[j], 0);
+            if Keys[j] = '' then
+              SL.Add(E^.Name + ' ' + FloatToStr(V, FS))
+            else
+              SL.Add(E^.Name + '{' + Keys[j] + '} ' + FloatToStr(V, FS));
+          end;
+        end
+        else
+        begin
+          // Histogram: group by base label key
+          for j := 0 to High(Keys) do
+          begin
+            K := Keys[j];
+            if Length(K) < 2 then Continue;
+            if Copy(K, Length(K) - 1, 2) <> '|c' then Continue;
+        
+            LabelPart := Copy(K, 1, Length(K) - 2);
+            AllCount := MetricGetValue(E, K, 0);
+            
+            // Buckets
+            for kk := 0 to High(METRIC_BUCKETS) do
+            begin
+              SeriesKey := LabelPart + '|b' + IntToStr(kk);
+              V := MetricGetValue(E, SeriesKey, 0);
+              Suffix := 'le="' + FloatToStr(METRIC_BUCKETS[kk], FS) + '"';
+              if LabelPart = '' then
+                SL.Add(E^.Name + '_bucket{' + Suffix + '} ' + FloatToStr(V, FS))
+              else
+                SL.Add(E^.Name + '_bucket{' + LabelPart + ',' + Suffix + '} ' + FloatToStr(V, FS));
+            end;
+
+            // +Inf bucket = total count
+            Suffix := 'le="+Inf"';
+            if LabelPart = '' then
+              SL.Add(E^.Name + '_bucket{' + Suffix + '} ' + FloatToStr(AllCount, FS))
+            else
+              SL.Add(E^.Name + '_bucket{' + LabelPart + ',' + Suffix + '} ' + FloatToStr(AllCount, FS));
+
+            // Sum
+            V := MetricGetValue(E, LabelPart + '|s', 0);
+            if LabelPart = '' then
+              SL.Add(E^.Name + '_sum ' + FloatToStr(V, FS))
+            else
+              SL.Add(E^.Name + '_sum{' + LabelPart + '} ' + FloatToStr(V, FS));
+
+            // Count
+            if LabelPart = '' then
+              SL.Add(E^.Name + '_count ' + FloatToStr(AllCount, FS))
+            else
+              SL.Add(E^.Name + '_count{' + LabelPart + '} ' + FloatToStr(AllCount, FS));
+          end;
+        end;
+        SL.Add('');
+      end;
+    finally
+      GMetricsLock.Release;
+    end;
+    Result := TValue.CreateStr(SL.Text);
+  finally
+    SL.Free;
+  end;
+end;
+
+function Native_MetricsReset(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var i: Integer; E: PMetricEntry;
+begin
+  if not Assigned(GMetricsLock) then Exit(TValue.CreateBool(False));
+  GMetricsLock.Acquire;
+  try
+    for i := 0 to GMetrics.Count - 1 do
+    begin
+      E := PMetricEntry(GMetrics.Objects[i]);
+      if Assigned(E) and Assigned(E^.Values) then E^.Values.Clear;
+    end;
+  finally
+    GMetricsLock.Release;
+  end;
+  Result := TValue.CreateBool(True);
+end;
+
+function Native_MetricsList(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var Arr: TValueList; i: Integer; E: PMetricEntry;
+begin
+  Arr := TValueList.Create(True);
+  try
+    if Assigned(GMetricsLock) then
+    begin
+      GMetricsLock.Acquire;
+      try
+        for i := 0 to GMetrics.Count - 1 do
+        begin
+          E := PMetricEntry(GMetrics.Objects[i]);
+          if Assigned(E) then Arr.Add(TValue.CreateStr(E^.Name));
+        end;
+      finally
+        GMetricsLock.Release;
+      end;
+    end;
+    Result := TValue.CreateArray(Arr);
+  except
+    Arr.Free;
+    raise;
+  end;
+end;//end Metrics (Prometheus-compatible)
+
 // A.2 — Structured Logging═══════════════════════════════════════
 //═══════════════════════════════════════════════════════════════ }
 function LogArgsToString(Args: TObjectList): string;
@@ -33477,13 +33882,13 @@ var
   CryptoDef, NetDef, HTTPDef, FSDef,
   DLLDef, TLSDef, NativeLibDef, 
   WSDef, PkgDef, LogDef, ConfigDef,
-  SignalDef : TTypeDefinition; 
+  SignalDef, MetricsDef : TTypeDefinition; 
   
   MathInst, HardInst, TimeInst, SysInst, 
   CryptoInst, NetInst, HTTPInst, FSInst,
   DLLInst, TLSInst, NativeLibInst, 
   WSInst, PkgInst, LogInst, ConfigInst,
-  SignalInst: TInstanceValue; 
+  SignalInst, MetricsInst: TInstanceValue; 
 
 begin
   SignalDef := TTypeDefinition.Create('SignalLib', tkClass);
@@ -33511,6 +33916,26 @@ begin
   ConfigInst.Members.DefineVar('set',      TValue.CreateNative(@Native_ConfigSet));
   ConfigInst.Members.DefineVar('has',      TValue.CreateNative(@Native_ConfigHas));
   ConfigInst.Members.DefineVar('all',      TValue.CreateNative(@Native_ConfigAll));
+
+  MetricsDef := TTypeDefinition.Create('MetricsLib', tkClass);
+  MetricsDef.Methods.Add('define',    TVMFunction.Create);
+  MetricsDef.Methods.Add('increment', TVMFunction.Create);
+  MetricsDef.Methods.Add('add',       TVMFunction.Create);
+  MetricsDef.Methods.Add('set',       TVMFunction.Create);
+  MetricsDef.Methods.Add('observe',   TVMFunction.Create);
+  MetricsDef.Methods.Add('expose',    TVMFunction.Create);
+  MetricsDef.Methods.Add('reset',     TVMFunction.Create);
+  MetricsDef.Methods.Add('list',      TVMFunction.Create);
+  
+  MetricsInst := TInstanceValue.Create(MetricsDef);
+  MetricsInst.Members.DefineVar('define',    TValue.CreateNative(@Native_MetricsDefine));
+  MetricsInst.Members.DefineVar('increment', TValue.CreateNative(@Native_MetricsIncrement));
+  MetricsInst.Members.DefineVar('add',       TValue.CreateNative(@Native_MetricsAdd));
+  MetricsInst.Members.DefineVar('set',       TValue.CreateNative(@Native_MetricsSet));
+  MetricsInst.Members.DefineVar('observe',   TValue.CreateNative(@Native_MetricsObserve));
+  MetricsInst.Members.DefineVar('expose',    TValue.CreateNative(@Native_MetricsExpose));
+  MetricsInst.Members.DefineVar('reset',     TValue.CreateNative(@Native_MetricsReset));
+  MetricsInst.Members.DefineVar('list',      TValue.CreateNative(@Native_MetricsList));
 
   LogDef := TTypeDefinition.Create('LogLib', tkClass);
   LogDef.Methods.Add('debug',     TVMFunction.Create);
@@ -33973,6 +34398,7 @@ begin
   GEnvv.DefineVar('log', TValue.CreateObj(LogInst));
   GEnvv.DefineVar('config', TValue.CreateObj(ConfigInst));
   GEnvv.DefineVar('signal', TValue.CreateObj(SignalInst));
+  GEnvv.DefineVar('metrics', TValue.CreateObj(MetricsInst));
 
   GEnvv.DefineVar('getTick', TValue.CreateNative(@Native_GetTick),true);
   GEnvv.DefineVar('sleep', TValue.CreateNative(@Native_Sleep),true); 
@@ -36775,7 +37201,11 @@ begin
   GShutdownLock := TCriticalSection.Create;
   GHTTPPool := TList.Create;
   GHTTPPoolLock := TCriticalSection.Create;
-  
+  GMetrics := TStringList.Create;
+  GMetrics.Sorted := True;
+  GMetrics.Duplicates := dupIgnore;
+  GMetricsLock := TCriticalSection.Create;
+
   InitThreadErrors;
 
   InitWSServers;
