@@ -1121,6 +1121,169 @@ Client yang mengirim `Connection: close` akan dipaksa disconnect setelah request
 
 WebSocket (RFC 6455) server dengan dukungan penuh text/binary frame, fragmentasi, ping/pong, close handshake. Plain (`ws://`) dan TLS (`wss://`).
 
+### `ws.connect(url, [config]) → handle`
+
+**WebSocket client** — connect ke server WS external.
+
+```pascal
+var c := ws.connect("ws://echo.example.com/", {
+  "onOpen":    lambda conn : println("connected: ", conn.id),
+  "onMessage": lambda conn, msg : println("recv: ", msg),
+  "onClose":   lambda conn, code : println("closed: ", code),
+  "onError":   lambda conn, err : println("error: ", err)
+});
+```
+
+**Config keys** (semua optional):
+
+| Key | Tipe | Deskripsi |
+|---|---|---|
+| `onOpen` | function | Fire saat handshake sukses. Signature: `fn(conn)` |
+| `onMessage` | function | Fire saat frame text/binary diterima. `fn(conn, msg)` |
+| `onClose` | function | Fire saat koneksi tutup. `fn(conn, code)` |
+| `onError` | function | Fire saat error (connect/handshake/runtime). `fn(conn, err)` |
+| `verify` | bool | Verify TLS certificate (default `true`). Set `false` untuk self-signed. |
+
+**Return**: handle dict dengan field + method.
+
+**Handle fields**:
+
+| Field | Tipe | Deskripsi |
+|---|---|---|
+| `id` | string | Connection ID (format: `wscl-NNNNNNNN`) |
+| `url` | string | Full URL koneksi |
+| `host` | string | Hostname |
+| `port` | number | Port |
+| `tls` | bool | `true` kalau `wss://` |
+
+**Handle methods**:
+
+| Method | Return | Deskripsi |
+|---|---|---|
+| `c.send(msg)` | bool | Kirim text frame |
+| `c.sendBytes(data)` | bool | Kirim binary frame |
+| `c.close([code])` | bool | Kirim close frame (default `1000`) |
+| `c.isOpen()` | bool | Cek state koneksi |
+| `c.state()` | string | `connecting`\|`handshake`\|`open`\|`closing`\|`closed` |
+
+**Contoh — Client Sederhana**:
+
+```pascal
+var messages := [];
+
+begin
+  var c := ws.connect("wss://echo.websocket.events/", {
+    "onOpen": lambda conn : begin
+      log.info("connected: ", conn.id);
+      conn.send("hello");
+    end,
+    "onMessage": lambda conn, msg : begin
+      log.info("recv: ", msg);
+      push(messages, msg);
+    end,
+    "onClose": lambda conn, code : log.info("closed: ", code)
+  });
+
+  // Tunggu 3 detik untuk receive echo
+  sleep(3000);
+  c.close();
+
+  log.info("received ", len(messages), " messages");
+end.
+```
+
+**Contoh — Multi-Client**:
+
+```pascal
+var clients := [];
+
+begin
+  for i := 1 to 5 do begin
+    var c := ws.connect("ws://127.0.0.1:9001/", {
+      "onMessage": lambda conn, msg : println(conn.id, ": ", msg)
+    });
+    push(clients, c);
+  end;
+
+  sleep(2000);
+
+  // Broadcast ke semua client (via server side)
+  for c in clients do
+    c.send("ping " + c.id);
+
+  sleep(2000);
+  for c in clients do
+    c.close();
+end.
+```
+
+**Contoh — Bridge REST → WS**:
+
+```pascal
+var WS := nil;
+
+begin
+  WS := ws.connect("wss://feed.example.com/stream", {
+    "onOpen": lambda c : log.info("stream connected"),
+    "onMessage": lambda c, msg : begin
+      var data := jsonParse(msg);
+      var price := jsonPath(data, "price");
+      var symbol := jsonPath(data, "symbol");
+      log.info(symbol, ": ", price);
+    end
+  });
+
+  // Keep alive
+  sleep(60000);
+  WS.close();
+end.
+```
+
+**Batasan v1**:
+- ❌ Subprotocol negotiation (belum)
+- ❌ Permessage-deflate compression (belum)
+- ❌ Auto-reconnect (manual via onClose)
+- ⚠️ 1 connection = 1 OS thread
+
+**Close codes** (RFC 6455 §7.4):
+
+| Code | Nama |
+|---|---|
+| 1000 | Normal Close |
+| 1001 | Going Away |
+| 1002 | Protocol Error |
+| 1007 | Invalid Payload |
+| 1008 | Policy Violation |
+| 1009 | Too Large |
+| 1011 | Internal Error |
+
+**Best practices**:
+
+```pascal
+// ✅ Simpan handle untuk close nanti
+var conn := ws.connect(...);
+onShutdown(lambda : conn.close());   // cleanup
+
+// ✅ Reconnect manual di onClose
+function reconnectLoop() begin
+  var c := ws.connect(url, {
+    "onClose": lambda conn, code : begin
+      log.warn("disconnected (", code, "), reconnecting in 5s...");
+      setTimeout(reconnectLoop, 5000);
+    end
+  });
+end;
+
+// ❌ Jangan block di callback — pakai async
+function onMessage(conn, msg) begin
+  // ❌ http.get(url);  // blocking, freeze client thread
+  // ✅ spawn worker atau timer
+end;
+```
+
+### `ws.serve(port, config) → serverHandle`
+
+Sama seperti sebelumnya — WS server.
 ### `ws.serve(port: int, config: dict) → int`
 
 Buat WebSocket server plain.

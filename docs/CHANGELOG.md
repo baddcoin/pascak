@@ -203,6 +203,17 @@ grep -n "Async File I/O" tutorial.md | head -3
 ```
 
 ## [Unreleased]
+**Bundle C — WebSocket Client**
+
+- **C.1** — WebSocket client `ws.connect(url, [config])`:
+  - Support `ws://` + `wss://`
+  - Callbacks: `onOpen`, `onMessage`, `onClose`, `onError`
+  - Handle methods: `send`, `sendBytes`, `close`, `isOpen`, `state`
+  - RFC 6455 compliant (masked frames, fragmentation, ping/pong, close handshake)
+  - TLS via shared context (respects `verify` flag)
+  - Scope v1: no subprotocol, no compression, no auto-reconnect
+  - 1 connection = 1 OS thread
+  - Test: `test/test_ws_client.pas` (10 assertions, echo round-trip)
 
 **Bundle A — Performance**
 
