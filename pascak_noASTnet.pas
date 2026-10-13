@@ -1915,6 +1915,9 @@ var //global
   GSignalCallbackTERM: TValueList = nil;
   GSignalLock: TCriticalSection = nil;
   GSignalInstalled: Boolean = False;
+  GShutdownHooks: TValueList = nil;
+  GShutdownLock: TCriticalSection = nil;
+  GShutdownRunning: LongInt = 0;
 
   ActiveThreads: LongInt = 0;// Menyimpan status jumlah thread aktif
   ThreadEvent: PRTLEvent;
@@ -32528,6 +32531,98 @@ end;//end Structured Logging
 
 //native Signal Handling════════════════════════════════════════════════════
 //═══════════════════════════════════════════════════════════════ }
+function Native_OnShutdown(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var Cb: TValue;
+begin
+  if (Args.Count <> 1) or (TValue(Args[0]).DataType <> dtFunction) then
+  begin
+    errMSG.callerror(139, 'onShutdown(fn) butuh 1 argumen fungsi',
+                     errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateBool(False));
+  end;
+  Cb := TValue(Args[0]);
+  if not Assigned(GShutdownLock) then Exit(TValue.CreateBool(False));
+  GShutdownLock.Acquire;
+  try
+    GShutdownHooks.Add(Cb.Clone);
+  finally
+    GShutdownLock.Release;
+  end;
+  Result := TValue.CreateBool(True);
+end;
+
+procedure RunShutdownHooks(CallEnv: TSymbolTable);
+var
+  i, HookCount: Integer;
+  Cb: TValue;
+  MiniVM: TVM;
+  TmpChunk: TChunk;
+  Res: TValue;
+  StartTime: QWord;
+  TimedOut: Boolean;
+begin
+  if not Assigned(GShutdownHooks) or not Assigned(GShutdownLock) then Exit;
+  if InterlockedCompareExchange(GShutdownRunning, 1, 0) <> 0 then Exit;
+
+  GShutdownLock.Acquire;
+  try HookCount := GShutdownHooks.Count;
+  finally GShutdownLock.Release; end;
+  if HookCount = 0 then Exit;
+
+  if Assigned(IOLock) then
+  begin
+    IOLock.Acquire;
+    try Writeln('[shutdown] running ', HookCount, ' hook(s)');
+    finally IOLock.Release; end;
+  end;
+
+  for i := HookCount - 1 downto 0 do
+  begin
+    Cb := nil;
+    GShutdownLock.Acquire;
+    try
+      if i < GShutdownHooks.Count then Cb := GShutdownHooks[i];
+    finally GShutdownLock.Release; end;
+    if not Assigned(Cb) then Continue;
+
+    MiniVM := nil; TmpChunk := nil; Res := nil;
+    TimedOut := False;
+    StartTime := GetTickCount64;
+    try
+      if Assigned(Cb.ClosureEnv) then MiniVM := TVM.Create(Cb.ClosureEnv)
+      else if Assigned(CallEnv) then MiniVM := TVM.Create(CallEnv.GetGlobal)
+      else MiniVM := TVM.Create(nil);
+      MiniVM.MaxExecutionTimeMs := 5000;
+
+      TmpChunk := TChunk.Create;
+      TmpChunk.AddInstruction(opcConstant, TmpChunk.AddConstant(Cb.Clone));
+      TmpChunk.AddInstruction(opcCall, 0);
+      TmpChunk.AddInstruction(opcReturn);
+      Res := MiniVM.Run(TmpChunk);
+      if Assigned(Res) then Res.Free;
+    except
+      on E: Exception do
+      begin
+        if (GetTickCount64 - StartTime) >= 5000 then TimedOut := True;
+        if Assigned(IOLock) then
+        begin
+          IOLock.Acquire;
+          try
+            if TimedOut then
+              Writeln(ErrOutput, '[shutdown] hook timeout (5s)')
+            else
+              Writeln(ErrOutput, '[shutdown] hook error: ', E.Message);
+          finally IOLock.Release; end;
+        end;
+      end;
+    end;
+    if Assigned(TmpChunk) then TmpChunk.Free;
+    if Assigned(MiniVM) then MiniVM.Free;
+  end;
+
+  InterlockedExchange(GShutdownRunning, 0);
+end;
+
 function Native_SignalOn(Args: TObjectList; CallEnv: TSymbolTable): TValue;
 var
   SigName: string;
@@ -33115,6 +33210,7 @@ begin
   GEnvv.DefineVar('jsonParse', TValue.CreateNative(@Native_JSONParse),true);
   GEnvv.DefineVar('jsonPath', TValue.CreateNative(@Native_JsonPath), true);
   GEnvv.DefineVar('jsonStringify', TValue.CreateNative(@Native_JSONStringify),true);
+  GEnvv.DefineVar('onShutdown', TValue.CreateNative(@Native_OnShutdown), true);
   GEnvv.DefineVar('sqliteConnect', TValue.CreateNative(@Native_SQLiteConnect),true);
   GEnvv.DefineVar('sqliteExec', TValue.CreateNative(@Native_SQLiteExec),true);
   GEnvv.DefineVar('sqliteQuery', TValue.CreateNative(@Native_SQLiteQuery),true);
@@ -35558,6 +35654,8 @@ begin
   GSignalLock := TCriticalSection.Create;
   GSignalCallbackINT := TValueList.Create(True);
   GSignalCallbackTERM := TValueList.Create(True);
+  GShutdownHooks := TValueList.Create(True);
+  GShutdownLock := TCriticalSection.Create;
 
   InitThreadErrors;
 
@@ -35823,6 +35921,11 @@ begin
     
     if Assigned(Engine) then
     begin
+      try
+        RunShutdownHooks(Engine.GlobalEnv);
+      except
+      end;    
+      
       Engine.Shutdown;
       
       // ✅ FIX: Process zombies SEBELUM Engine.Free.
