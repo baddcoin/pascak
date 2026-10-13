@@ -61,6 +61,361 @@ Dokumentasi lengkap API standard library Pascak VM.
 `runtimeStats`, `profilerEnable`, `profilerDisable`, `profilerReport`
 
 ---
+## Config
+
+Config management — dotenv, JSON, env override, runtime set dengan precedence chain.
+
+### `config.load(".env")`
+
+Load dotenv file. Support:
+- `KEY=value`
+- `KEY="quoted value"` — quote di-strip
+- `# comment` — di-skip
+- `export KEY=value` — `export ` di-strip
+
+```pascal
+config.load(".env");
+config.load("config.env");
+```
+
+### `config.loadJSON("config.json")`
+
+Load JSON object — key-value di-flatten ke string.
+
+```pascal
+config.loadJSON("config.json");
+```
+
+**Nested JSON** di-store sebagai JSON string. Untuk parse nested, pakai `jsonPath`:
+
+```pascal
+config.loadJSON("config.json");
+var dbHost := jsonPath(jsonParse(config.get("db")), "host");
+```
+
+### `config.get("KEY", [default]) → string | null`
+
+Lookup dengan precedence:
+
+1. **Runtime** (`config.set`)
+2. **File** (dari `config.load` / `loadJSON`)
+3. **Environment** (`sys.env`)
+4. **Default** (arg ke-2)
+
+```pascal
+var port := config.get("PORT", "8080");        // string
+var dbUrl := config.get("DATABASE_URL");       // null kalau tidak ada
+```
+
+Selalu return **string** — parsing manual untuk number/bool:
+
+```pascal
+var port := toInteger(config.get("PORT", "8080"));
+var debug := config.get("DEBUG", "false") == "true";
+```
+
+### `config.set("KEY", value)`
+
+Runtime override (prioritas tertinggi).
+
+```pascal
+config.set("PORT", "3000");
+config.set("DEBUG", "true");
+```
+
+### `config.has("KEY") → bool`
+
+Cek keberadaan di runtime + env.
+
+```pascal
+if config.has("DATABASE_URL") then
+  connectDb(config.get("DATABASE_URL"));
+```
+
+### `config.all() → dict`
+
+Snapshot semua key yang ada di runtime store.
+
+```pascal
+var all := config.all();
+for k in all.keys() do
+  log.debug("config: ", k, "=", all[k]);
+```
+
+### Pattern: Config + Log + Shutdown
+
+```pascal
+begin
+  // 1. Load config
+  config.load(".env");
+  config.loadJSON("config.json");
+
+  // 2. Setup log
+  log.setLevel(config.get("LOG_LEVEL", "info"));
+  log.setFormat(config.get("LOG_FORMAT", "plain"));
+
+  log.info("app starting");
+
+  // 3. Register cleanup
+  var DB := sqliteConnect(config.get("DB_PATH", "app.db"));
+  onShutdown(lambda : begin
+    log.info("closing database...");
+    sqliteClose(DB);
+  end);
+
+  // 4. Register signal
+  signal.on("SIGTERM", lambda : begin
+    log.info("received SIGTERM, shutting down");
+    sys.exit(0);
+  end);
+
+  // ... main logic ...
+end.
+```
+
+---
+
+## Logging
+
+Structured logging module — plain atau JSON output, level filter, multiple sink.
+
+### `log.debug(msg, ...) / log.info(msg, ...) / log.warn(msg, ...) / log.error(msg, ...)`
+
+Log pesan dengan level tertentu. Multi-arg di-concat (seperti `println`).
+
+```pascal
+log.debug("debug detail: x=", x);
+log.info("user login: ", userId);
+log.warn("retry attempt ", n, " of 3");
+log.error("db connection failed: ", err);
+```
+
+**Level** (dari rendah ke tinggi): `debug` (0) → `info` (1) → `warn` (2) → `error` (3).
+
+Default level = `info` — pesan `debug` di-skip sampai `setLevel("debug")`.
+
+**Format output**:
+```
+2026-10-13 07:06:20 [INFO] user login: 42
+2026-10-13 07:06:20 [ERROR] db connection failed: timeout
+```
+
+### `log.setLevel(level)`
+
+Filter pesan di bawah level ini.
+
+```pascal
+log.setLevel("debug");   // semua muncul
+log.setLevel("error");   // hanya error
+```
+
+**Level**: `"debug"`, `"info"`, `"warn"`, `"error"`.
+
+### `log.setFormat(format)`
+
+Ubah format output.
+
+```pascal
+log.setFormat("plain");   // default: '2026-10-13 07:06:20 [INFO] message'
+log.setFormat("json");    // '{"ts":"...","level":"info","msg":"message"}'
+```
+
+JSON escape otomatis untuk `"`, `\`, newline, tab.
+
+### `log.setOutput(sink, [path])`
+
+Ubah tujuan output.
+
+```pascal
+log.setOutput("stdout");                    // default
+log.setOutput("stderr");
+log.setOutput("file", "./app.log");         // append mode
+```
+
+**Path** file: sandbox-relative. File di-append (tidak truncate). Fail-silent kalau write error.
+
+### Best Practices
+
+```pascal
+// ✅ Development
+log.setLevel("debug");
+log.setFormat("plain");
+
+// ✅ Production
+log.setLevel("info");
+log.setFormat("json");              // JSON untuk log aggregator
+log.setOutput("file", "./app.log"); // persist
+
+// ✅ Error trace
+try
+  riskyOperation();
+catch e do
+  log.error("operation failed: ", e.message);
+end;
+```
+
+**Thread-safe**: internal lock, aman dipanggil dari callback worker.
+
+
+---
+## Signal
+
+Signal handling — graceful shutdown dari `kill`, Docker stop, Ctrl+C.
+
+### `signal.on(signalName, fn)`
+
+Register callback yang fire saat signal diterima.
+
+```pascal
+signal.on("SIGTERM", lambda : begin
+  log.info("graceful shutdown");
+  cleanup();
+  sys.exit(0);
+end);
+
+signal.on("SIGINT", handler);   // Ctrl+C
+```
+
+**Supported**: `"SIGINT"`, `"SIGTERM"`.
+
+**Behavior**:
+- Handler fire di **main thread** via event loop (safe TValue access)
+- Multiple handler per signal fire **berurutan** (urutan registrasi)
+- **No handler** → exit code POSIX standard:
+  - `SIGINT` → 130
+  - `SIGTERM` → 143
+
+### `signal.off(signalName)`
+
+Hapus **semua** handler untuk signal.
+
+```pascal
+signal.off("SIGTERM");
+```
+
+### `signal.raise(signalName)`
+
+Raise signal ke diri sendiri — untuk test.
+
+```pascal
+signal.raise("SIGTERM");   // trigger handler SIGTERM
+```
+
+**Catatan**: ini mengirim signal asli via `kill(getpid(), sig)`, bukan simulasi.
+
+### Contoh: Graceful HTTP Server
+
+```pascal
+var SRV := -1;
+
+function handler(req) begin
+  return {"status": 200, "body": "ok"};
+end;
+
+begin
+  SRV := http.serve(8080, handler);
+
+  signal.on("SIGTERM", lambda : begin
+    log.info("SIGTERM received");
+    http.stop(SRV);
+  end);
+
+  signal.on("SIGINT", lambda : begin
+    log.info("Ctrl+C pressed");
+    http.stop(SRV);
+  end);
+
+  log.info("server listening on :8080");
+  http.listenAsync(SRV);
+end.
+```
+
+### Catatan Platform
+
+- **Unix/Android**: pakai POSIX `fpSignal()`
+- **Windows**: belum diimplementasikan (limitasi OS — beda API)
+
+---
+## Shutdown Hooks
+
+Register callback yang fire saat script exit (`sys.exit()`) atau engine shutdown.
+
+### `onShutdown(fn)`
+
+Register cleanup callback.
+
+```pascal
+onShutdown(lambda : begin
+  log.info("closing database...");
+  sqliteClose(DB);
+end);
+
+onShutdown(flushLogs);
+```
+
+**Behavior**:
+- **LIFO order** — hook terakhir didaftarkan = fire pertama (stack semantics)
+- Fire **sebelum** engine teardown → DB/network/socket masih usable
+- **5 detik timeout** per hook — cegah hang
+- Error di satu hook **tidak** stop hook lain
+- Re-entrancy guard — hook tidak bisa trigger dirinya sendiri
+
+### Contoh: Cleanup Chain
+
+```pascal
+begin
+  var DB := sqliteConnect("app.db");
+  var LOG := fileAppend("audit.log", "session start\n");
+  var SOCK := net.connect("api.example.com", 443);
+
+  onShutdown(lambda : net.close(SOCK));
+  onShutdown(lambda : log.info("closing db"));
+  onShutdown(lambda : sqliteClose(DB));
+
+  // Fire order saat exit: sqliteClose → log → net.close (LIFO)
+
+  // ... main logic ...
+end.
+```
+
+### Best Practices
+
+| Cleanup | Order (LIFO) |
+|---------|-------------|
+| Register pertama | Fire terakhir |
+| Register terakhir | Fire pertama |
+
+**Aturan**: register yang **paling dasar** dulu (network, DB), lalu yang **paling specific** kemudian.
+
+Contoh:
+```pascal
+onShutdown(lambda : net.close(SOCK));   // register 1 → fire terakhir
+onShutdown(lambda : sqliteClose(DB));   // register 2 → fire kedua
+onShutdown(lambda : log.info("bye"));   // register 3 → fire pertama
+```
+
+Kalau cleanup butuh DB, register DB **terakhir** supaya DB di-close **pertama** saat shutdown.
+
+### Kombinasi dengan Signal
+
+```pascal
+begin
+  var DB := sqliteConnect("app.db");
+
+  onShutdown(lambda : begin
+    log.info("shutting down");
+    sqliteClose(DB);
+  end);
+
+  signal.on("SIGTERM", lambda : sys.exit(0));
+  signal.on("SIGINT", lambda : sys.exit(0));
+
+  // SIGTERM → handler fire → sys.exit → onShutdown fire → DB closed
+end.
+```
+
+---
+
 ## Timers
 
 Timer API publik — non-blocking, berbasis event loop internal.

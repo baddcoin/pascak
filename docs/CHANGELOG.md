@@ -204,6 +204,42 @@ grep -n "Async File I/O" tutorial.md | head -3
 
 ## [Unreleased]
 
+
+**Bundle B — Production Observability**
+
+- **A.2** — Structured logging module `log`:
+  - `log.debug/info/warn/error(msg, ...)` — 4 level
+  - `log.setLevel("debug|info|warn|error")` — filter
+  - `log.setFormat("plain|json")` — output format
+  - `log.setOutput("stdout|stderr|file", [path])` — sink
+  - Multi-arg concat, timestamp otomatis, thread-safe, fail-silent
+- **A.3** — Config management module `config`:
+  - `config.load(".env")` — dotenv parser (comments, quotes, export prefix)
+  - `config.loadJSON("config.json")` — JSON config
+  - `config.get("KEY", [default])` — lookup: runtime → file → env → default
+  - `config.set("KEY", value)` / `config.has("KEY")` / `config.all()`
+  - Precedence: runtime > file > env > default
+- **B.2** — Signal handling module `signal`:
+  - `signal.on("SIGINT|SIGTERM", fn)` — register handler
+  - `signal.off("SIGINT|SIGTERM")` — unregister all
+  - `signal.raise("SIGINT|SIGTERM")` — raise signal (test)
+  - Handler fire di main thread via event loop (bukan async-signal context)
+  - No handler → exit code 130 (SIGINT) / 143 (SIGTERM) — POSIX standard
+- **A.5** — `onShutdown(fn)` — cleanup hooks:
+  - LIFO order (last registered = first fired)
+  - Fire sebelum engine teardown (DB/network masih usable)
+  - 5 detik timeout per hook
+  - Error di satu hook tidak block hook lain
+
+### Changed
+- **Docs**: tambah section Log, Config, Signal, Shutdown di `pascak_api.md`
+
+---
+
+
+
+
+
 ### Added
 - **B.1** — Public Timer API:
   - `setTimeout(fn, ms) → timerID` — fire callback once after delay
