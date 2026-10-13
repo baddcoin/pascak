@@ -1951,6 +1951,7 @@ type
   function HTTPPoolPut(const Key, Host: string; Port, Sock: Integer; 
     TLSConn: TTLSConnection; TLSContextRef: TTLSContext): Boolean; forward;
   procedure LogWriteInternal(ALevel: Integer; const AMsg: string); forward;
+  function GenerateRequestID: string; forward;
 
 
 { ====================================================================
@@ -2004,6 +2005,13 @@ var //global
   // A.7 — Health checks
   GHealthChecks: TDictValue = nil;
   GHealthLock: TCriticalSection = nil;
+
+  // A.8 — Request ID tracking
+  GHTTPTraceEnabled: Boolean = False;
+  GHTTPTraceHeader: string = 'X-Request-ID';
+  GHTTPTraceResponseHeader: Boolean = True;
+  GHTTPTracePrefix: string = 'req-';
+  GHTTPTraceCounter: LongInt = 0;
 
   ActiveThreads: LongInt = 0;// Menyimpan status jumlah thread aktif
   ThreadEvent: PRTLEvent;
@@ -25434,7 +25442,8 @@ var
   LogSV, LogBV: TValue;
   LogLine: string;
   HandlerCallStart: QWord;
-
+  ReqRidValue: string;
+  
   procedure DBG(const Msg: string);
   begin
     {$IFDEF HTTP_DEBUG}
@@ -25650,6 +25659,21 @@ begin
           raise;
         end;
 
+        // A.8 — Request ID tracking
+        if GHTTPTraceEnabled then
+        begin
+          ReqRidValue := '';
+          for i := 0 to ReqNames.Count - 1 do
+            if SameText(ReqNames[i], GHTTPTraceHeader) then
+            begin
+              ReqRidValue := ReqValues[i];
+              Break;
+            end;
+          if ReqRidValue = '' then
+            ReqRidValue := GenerateRequestID;
+          ReqDict.SetValue('requestId', TValue.CreateStr(ReqRidValue));
+        end;
+
         // ─── Panggil handler ───
         HandlerStart := GetTickCount64;
         
@@ -25671,6 +25695,14 @@ begin
         DBG('calling handler');
         ResVal := MiniVM.Run(TempChunk);
         DBG('handler returned');
+
+        // A.8 — Echo request ID in response header
+        if GHTTPTraceEnabled and GHTTPTraceResponseHeader and
+           (ReqRidValue <> '') then
+        begin
+          RespNames.Add(GHTTPTraceHeader);
+          RespValues.Add(ReqRidValue);
+        end;
 
         // A.6 — Request logging
         if GHTTPLogEnabled and (GHTTPLogExclude.IndexOf(ReqPath) < 0) then
@@ -25695,10 +25727,15 @@ begin
               LogBV := nil;
             end;
           end;
-          LogLine := ReqMethod + ' ' + ReqPath + ' ' +
+          
+          LogLine := '';
+          if GHTTPTraceEnabled and (ReqRidValue <> '') then
+            LogLine := '[' + ReqRidValue + '] ';
+          LogLine := LogLine + ReqMethod + ' ' + ReqPath + ' ' +
                      IntToStr(LogStatus) + ' ' +
                      IntToStr(LogElapsed) + 'ms ' +
-                     IntToStr(LogBodyLen) + 'b';
+                     IntToStr(LogBodyLen) + 'b';          
+          
           if (GHTTPLogSlowMs > 0) and (LogElapsed >= QWord(GHTTPLogSlowMs)) then
             LogWriteInternal(2, LogLine + ' (SLOW)')
           else
@@ -33113,6 +33150,77 @@ begin
   end;
 end;
 
+//A.8 — Request ID Tracking══════════════════════════════════════
+//═══════════════════════════════════════════════════════════════ }
+
+function GenerateRequestID: string;
+var
+  RandBytes: RawByteString;
+  RandHex: string;
+  Counter: LongInt;
+begin
+  RandBytes := SecureRandomBytes(4);
+  RandHex := BytesToHex(RandBytes);
+  Counter := InterlockedIncrement(GHTTPTraceCounter);
+  Result := GHTTPTracePrefix + RandHex +
+            '-' + IntToHex(Counter, 6);
+end;
+
+function Native_HTTP_TraceRequests(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  Config, V: TValue;
+  Enabled: Boolean;
+begin
+  // No arg = disable
+  if Args.Count = 0 then
+  begin
+    GHTTPTraceEnabled := False;
+    Exit(TValue.CreateBool(False));
+  end;
+
+  if TValue(Args[0]).DataType <> dtDict then
+  begin
+    errMSG.callerror(140, 'http.traceRequests([config])',
+                     errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateBool(False));
+  end;
+
+  Config := TValue(Args[0]);
+  Enabled := True;
+
+  V := Config.DictVal.GetValueClone('enabled');
+  if Assigned(V) then
+  begin
+    Enabled := V.IsTrue;
+    V.Free;
+  end;
+
+  V := Config.DictVal.GetValueClone('header');
+  if Assigned(V) and (V.DataType = dtString) and (V.StrVal <> '') then
+    GHTTPTraceHeader := V.StrVal
+  else
+    GHTTPTraceHeader := 'X-Request-ID';
+  if Assigned(V) then V.Free;
+
+  V := Config.DictVal.GetValueClone('responseHeader');
+  if Assigned(V) then
+  begin
+    GHTTPTraceResponseHeader := V.IsTrue;
+    V.Free;
+  end;
+
+  V := Config.DictVal.GetValueClone('prefix');
+  if Assigned(V) and (V.DataType = dtString) then
+    GHTTPTracePrefix := V.StrVal
+  else
+    GHTTPTracePrefix := 'req-';
+  if Assigned(V) then V.Free;
+
+  GHTTPTraceEnabled := Enabled;
+
+  Result := TValue.CreateBool(True);
+end;//end A.8 — Request ID Tracking
+
 //A.7 — Health Checks═══════════════════════════════════════════
 //═══════════════════════════════════════════════════════════════ }
 
@@ -34525,6 +34633,7 @@ begin
   HTTPDef.Methods.Add('getAsync', TVMFunction.Create);
   HTTPDef.Methods.Add('serveTLS', TVMFunction.Create);
   HTTPDef.Methods.Add('logRequests', TVMFunction.Create);
+  HTTPDef.Methods.Add('traceRequests', TVMFunction.Create);
   HTTPDef.Methods.Add('poolStats', TVMFunction.Create);
   HTTPDef.Methods.Add('poolConfig', TVMFunction.Create);
   HTTPDef.Methods.Add('poolClear', TVMFunction.Create);
@@ -34536,6 +34645,7 @@ begin
   HTTPInst.Members.DefineVar('closeServer', TValue.CreateNative(@Native_HTTP_CloseServer));
   HTTPInst.Members.DefineVar('stop', TValue.CreateNative(@Native_HTTP_Stop));
   HTTPInst.Members.DefineVar('request', TValue.CreateNative(@Native_HTTP_Request));
+  HTTPInst.Members.DefineVar('traceRequests', TValue.CreateNative(@Native_HTTP_TraceRequests));
   HTTPInst.Members.DefineVar('get', TValue.CreateNative(@Native_HTTP_Get));
   HTTPInst.Members.DefineVar('post', TValue.CreateNative(@Native_HTTP_Post));
   HTTPInst.Members.DefineVar('getAsync',TValue.CreateNative(@Native_HTTP_GetAsync));
