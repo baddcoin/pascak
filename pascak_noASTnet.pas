@@ -166,6 +166,8 @@ type
 
   TStructFieldKind    = (fkInt8, fkInt16, fkInt32, fkInt64,
                           fkFloat32, fkFloat64, fkPointer, fkBool);
+  TWSClientState      = (wscsConnecting, wscsHandshake, wscsOpen,
+                          wscsClosing, wscsClosed);
   
   //VIRTUAL MECHINE
   TVMOpCode = (
@@ -398,7 +400,6 @@ type
   TGCState  = (gcWhite, gcBlack, gcZombie); 
   TVMState  = (vmReady, vmRunning, vmYielded, vmDead);
   TDebugStepMode = (dsmNone, dsmStepOver, dsmStepIn, dsmStepOut);
-  TWSConnState = (wscsHandshake, wscsOpen, wscsClosing, wscsClosed);
 
   TFFIArgType = (fatInt, fatFloat, fatString, fatPointer, fatStruct);
   TFFIRetType = (frtInt, frtFloat, frtString, frtPointer, frtVoid, frtStruct);  
@@ -1749,7 +1750,7 @@ type
     HeaderValues: TStringList;
     PeerIP: string;
     PeerPort: Integer;
-    State: TWSConnState;
+    State: TWSClientState; 
     FRefCount: LongInt;
     SendLock: TCriticalSection;   // serialize frame writes
     LastActivity: QWord;          // tick terakhir terima frame valid
@@ -1785,6 +1786,44 @@ type
     destructor Destroy; override;
     procedure Retain;
     procedure Release;
+  end;
+  
+  TWSClientConn = class
+  public
+    ID: string;
+    URL: string;
+    Host: string;
+    Port: Integer;
+    Path: string;
+    IsTLS: Boolean;
+    Verify: Boolean;
+    Sock: Integer;
+    TLSConn: TTLSConnection;
+    TLSContext: TTLSContext;
+    Parser: TWSFrameParser;
+    State: TWSClientState;
+    SendLock: TCriticalSection;
+    FRefCount: LongInt;
+    LastError: string;
+    OnOpen: TValue;
+    OnMessage: TValue;
+    OnClose: TValue;
+    OnError: TValue;
+  
+    constructor Create(const AID: string);
+    destructor Destroy; override;
+    procedure Retain;
+    procedure Release;
+  end;
+  
+  TWSClientThread = class(TThread)
+  private
+    FConn: TWSClientConn;
+  protected
+    procedure Execute; override;
+  public
+    constructor Create(AConn: TWSClientConn);
+    destructor Destroy; override;
   end;
   
   TWSListenerThread = class(TThread)
@@ -2038,6 +2077,13 @@ var //global
 
   GWSWorkers: TList;                 // of TWSWorkerThread
   GWSWorkersLock: TCriticalSection;
+
+  // Bundle C — WebSocket Client
+  GWSClientConns: TStringList = nil;
+  GWSClientConnsLock: TCriticalSection = nil;
+  GWSClientCounter: LongInt = 0;
+  GWSClientWorkers: TList = nil;
+  GWSClientWorkersLock: TCriticalSection = nil;
 
   GLibFFI: TLibHandle = NilHandle;
   GFFIAvailable: Boolean = False;
@@ -26236,6 +26282,187 @@ begin
   end;
 end;
 
+//Bundle C — WebSocket Client helpers════════════════════════════
+//═══════════════════════════════════════════════════════════════ }
+
+function GenerateWSClientID: string;
+begin
+  Result := 'wscl-' + IntToHex(InterlockedIncrement(GWSClientCounter), 8);
+end;
+
+procedure RegisterWSClientConn(C: TWSClientConn);
+begin
+  if (not Assigned(GWSClientConns)) or (not Assigned(C)) then Exit;
+  GWSClientConnsLock.Acquire;
+  try
+    C.Retain;
+    GWSClientConns.AddObject(C.ID, C);
+  finally
+    GWSClientConnsLock.Release;
+  end;
+end;
+
+procedure UnregisterWSClientConn(C: TWSClientConn);
+var Idx: Integer;
+begin
+  if (not Assigned(GWSClientConns)) or (not Assigned(C)) then Exit;
+  GWSClientConnsLock.Acquire;
+  try
+    Idx := GWSClientConns.IndexOf(C.ID);
+    if Idx >= 0 then GWSClientConns.Delete(Idx);
+  finally
+    GWSClientConnsLock.Release;
+  end;
+  C.Release;
+end;
+
+function FindWSClientConn(const ID: string): TWSClientConn;
+var Idx: Integer;
+begin
+  Result := nil;
+  if not Assigned(GWSClientConns) then Exit;
+  GWSClientConnsLock.Acquire;
+  try
+    Idx := GWSClientConns.IndexOf(ID);
+    if Idx >= 0 then
+      Result := TWSClientConn(GWSClientConns.Objects[Idx]);
+    if Assigned(Result) then Result.Retain;
+  finally
+    GWSClientConnsLock.Release;
+  end;
+end;
+
+function BuildWSClientFrame(Opcode: TWSOpcode;
+  const Payload: RawByteString; Fin: Boolean = True): RawByteString;
+var
+  Header: RawByteString;
+  B0: Byte;
+  Len: Int64;
+  MaskKey: array[0..3] of Byte;
+  RandBytes: RawByteString;
+  i: Integer;
+begin
+  RandBytes := SecureRandomBytes(4);
+  for i := 0 to 3 do
+    MaskKey[i] := Byte(RandBytes[i + 1]);
+
+  Len := Length(Payload);
+  B0 := Byte(Opcode);
+  if Fin then B0 := B0 or $80;
+
+  if Len < 126 then
+  begin
+    SetLength(Header, 6);
+    Header[1] := Char(B0);
+    Header[2] := Char($80 or Byte(Len));
+    Header[3] := Char(MaskKey[0]);
+    Header[4] := Char(MaskKey[1]);
+    Header[5] := Char(MaskKey[2]);
+    Header[6] := Char(MaskKey[3]);
+  end
+  else if Len <= 65535 then
+  begin
+    SetLength(Header, 8);
+    Header[1] := Char(B0);
+    Header[2] := Char($80 or 126);
+    Header[3] := Char((Len shr 8) and $FF);
+    Header[4] := Char(Len and $FF);
+    Header[5] := Char(MaskKey[0]);
+    Header[6] := Char(MaskKey[1]);
+    Header[7] := Char(MaskKey[2]);
+    Header[8] := Char(MaskKey[3]);
+  end
+  else
+  begin
+    SetLength(Header, 14);
+    Header[1]  := Char(B0);
+    Header[2]  := Char($80 or 127);
+    Header[3]  := Char((Len shr 56) and $FF);
+    Header[4]  := Char((Len shr 48) and $FF);
+    Header[5]  := Char((Len shr 40) and $FF);
+    Header[6]  := Char((Len shr 32) and $FF);
+    Header[7]  := Char((Len shr 24) and $FF);
+    Header[8]  := Char((Len shr 16) and $FF);
+    Header[9]  := Char((Len shr 8)  and $FF);
+    Header[10] := Char(Len and $FF);
+    Header[11] := Char(MaskKey[0]);
+    Header[12] := Char(MaskKey[1]);
+    Header[13] := Char(MaskKey[2]);
+    Header[14] := Char(MaskKey[3]);
+  end;
+
+  SetLength(Result, Length(Header) + Length(Payload));
+  Move(Header[1], Result[1], Length(Header));
+  for i := 1 to Length(Payload) do
+    Result[Length(Header) + i] := Char(
+      Byte(Payload[i]) xor MaskKey[(i - 1) mod 4]);
+end;
+
+function BuildWSClientHandle(C: TWSClientConn): TValue;
+var D: TDictValue;
+begin
+  D := TDictValue.Create;
+  try
+    D.SetValue('id', TValue.CreateStr(C.ID));
+    D.SetValue('url', TValue.CreateStr(C.URL));
+    D.SetValue('host', TValue.CreateStr(C.Host));
+    D.SetValue('port', TValue.CreateNum(C.Port));
+    D.SetValue('path', TValue.CreateStr(C.Path));
+    D.SetValue('tls', TValue.CreateBool(C.IsTLS));
+    D.SetValue('__ws_id', TValue.CreateStr(C.ID));
+    Result := TValue.CreateDict(D);
+  except
+    D.Free;
+    raise;
+  end;
+end;
+
+function WSClientSendRaw(C: TWSClientConn; const Data: RawByteString): Boolean;
+var Sent: Integer;
+begin
+  Result := False;
+  if (not Assigned(C)) or (Length(Data) = 0) then Exit;
+  C.SendLock.Acquire;
+  try
+    if Assigned(C.TLSConn) then
+      Sent := TLSSend(C.TLSConn, Data)
+    else if C.Sock >= 0 then
+      Sent := NetSend(C.Sock, Data)
+    else
+      Sent := -1;
+    Result := Sent > 0;
+  finally
+    C.SendLock.Release;
+  end;
+end;
+
+function BuildWSClientHandshake(const Host, Path: string;
+  Port: Integer; IsTLS: Boolean;
+  out ClientKey: string): RawByteString;
+var
+  RandBytes: RawByteString;
+  KeyB64: string;
+  HostHdr: string;
+begin
+  RandBytes := SecureRandomBytes(16);
+  KeyB64 := Base64Encode(RandBytes);
+  ClientKey := KeyB64;
+
+  if ((not IsTLS) and (Port = 80)) or (IsTLS and (Port = 443)) then
+    HostHdr := Host
+  else
+    HostHdr := Host + ':' + IntToStr(Port);
+
+  Result := RawByteString(
+    'GET ' + Path + ' HTTP/1.1' + #13#10 +
+    'Host: ' + HostHdr + #13#10 +
+    'Upgrade: websocket' + #13#10 +
+    'Connection: Upgrade' + #13#10 +
+    'Sec-WebSocket-Key: ' + KeyB64 + #13#10 +
+    'Sec-WebSocket-Version: 13' + #13#10 +
+    #13#10);
+end;//end Bundle C — WebSocket Client helpers
+
 function Native_WS_Serve(Args: TObjectList; CallEnv: TSymbolTable): TValue;
 var
   Port, Handle, Sock: Integer;
@@ -26405,6 +26632,131 @@ begin
   end;
   
   Result := TValue.CreateNum(ConnCount);
+end;
+
+function Native_WS_Connect(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  URL, Scheme, Rest, Host, Path, PortStr: string;
+  Port, ColonPos, SlashPos, SchemeEnd: Integer;
+  Config: TValue;
+  Conn: TWSClientConn;
+  Thread: TWSClientThread;
+  IsTLS: Boolean;
+  V: TValue;
+begin
+  if (Args.Count < 1) or (Args.Count > 2) or
+     (TValue(Args[0]).DataType <> dtString) then
+  begin
+    errMSG.callerror(140, 'ws.connect(url, [config])',
+                     errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateStr(''));
+  end;
+
+  URL := TValue(Args[0]).StrVal;
+  SchemeEnd := Pos('://', URL);
+  if SchemeEnd = 0 then
+  begin
+    errMSG.callerror(144, 'ws.connect: URL harus ws:// atau wss://',
+                     errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateStr(''));
+  end;
+
+  Scheme := LowerCase(Copy(URL, 1, SchemeEnd - 1));
+  if Scheme = 'wss' then
+  begin
+    IsTLS := True;
+    Port := 443;
+  end
+  else if Scheme = 'ws' then
+  begin
+    IsTLS := False;
+    Port := 80;
+  end
+  else
+  begin
+    errMSG.callerror(144, 'ws.connect: scheme harus ws:// atau wss://',
+                     errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateStr(''));
+  end;
+
+  Rest := Copy(URL, SchemeEnd + 3, Length(URL));
+  SlashPos := Pos('/', Rest);
+  if SlashPos = 0 then
+  begin
+    Host := Rest;
+    Path := '/';
+  end
+  else
+  begin
+    Host := Copy(Rest, 1, SlashPos - 1);
+    Path := Copy(Rest, SlashPos, Length(Rest));
+  end;
+
+  ColonPos := Pos(':', Host);
+  if ColonPos > 0 then
+  begin
+    PortStr := Copy(Host, ColonPos + 1, Length(Host));
+    Port := StrToIntDef(PortStr, Port);
+    Host := Copy(Host, 1, ColonPos - 1);
+  end;
+
+  if (Host = '') or (Port < 1) or (Port > 65535) then
+  begin
+    errMSG.callerror(144, 'ws.connect: host/port tidak valid',
+                     errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateStr(''));
+  end;
+
+  Conn := TWSClientConn.Create(GenerateWSClientID);
+  Conn.URL := URL;
+  Conn.Host := Host;
+  Conn.Port := Port;
+  Conn.Path := Path;
+  Conn.IsTLS := IsTLS;
+  Conn.Verify := True;
+
+  if Args.Count >= 2 then
+  begin
+    if TValue(Args[1]).DataType = dtDict then
+    begin
+      Config := TValue(Args[1]);
+      V := Config.DictVal.GetValueClone('onOpen');
+      if Assigned(V) and (V.DataType = dtFunction) then Conn.OnOpen := V
+      else if Assigned(V) then V.Free;
+
+      V := Config.DictVal.GetValueClone('onMessage');
+      if Assigned(V) and (V.DataType = dtFunction) then Conn.OnMessage := V
+      else if Assigned(V) then V.Free;
+
+      V := Config.DictVal.GetValueClone('onClose');
+      if Assigned(V) and (V.DataType = dtFunction) then Conn.OnClose := V
+      else if Assigned(V) then V.Free;
+
+      V := Config.DictVal.GetValueClone('onError');
+      if Assigned(V) and (V.DataType = dtFunction) then Conn.OnError := V
+      else if Assigned(V) then V.Free;
+
+      V := Config.DictVal.GetValueClone('verify');
+      if Assigned(V) then
+      begin
+        Conn.Verify := V.IsTrue;
+        V.Free;
+      end;
+    end;
+  end;
+
+  RegisterWSClientConn(Conn);
+  Thread := TWSClientThread.Create(Conn);
+
+  if Assigned(GWSClientWorkersLock) then
+  begin
+    GWSClientWorkersLock.Acquire;
+    try GWSClientWorkers.Add(Thread);
+    finally GWSClientWorkersLock.Release; end;
+  end;
+
+  Thread.Start;
+  Result := BuildWSClientHandle(Conn);
 end;
 
 function Native_WS_Broadcast(Args: TObjectList; CallEnv: TSymbolTable): TValue;
@@ -29476,13 +29828,80 @@ end;
 function DispatchWSConnMethod(const ConnID, MethodName: string;
   const Args: array of TValue): TValue;
 var
-  Conn: TWSConnection;
+  ServerConn: TWSConnection;
+  ClientConn: TWSClientConn;
   Payload: RawByteString;
   Code: Word;
 begin
   Result := nil;
-  Conn := FindWSConn(ConnID);   // retained
-  if not Assigned(Conn) then
+
+  // Client path — prefix 'wscl-'
+  if Copy(ConnID, 1, 5) = 'wscl-' then
+  begin
+    ClientConn := FindWSClientConn(ConnID);
+    if not Assigned(ClientConn) then
+    begin
+      Result := TValue.CreateBool(False);
+      Exit;
+    end;
+    try
+      if MethodName = 'send' then
+      begin
+        if Length(Args) <> 1 then Exit(TValue.CreateBool(False));
+        if Args[0].DataType = dtString then
+          Payload := RawByteString(Args[0].StrVal)
+        else
+          Payload := RawByteString(TValueToString(Args[0], False));
+        Result := TValue.CreateBool(
+          WSClientSendRaw(ClientConn, BuildWSClientFrame(wsText, Payload, True)));
+      end
+      else if MethodName = 'sendBytes' then
+      begin
+        if (Length(Args) <> 1) or (Args[0].DataType <> dtString) then
+          Exit(TValue.CreateBool(False));
+        Payload := RawByteString(Args[0].StrVal);
+        Result := TValue.CreateBool(
+          WSClientSendRaw(ClientConn, BuildWSClientFrame(wsBinary, Payload, True)));
+      end
+      else if MethodName = 'close' then
+      begin
+        Code := WS_CLOSE_NORMAL;
+        if (Length(Args) >= 1) and (Args[0].DataType = dtNumeric) then
+          Code := Word(Trunc(Args[0].NumVal));
+        
+        WSClientSendRaw(ClientConn, BuildWSClientFrame(wsClose,
+          Copy(BuildWSClose(Code, ''), 3, Length(BuildWSClose(Code, '')) - 2), True));        
+        
+        ClientConn.State := wscsClosing;
+        Result := TValue.CreateBool(True);
+      end
+      else if MethodName = 'isOpen' then
+        Result := TValue.CreateBool(ClientConn.State = wscsOpen)
+      else if MethodName = 'id' then
+        Result := TValue.CreateStr(ClientConn.ID)
+      else if MethodName = 'state' then
+      begin
+        case ClientConn.State of
+          wscsConnecting: Result := TValue.CreateStr('connecting');
+          wscsHandshake:  Result := TValue.CreateStr('handshake');
+          wscsOpen:       Result := TValue.CreateStr('open');
+          wscsClosing:    Result := TValue.CreateStr('closing');
+          wscsClosed:     Result := TValue.CreateStr('closed');
+        else
+          Result := TValue.CreateStr('unknown');
+        end;
+      end
+      else
+        Result := TValue.CreateBool(False);
+    finally
+      ClientConn.Release;
+    end;
+    Exit;
+  end;
+
+  // Server path (existing)
+  ServerConn := FindWSConn(ConnID);
+  if not Assigned(ServerConn) then
   begin
     Result := TValue.CreateBool(False);
     Exit;
@@ -29496,29 +29915,27 @@ begin
         Payload := RawByteString(Args[0].StrVal)
       else
         Payload := RawByteString(TValueToString(Args[0], False));
-      // A.2.4: pakai WSSendTextFrame (compress-aware)
-      Result := TValue.CreateBool(WSSendTextFrame(Conn, Payload));
+      Result := TValue.CreateBool(WSSendTextFrame(ServerConn, Payload));
     end
     else if MethodName = 'sendBytes' then
     begin
       if (Length(Args) <> 1) or (Args[0].DataType <> dtString) then
         Exit(TValue.CreateBool(False));
       Payload := RawByteString(Args[0].StrVal);
-      // A.2.4: pakai WSSendBinaryFrame
-      Result := TValue.CreateBool(WSSendBinaryFrame(Conn, Payload));
+      Result := TValue.CreateBool(WSSendBinaryFrame(ServerConn, Payload));
     end
     else if MethodName = 'close' then
     begin
       Code := WS_CLOSE_NORMAL;
       if (Length(Args) >= 1) and (Args[0].DataType = dtNumeric) then
         Code := Word(Trunc(Args[0].NumVal));
-      WSSendClose(Conn, Code, '');
+      WSSendClose(ServerConn, Code, '');
       Result := TValue.CreateBool(True);
     end
     else
       Result := TValue.CreateBool(False);
   finally
-    Conn.Release;
+    ServerConn.Release;
   end;
 end;
 
@@ -29568,16 +29985,23 @@ begin
         // ✅ Phase A: dispatch WebSocket connection method (thread mode)
         if TargetObj.DictVal.HasKey('__ws_id') then
         begin
-          WSIdStr := TargetObj.DictVal.GetValueClone('__ws_id');
-          try
-            if Assigned(WSIdStr) and (WSIdStr.DataType = dtString) then
-            begin
-              Result := DispatchWSConnMethod(WSIdStr.StrVal, MethodName, Args);
-              Exit;
+          // Only route WS-specific methods; fall through for dict methods
+          if (MethodName = 'send') or (MethodName = 'sendBytes') or
+             (MethodName = 'close') or (MethodName = 'isOpen') or
+             (MethodName = 'state') then
+          begin
+            WSIdStr := TargetObj.DictVal.GetValueClone('__ws_id');
+            try
+              if Assigned(WSIdStr) and (WSIdStr.DataType = dtString) then
+              begin
+                Result := DispatchWSConnMethod(WSIdStr.StrVal, MethodName, Args);
+                Exit;
+              end;
+            finally
+              if Assigned(WSIdStr) then WSIdStr.Free;
             end;
-          finally
-            if Assigned(WSIdStr) then WSIdStr.Free;
           end;
+          // Fall through to DictMethodsRegistry (hasKey, keys, get, etc.)
         end;
         
         // existing:
@@ -33346,6 +33770,7 @@ begin
   
   WSDef := TTypeDefinition.Create('WSLib', tkClass);
   TTypeDefinition(WSDef).Methods.Add('serve', TVMFunction.Create);
+  TTypeDefinition(WSDef).Methods.Add('connect', TVMFunction.Create);
   TTypeDefinition(WSDef).Methods.Add('serveTLS', TVMFunction.Create);
   TTypeDefinition(WSDef).Methods.Add('listen', TVMFunction.Create);
   TTypeDefinition(WSDef).Methods.Add('listenAsync', TVMFunction.Create);
@@ -33356,6 +33781,7 @@ begin
   
   WSInst := TInstanceValue.Create(TTypeDefinition(WSDef));
   TInstanceValue(WSInst).Members.DefineVar('serve',     TValue.CreateNative(@Native_WS_Serve));
+  TInstanceValue(WSInst).Members.DefineVar('connect', TValue.CreateNative(@Native_WS_Connect));
   TInstanceValue(WSInst).Members.DefineVar('serveTLS',  TValue.CreateNative(@Native_WS_ServeTLS));
   TInstanceValue(WSInst).Members.DefineVar('listen',    TValue.CreateNative(@Native_WS_Listen));
   TInstanceValue(WSInst).Members.DefineVar('listenAsync', TValue.CreateNative(@Native_WS_ListenAsync));
@@ -35678,9 +36104,354 @@ procedure TWSWorkerThread.Release;
 begin
   if InterlockedDecrement(FRefCount) = 0 then
     Self.Free;
+end;//end TWSWorkerThread 
+
+constructor TWSClientConn.Create(const AID: string);
+begin
+  inherited Create;
+  ID := AID;
+  URL := '';
+  Host := '';
+  Port := 0;
+  Path := '/';
+  IsTLS := False;
+  Verify := True;
+  Sock := -1;
+  TLSConn := nil;
+  TLSContext := nil;
+  Parser := TWSFrameParser.Create(False);
+  State := wscsConnecting;
+  SendLock := TCriticalSection.Create;
+  FRefCount := 1;
+  LastError := '';
+  OnOpen := nil;
+  OnMessage := nil;
+  OnClose := nil;
+  OnError := nil;
 end;
-//TWSWorkerThread end=======================
-//==========================================
+
+destructor TWSClientConn.Destroy;
+begin
+  if Assigned(TLSConn) then
+  begin
+    try TLSClose(TLSConn); except end;
+    try TLSConn.Release; except end;
+    TLSConn := nil;
+  end;
+  if Assigned(TLSContext) then
+  begin
+    try TLSContext.Release; except end;
+    TLSContext := nil;
+  end;
+  if Sock >= 0 then
+  begin
+    try NetClose(Sock); except end;
+    Sock := -1;
+  end;
+  if Assigned(Parser) then Parser.Free;
+  if Assigned(SendLock) then SendLock.Free;
+  if Assigned(OnOpen) then OnOpen.Free;
+  if Assigned(OnMessage) then OnMessage.Free;
+  if Assigned(OnClose) then OnClose.Free;
+  if Assigned(OnError) then OnError.Free;
+  inherited;
+end;
+
+procedure TWSClientConn.Retain;
+begin
+  InterlockedIncrement(FRefCount);
+end;
+
+procedure TWSClientConn.Release;
+begin
+  if InterlockedDecrement(FRefCount) = 0 then
+    Self.Free;
+end;
+
+constructor TWSClientThread.Create(AConn: TWSClientConn);
+begin
+  inherited Create(True);
+  FreeOnTerminate := False;
+  FConn := AConn;
+  FConn.Retain;
+end;
+
+destructor TWSClientThread.Destroy;
+begin
+  inherited;
+end;
+
+procedure TWSClientThread.Execute;
+var
+  ClientKey, ExpectedAccept, AcceptVal: string;
+  Handshake, Buf, BufAccum: RawByteString;
+  R, HdrEnd, i: Integer;
+  StatusLine, HeaderBlock: string;
+  HdrLines: TStringArray;
+  HdrLine: string;
+  Frame: TWSFrame;
+  FragActive: Boolean;
+  FragBuf: RawByteString;
+  FragOpcode: TWSOpcode;
+  CloseCode: Word;
+  CloseReason: string;
+  ConnHandle, MsgVal, CodeVal: TValue;
+  SavedContext: TEngineContext;
+  ShouldExit: Boolean;
+begin
+  SavedContext := GCurrentContext;
+  if not Assigned(errMSG) then errMSG := Terror.Create;
+
+  try
+    // ─── 1. TCP connect ───
+    if not NetConnect(FConn.Host, FConn.Port, 10000, FConn.Sock) then
+    begin
+      FConn.LastError := 'connect gagal: ' + NetLastError;
+      FConn.State := wscsClosed;
+      if Assigned(FConn.OnError) then
+      begin
+        MsgVal := TValue.CreateStr(FConn.LastError);
+        try CallWSCallback(FConn.OnError, [TValue.CreateNull, MsgVal]);
+        finally MsgVal.Free; end;
+      end;
+      Exit;
+    end;
+
+    // ─── 2. TLS handshake ───
+    if FConn.IsTLS then
+    begin
+      if not TLSInit then
+      begin
+        FConn.LastError := 'libssl tidak tersedia';
+        FConn.State := wscsClosed;
+        Exit;
+      end;
+      FConn.TLSContext := GetSharedTLSContext(FConn.Verify);
+      if not Assigned(FConn.TLSContext) then
+      begin
+        FConn.LastError := 'TLS context gagal dibuat';
+        FConn.State := wscsClosed;
+        Exit;
+      end;
+      if not TLSConnect(FConn.TLSContext, FConn.Sock, FConn.Host,
+                        FConn.TLSConn) then
+      begin
+        FConn.LastError := 'TLS handshake gagal: ' + FConn.TLSConn.LastError;
+        FConn.State := wscsClosed;
+        Exit;
+      end;
+    end;
+
+    // ─── 3. Send handshake ───
+    Handshake := BuildWSClientHandshake(FConn.Host, FConn.Path,
+                  FConn.Port, FConn.IsTLS, ClientKey);
+    if not WSClientSendRaw(FConn, Handshake) then
+    begin
+      FConn.LastError := 'send handshake gagal';
+      FConn.State := wscsClosed;
+      Exit;
+    end;
+    FConn.State := wscsHandshake;
+
+    // ─── 4. Read handshake response ───
+    BufAccum := '';
+    HdrEnd := 0;
+    while Length(BufAccum) < HTTP_MAX_HEADER_BYTES do
+    begin
+      if Assigned(FConn.TLSConn) then
+        R := TLSRecvTimeout(FConn.TLSConn, 4096, 10000, Buf)
+      else
+        R := NetRecvTimeout(FConn.Sock, 4096, 10000, Buf);
+      if R <= 0 then Break;
+      BufAccum := BufAccum + Buf;
+
+      for i := 1 to Length(BufAccum) - 3 do
+        if (BufAccum[i] = #13) and (BufAccum[i+1] = #10) and
+           (BufAccum[i+2] = #13) and (BufAccum[i+3] = #10) then
+        begin
+          HdrEnd := i + 3;
+          Break;
+        end;
+      if HdrEnd > 0 then Break;
+    end;
+
+    if HdrEnd = 0 then
+    begin
+      FConn.LastError := 'handshake response tidak lengkap';
+      FConn.State := wscsClosed;
+      Exit;
+    end;
+
+    HeaderBlock := Copy(BufAccum, 1, HdrEnd - 3);
+    HdrLines := HeaderBlock.Split([#13#10]);
+    if Length(HdrLines) = 0 then
+    begin
+      FConn.LastError := 'handshake response kosong';
+      FConn.State := wscsClosed;
+      Exit;
+    end;
+
+    StatusLine := HdrLines[0];
+    if Pos(' 101 ', StatusLine) = 0 then
+    begin
+      FConn.LastError := 'handshake gagal: ' + StatusLine;
+      FConn.State := wscsClosed;
+      Exit;
+    end;
+
+    ExpectedAccept := ComputeWSAccept(ClientKey);
+    AcceptVal := '';
+    for i := 1 to High(HdrLines) do
+    begin
+      HdrLine := HdrLines[i];
+      if (Length(HdrLine) >= 21) and
+         SameText(Copy(HdrLine, 1, 21), 'Sec-WebSocket-Accept:') then
+        AcceptVal := Trim(Copy(HdrLine, 22, Length(HdrLine)));
+    end;
+
+    if AcceptVal <> ExpectedAccept then
+    begin
+      FConn.LastError := 'handshake accept mismatch';
+      FConn.State := wscsClosed;
+      Exit;
+    end;
+
+    // Any data after headers → parser
+    if Length(BufAccum) > HdrEnd then
+      FConn.Parser.Append(Copy(BufAccum, HdrEnd + 1, Length(BufAccum) - HdrEnd));
+
+    FConn.State := wscsOpen;
+
+    // ─── 5. Fire onOpen ───
+    if Assigned(FConn.OnOpen) then
+    begin
+      ConnHandle := BuildWSClientHandle(FConn);
+      try CallWSCallback(FConn.OnOpen, [ConnHandle]);
+      finally ConnHandle.Free; end;
+    end;
+
+    // ─── 6. Frame loop ───
+    FragActive := False;
+    FragBuf := '';
+    ShouldExit := False;
+
+    while not ShouldExit do
+    begin
+      if InterlockedCompareExchange(IsShuttingDown, 0, 0) = 1 then Break;
+      if FConn.State in [wscsClosing, wscsClosed] then Break;
+
+      // Parse pending frames
+      while FConn.Parser.TryParse(Frame) do
+      begin
+        case Frame.Opcode of
+          wsText, wsBinary:
+            begin
+              if FragActive then
+              begin
+                ShouldExit := True;
+                Break;
+              end;
+              if Frame.Fin then
+              begin
+                if Assigned(FConn.OnMessage) then
+                begin
+                  ConnHandle := BuildWSClientHandle(FConn);
+                  MsgVal := TValue.CreateStr(string(Frame.Payload));
+                  try
+                    CallWSCallback(FConn.OnMessage, [ConnHandle, MsgVal]);
+                  finally
+                    MsgVal.Free;
+                    ConnHandle.Free;
+                  end;
+                end;
+              end
+              else
+              begin
+                FragActive := True;
+                FragOpcode := Frame.Opcode;
+                FragBuf := Frame.Payload;
+              end;
+            end;
+          wsContinuation:
+            begin
+              if not FragActive then
+              begin
+                ShouldExit := True;
+                Break;
+              end;
+              FragBuf := FragBuf + Frame.Payload;
+              if Frame.Fin then
+              begin
+                if Assigned(FConn.OnMessage) then
+                begin
+                  ConnHandle := BuildWSClientHandle(FConn);
+                  MsgVal := TValue.CreateStr(string(FragBuf));
+                  try
+                    CallWSCallback(FConn.OnMessage, [ConnHandle, MsgVal]);
+                  finally
+                    MsgVal.Free;
+                    ConnHandle.Free;
+                  end;
+                end;
+                FragActive := False;
+                FragBuf := '';
+              end;
+            end;
+          wsPing:
+            WSClientSendRaw(FConn, BuildWSFrame(wsPong, Frame.Payload, True));
+          wsPong: ;
+          wsClose:
+            begin
+              ParseClosePayload(Frame.Payload, CloseCode, CloseReason);
+              WSClientSendRaw(FConn, BuildWSClose(WS_CLOSE_NORMAL, ''));
+              ShouldExit := True;
+              Break;
+            end;
+        end;
+      end;
+
+      if ShouldExit then Break;
+
+      if Assigned(FConn.TLSConn) then
+        R := TLSRecvTimeout(FConn.TLSConn, 8192, 1000, Buf)
+      else
+        R := NetRecvTimeout(FConn.Sock, 8192, 1000, Buf);
+
+      if R > 0 then
+        FConn.Parser.Append(Buf)
+      else if R = 0 then
+        Break;   // clean close
+      // R < 0: timeout — continue loop
+    end;
+
+    // ─── 7. Fire onClose ───
+    FConn.State := wscsClosed;
+    if Assigned(FConn.OnClose) then
+    begin
+      ConnHandle := BuildWSClientHandle(FConn);
+      CodeVal := TValue.CreateNum(WS_CLOSE_NORMAL);
+      try CallWSCallback(FConn.OnClose, [ConnHandle, CodeVal]);
+      finally
+        CodeVal.Free;
+        ConnHandle.Free;
+      end;
+    end;
+
+  except
+    on E: Exception do
+    begin
+      FConn.LastError := E.Message;
+      FConn.State := wscsClosed;
+      PushThreadError('WSClient ' + E.ClassName + ': ' + E.Message);
+    end;
+  end;
+
+  UnregisterWSClientConn(FConn);
+  FConn.Release;
+  FlushThreadTLAB;
+  if Assigned(errMSG) then begin errMSG.Free; errMSG := nil; end;
+  GCurrentContext := SavedContext;
+end;
 
 constructor TWSListenerThread.Create(AServerHandle: Integer;
   AContext: TEngineContext);
@@ -36010,6 +36781,13 @@ begin
   InitWSServers;
   GWSWorkers := TList.Create;
   GWSWorkersLock := TCriticalSection.Create;
+  
+  GWSClientConns := TStringList.Create;
+  GWSClientConns.Sorted := True;
+  GWSClientConns.Duplicates := dupIgnore;
+  GWSClientConnsLock := TCriticalSection.Create;
+  GWSClientWorkers := TList.Create;
+  GWSClientWorkersLock := TCriticalSection.Create;  
 end;
 
 procedure runScript(scr: string; DebugMode: Boolean = False);
@@ -36237,6 +37015,47 @@ begin
       
       GWSWorkers.Free;     GWSWorkers := nil;
       GWSWorkersLock.Free; GWSWorkersLock := nil;
+    
+      // Bundle C — WS client cleanup
+      if Assigned(GWSClientWorkersLock) then
+      begin
+        GWSClientWorkersLock.Acquire;
+        try
+          for i := 0 to GWSClientWorkers.Count - 1 do
+          begin
+            if Assigned(GWSClientWorkers[i]) then
+              try TThread(GWSClientWorkers[i]).WaitFor; except end;
+          end;
+        finally
+          GWSClientWorkersLock.Release;
+        end;
+        for i := 0 to GWSClientWorkers.Count - 1 do
+          if Assigned(GWSClientWorkers[i]) then
+            try TThread(GWSClientWorkers[i]).Free; except end;
+        GWSClientWorkers.Free;      GWSClientWorkers := nil;
+        GWSClientWorkersLock.Free;  GWSClientWorkersLock := nil;
+      end;
+      if Assigned(GWSClientConnsLock) then
+      begin
+        GWSClientConnsLock.Acquire;
+        try
+          if Assigned(GWSClientConns) then
+          begin
+            for i := 0 to GWSClientConns.Count - 1 do
+              if Assigned(GWSClientConns.Objects[i]) then
+                try TWSClientConn(GWSClientConns.Objects[i]).Release; except end;
+            GWSClientConns.Clear;
+          end;
+        finally
+          GWSClientConnsLock.Release;
+        end;
+        if Assigned(GWSClientConns) then
+        begin
+          GWSClientConns.Free;
+          GWSClientConns := nil;
+        end;
+        GWSClientConnsLock.Free;    GWSClientConnsLock := nil;
+      end;    
     end;
     
     FreeWSServers;
