@@ -172,6 +172,225 @@ begin
   // ... main logic ...
 end.
 ```
+## Metrics
+
+Prometheus-compatible metrics module — counter, gauge, histogram.
+
+### `metrics.define(name, type, [help])`
+
+Register metric.
+
+```pascal
+metrics.define("http_requests_total", "counter", "Total HTTP requests");
+metrics.define("queue_size", "gauge", "Current queue size");
+metrics.define("request_duration_ms", "histogram", "Request latency");
+```
+
+**Types**: `counter` (monotonic), `gauge` (arbitrary), `histogram` (buckets).
+
+### `metrics.increment(name, [labels])` / `metrics.add(name, value, [labels])`
+
+Counter operations.
+
+```pascal
+metrics.increment("http_requests_total");
+metrics.increment("http_requests_total", {"method": "GET", "path": "/api"});
+metrics.add("bytes_sent_total", 1024, {"host": "example.com"});
+```
+
+### `metrics.set(name, value, [labels])`
+
+Gauge set.
+
+```pascal
+metrics.set("queue_size", 42);
+metrics.set("memory_mb", 128.5, {"pool": "worker"});
+```
+
+### `metrics.observe(name, value, [labels])`
+
+Histogram observe — auto-update buckets + sum + count.
+
+```pascal
+metrics.observe("request_duration_ms", 42.5);
+metrics.observe("request_duration_ms", 15.2, {"endpoint": "/users"});
+```
+
+**Buckets**: `[1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000]`.
+
+### `metrics.expose() → string`
+
+Prometheus text format.
+
+```pascal
+http.serve(9090, lambda req : begin
+  if req["path"] == "/metrics" then
+    return {"status": 200, "body": metrics.expose()};
+  return {"status": 404};
+end);
+```
+
+**Output**:
+```
+# HELP http_requests_total Total HTTP requests
+# TYPE http_requests_total counter
+http_requests_total{method="GET",path="/api"} 1234
+
+# HELP request_duration_ms Request latency
+# TYPE request_duration_ms histogram
+request_duration_ms_bucket{le="10"} 100
+request_duration_ms_bucket{le="50"} 500
+request_duration_ms_bucket{le="+Inf"} 1234
+request_duration_ms_sum 56789
+request_duration_ms_count 1234
+```
+
+### `metrics.reset() / metrics.list()`
+
+Reset values (definitions tetap) / list nama metric.
+
+---
+
+## Health
+
+Health check module — untuk Kubernetes/Docker readiness probes.
+
+### `health.register(name, fn)`
+
+Register check function. Return:
+- **bool** → `true` = ok, `false` = fail
+- **dict** → `{"ok": bool, ...extra}` — extra fields dipass-through
+- **other** → treated as ok, wrapped in `{ok: true, info: value}`
+- **exception** → caught, marked failed
+
+```pascal
+health.register("db", lambda : sqliteQuery(DB, "SELECT 1") != null);
+health.register("cache", lambda : {"ok": redis.ping(), "version": "1.0"});
+health.register("external_api", lambda : http.get("https://api.example.com/health").status == 200);
+```
+
+### `health.check() → dict`
+
+Run all checks, return aggregated status.
+
+```pascal
+var s := health.check();
+println(s["status"]);       // "ok" | "degraded" | "down"
+println(s["checks"]["db"]); // {ok: true, ms: 2}
+```
+
+**Status logic**:
+- Semua ok → `"ok"`
+- Sebagian fail → `"degraded"`
+- Semua fail → `"down"`
+- Tidak ada check → `"ok"`
+
+### `health.list() / health.unregister(name)`
+
+List nama check / hapus check.
+
+### Contoh — HTTP Health Endpoint
+
+```pascal
+health.register("db", lambda : sqliteQuery(DB, "SELECT 1") != null);
+
+var srv := http.serve(8081, lambda req : begin
+  if req["path"] == "/health" then begin
+    var s := health.check();
+    var code := s["status"] == "ok" ? 200 : 503;
+    return {"status": code, "headers": {"Content-Type": "application/json"},
+            "body": jsonStringify(s)};
+  end
+  if req["path"] == "/ready" then begin
+    var s := health.check();
+    return {"status": s["status"] == "ok" ? 200 : 503};
+  end
+  return {"status": 404};
+end);
+```
+
+---
+
+## Request Logging
+
+Auto-log HTTP requests — method, path, status, latency, size.
+
+### `http.logRequests(config)`
+
+Enable auto-logging. Hook di `Worker_HandleClient`.
+
+```pascal
+http.logRequests({
+  "enabled": true,
+  "slowMs": 1000,                      // warn threshold
+  "excludePaths": ["/health", "/metrics"]  // skip log untuk path ini
+});
+
+http.logRequests();   // disable
+```
+
+**Output**:
+```
+2026-10-13 20:29:36 [INFO] GET /api/users 200 12ms 45b
+2026-10-13 20:29:36 [WARN] GET /slow 200 1234ms 89b (SLOW)
+```
+
+**Integrasi** dengan A.8 request ID:
+```
+2026-10-13 20:29:36 [INFO] [req-abc12345-000001] GET /api/users 200 12ms 45b
+```
+
+---
+
+## Request ID Tracking
+
+Distributed tracing — propagate/generate unique request ID.
+
+### `http.traceRequests(config)`
+
+```pascal
+http.traceRequests({
+  "enabled": true,
+  "header": "X-Request-ID",   // default
+  "responseHeader": true,     // echo back
+  "prefix": "req-"            // auto-gen prefix
+});
+
+http.traceRequests();   // disable
+```
+
+**Behavior**:
+1. Extract ID dari incoming header `X-Request-ID`
+2. Kalau tidak ada → generate `req-XXXX-YYYYYY` (4 random bytes hex + counter)
+3. Inject ke req dict: `req["requestId"]`
+4. Echo balik di response header (kalau `responseHeader`)
+5. Auto-tag di log A.6
+
+### Contoh — Distributed Tracing
+
+```pascal
+http.traceRequests({"prefix": "order-"});
+
+function handler(req) begin
+  var rid := req["requestId"];
+  log.info("processing order, rid=", rid);
+
+  // Propagate ke downstream service
+  var downstream := http.post("https://payment.example.com/charge", {
+    "X-Request-ID": rid
+  }, jsonStringify(data));
+
+  return {"status": 200, "body": "OK"};
+end;
+```
+
+**Gunakan**:
+- **Log correlation** — `grep "req-abc123"` untuk trace satu request
+- **Debug user issue** — ask user untuk request ID dari error message
+- **Distributed tracing** — propagate ID via HTTP header antar service
+- **Sampling** — log semua request ID, sample 10% untuk full trace
+
+---
 
 ---
 

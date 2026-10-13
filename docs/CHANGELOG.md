@@ -201,6 +201,29 @@ ls -la CHANGELOG.md
 grep -n "Filesystem" pascak_api.md | head -3
 grep -n "Async File I/O" tutorial.md | head -3
 ```
+**Production Ops Bundle**
+
+- **A.4** — Metrics module (`metrics`):
+  - Prometheus-compatible counter/gauge/histogram
+  - `metrics.define/increment/add/set/observe/expose/reset/list`
+  - Labels dict optional (auto-sorted keys)
+  - Histogram buckets: 1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000
+  - Test: 9 assertions
+- **A.6** — HTTP request logging:
+  - `http.logRequests({slowMs, excludePaths})`
+  - Format: `[INFO] GET /path 200 12ms 45b`
+  - WARN threshold untuk slow request
+  - Test: 4 assertions
+- **A.7** — Health check module (`health`):
+  - `health.register/unregister/check/list`
+  - Check fn return bool | dict | other | throw
+  - Status: ok / degraded / down
+  - Test: 14 assertions
+- **A.8** — Request ID tracking:
+  - `http.traceRequests({header, responseHeader, prefix})`
+  - Extract/generate → inject ke req dict → echo di response
+  - Auto-integrate dengan A.6 log
+  - Test: 12 assertions
 
 ## [Unreleased]
 **Bundle C — WebSocket Client**
