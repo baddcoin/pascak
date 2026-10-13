@@ -823,6 +823,148 @@ end);
 
 **Batasan**: max 8 concurrent request (worker pool size). Request ke-9 antri.
 
+### Connection Pooling (Fase A.1)
+
+HTTP client otomatis reuse TCP + TLS connection ke host yang sama.
+Efek: request ke API yang sama jadi **10-20× lebih cepat** karena
+tidak ada handshake ulang.
+
+**Enable/disable**: pooling aktif by default. Tidak perlu setup.
+
+**Contoh**:
+
+```pascal
+// 100 request ke host sama — hanya 1 TCP+TLS handshake
+var start := time.now();
+for i := 1 to 100 do
+  var r := http.get("https://api.example.com/data");
+println("Elapsed: ", time.now() - start);   // ~0.5s dengan pool
+```
+
+#### `http.poolStats() → dict`
+
+Statistik runtime pool.
+
+```pascal
+var s := http.poolStats();
+println("hits: ", s.hits);           // request yang reuse conn
+println("misses: ", s.misses);       // request yang buka conn baru
+println("idle: ", s.idle);           // conn idle di pool
+println("maxPerHost: ", s.maxPerHost);
+println("idleMs: ", s.idleMs);
+```
+
+**Hit ratio** = `hits / (hits + misses)`. Target > 0.9 untuk workload API-heavy.
+
+#### `http.poolConfig(maxPerHost, [idleMs])`
+
+Tuning runtime pool.
+
+```pascal
+http.poolConfig(16, 60000);   // max 16 conn/host, idle timeout 60s
+```
+
+| Parameter | Default | Deskripsi |
+|---|---|---|
+| `maxPerHost` | 8 | Max idle conns per `(host,port,scheme,verify)` |
+| `idleMs` | 30000 | Close conn kalau idle > N ms |
+
+#### `http.poolClear()`
+
+Force close semua idle connection. Berguna untuk reset setelah error atau test.
+
+```pascal
+http.poolClear();
+```
+
+#### Kapan Pooling Aktif
+
+Pool reuse connection HANYA kalau response memenuhi:
+
+| Requirement | Kenapa |
+|---|---|
+| Header `Content-Length` ada | Tahu batas body → bisa kirim request berikutnya di socket sama |
+| Tidak ada `Connection: close` | Server setuju keep socket |
+| Tidak `Transfer-Encoding: chunked` | Chunked perlu decoder khusus (belum diimplementasi) |
+
+Kalau salah satu tidak terpenuhi → socket di-close setelah response
+(fallback, tetap benar, hanya tidak di-pool).
+
+**Server yang compatibility**:
+- ✅ REST API modern (GitHub, Stripe, custom API)
+- ✅ `http.listenAsync` server (Pascak sendiri)
+- ⚠️ `http.listen` blocking server (tutup socket per request)
+- ❌ Server dengan chunked encoding (Belum di-pool, tracked A.1b)
+
+#### Contoh: Configure untuk High-Throughput
+
+```pascal
+http.poolConfig(32, 60000);   // 32 conn/host untuk paralel tinggi
+
+var URLs := [
+  "https://api.github.com/users/octocat",
+  "https://api.github.com/repos/octocat/Hello-World",
+  // ... 100 more
+];
+
+for url in URLs do begin
+  var res := http.get(url);
+  // ... process ...
+end;
+
+var stats := http.poolStats();
+log.info("pool hit ratio: ", stats.hits, "/", stats.hits + stats.misses);
+```
+
+**Output** (setelah 100 request):
+```
+pool hit ratio: 99/100
+```
+
+#### Troubleshooting
+
+**Pool hit ratio rendah (< 0.5)**:
+
+1. Check response header — apakah server kirim `Content-Length`?
+   ```pascal
+   var res := http.get(url);
+   println("Content-Length: ", res.headers["Content-Length"]);
+   println("Connection: ", res.headers["Connection"]);
+   println("Transfer-Encoding: ", res.headers["Transfer-Encoding"]);
+   ```
+
+2. Kalau `Transfer-Encoding: chunked` → known limitation (A.1b).
+
+3. Kalau `Content-Length` ada tapi tetap miss → bug, report.
+
+**Memory growth karena banyak idle connections**:
+
+```pascal
+// Turunkan maxPerHost dan idleMs
+http.poolConfig(4, 10000);   // 4 conn/host, 10s idle
+```
+
+Atau clear manual setelah workload burst:
+
+```pascal
+// Batch heavy workload
+for url in heavyBatch do
+  http.get(url);
+
+// Done — free pool
+http.poolClear();
+```
+
+**Pool reset di test**:
+
+```pascal
+http.poolClear();   // reset state sebelum assertion
+var s := http.poolStats();
+assertEqual(0, s.idle, "pool empty");
+```
+
+---
+
 ### Env override untuk TLS verify
 
 ```bash

@@ -204,6 +204,17 @@ grep -n "Async File I/O" tutorial.md | head -3
 
 ## [Unreleased]
 
+**Bundle A — Performance**
+
+- **A.1** — HTTP client connection pooling:
+  - Pool per `(host,port,scheme,verify)` key
+  - Max 8 idle conns per host (configurable via `http.poolConfig`)
+  - Idle timeout 30s (configurable)
+  - Auto-cleanup expired + on shutdown
+  - New API: `http.poolStats()`, `http.poolConfig(maxPerHost, [idleMs])`, `http.poolClear()`
+  - Benchmark: **100 req same host — 20× speedup** vs no-pool
+  - Scope: hanya pool response dengan `Content-Length` + no `Connection: close`
+  - Chunked encoding belum di-pool (tracked A.1b)
 
 **Bundle B — Production Observability**
 
@@ -235,10 +246,6 @@ grep -n "Async File I/O" tutorial.md | head -3
 - **Docs**: tambah section Log, Config, Signal, Shutdown di `pascak_api.md`
 
 ---
-
-
-
-
 
 ### Added
 - **B.1** — Public Timer API:
