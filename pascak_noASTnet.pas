@@ -1950,6 +1950,7 @@ type
   function HTTPPoolGet(const Key: string): PHTTPPooledConn; forward;
   function HTTPPoolPut(const Key, Host: string; Port, Sock: Integer; 
     TLSConn: TTLSConnection; TLSContextRef: TTLSContext): Boolean; forward;
+  procedure LogWriteInternal(ALevel: Integer; const AMsg: string); forward;
 
 
 { ====================================================================
@@ -1994,6 +1995,11 @@ var //global
   // Production Ops (A.4 metrics)
   GMetrics: TStringList = nil;
   GMetricsLock: TCriticalSection = nil;
+
+  // A.6 — Request logging
+  GHTTPLogEnabled: Boolean = False;
+  GHTTPLogExclude: TStringList = nil;
+  GHTTPLogSlowMs: Integer = 1000;
 
   ActiveThreads: LongInt = 0;// Menyimpan status jumlah thread aktif
   ThreadEvent: PRTLEvent;
@@ -25416,6 +25422,15 @@ var
   KeepAliveReqCount: Integer;
   IdleTimeoutReached: Boolean;
 
+  // A.6 — Request logging
+  HandlerStart: QWord;
+  LogElapsed: QWord;
+  LogStatus: Integer;
+  LogBodyLen: Integer;
+  LogSV, LogBV: TValue;
+  LogLine: string;
+  HandlerCallStart: QWord;
+
   procedure DBG(const Msg: string);
   begin
     {$IFDEF HTTP_DEBUG}
@@ -25632,13 +25647,15 @@ begin
         end;
 
         // ─── Panggil handler ───
+        HandlerStart := GetTickCount64;
+        
         if Assigned(HandlerVal.ClosureEnv) then
           MiniVM := TVM.Create(HandlerVal.ClosureEnv)
         else if Assigned(CallEnv) then
           MiniVM := TVM.Create(CallEnv.GetGlobal)
         else
           MiniVM := TVM.Create(nil);
-
+          
         TempChunk := TChunk.Create;
         TempChunk.AddInstruction(opcConstant,
           TempChunk.AddConstant(HandlerVal.Clone));
@@ -25651,6 +25668,39 @@ begin
         ResVal := MiniVM.Run(TempChunk);
         DBG('handler returned');
 
+        // A.6 — Request logging
+        if GHTTPLogEnabled and (GHTTPLogExclude.IndexOf(ReqPath) < 0) then
+        begin
+          LogElapsed := GetTickCount64 - HandlerStart;
+          LogStatus := 200;
+          LogBodyLen := 0;
+          if Assigned(ResVal) and (ResVal.DataType = dtDict) then
+          begin
+            LogSV := ResVal.DictVal.GetValueClone('status');
+            if Assigned(LogSV) then
+            begin
+              if LogSV.DataType = dtNumeric then LogStatus := Trunc(LogSV.NumVal);
+              LogSV.Free;
+              LogSV := nil;
+            end;
+            LogBV := ResVal.DictVal.GetValueClone('body');
+            if Assigned(LogBV) then
+            begin
+              if LogBV.DataType = dtString then LogBodyLen := Length(LogBV.StrVal);
+              LogBV.Free;
+              LogBV := nil;
+            end;
+          end;
+          LogLine := ReqMethod + ' ' + ReqPath + ' ' +
+                     IntToStr(LogStatus) + ' ' +
+                     IntToStr(LogElapsed) + 'ms ' +
+                     IntToStr(LogBodyLen) + 'b';
+          if (GHTTPLogSlowMs > 0) and (LogElapsed >= QWord(GHTTPLogSlowMs)) then
+            LogWriteInternal(2, LogLine + ' (SLOW)')
+          else
+            LogWriteInternal(1, LogLine);
+        end;
+        
         // ─── Build response ───
         StatusCode := 200;
         RespBody := '';
@@ -33059,6 +33109,74 @@ begin
   end;
 end;
 
+function Native_HTTP_LogRequests(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  Config: TValue;
+  V, Item: TValue;
+  Keys: TStringArray;
+  i: Integer;
+  Enabled: Boolean;
+  SlowMs: Integer;
+begin
+  // No arg = disable
+  if Args.Count = 0 then
+  begin
+    GHTTPLogEnabled := False;
+    Exit(TValue.CreateBool(False));
+  end;
+
+  if TValue(Args[0]).DataType <> dtDict then
+  begin
+    errMSG.callerror(140, 'http.logRequests([config])',
+                     errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateBool(False));
+  end;
+
+  Config := TValue(Args[0]);
+  Enabled := True;
+  SlowMs := 1000;
+
+  V := Config.DictVal.GetValueClone('enabled');
+  if Assigned(V) then
+  begin
+    Enabled := V.IsTrue;
+    V.Free;
+  end;
+
+  V := Config.DictVal.GetValueClone('slowMs');
+  if Assigned(V) then
+  begin
+    if V.DataType = dtNumeric then SlowMs := Trunc(V.NumVal);
+    V.Free;
+  end;
+
+  GHTTPLogExclude.Clear;
+
+  V := Config.DictVal.GetValueClone('excludePaths');
+  if Assigned(V) and (V.DataType = dtArray) then
+  begin
+    V.ArrayVal.FLock.Acquire;
+    try
+      for i := 0 to V.ArrayVal.Count - 1 do
+      begin
+        Item := V.ArrayVal[i];
+        if Assigned(Item) and (Item.DataType = dtString) then
+          GHTTPLogExclude.Add(Item.StrVal);
+      end;
+    finally
+      V.ArrayVal.FLock.Release;
+    end;
+    V.Free;
+  end
+  else if Assigned(V) then
+    V.Free;
+
+  GHTTPLogEnabled := Enabled;
+  GHTTPLogSlowMs := SlowMs;
+
+  Result := TValue.CreateBool(True);
+end;
+
 function Native_HTTP_PoolStats(Args: TObjectList; CallEnv: TSymbolTable): TValue;
 var D: TDictValue;
 begin
@@ -34174,6 +34292,7 @@ begin
   HTTPDef.Methods.Add('post', TVMFunction.Create);
   HTTPDef.Methods.Add('getAsync', TVMFunction.Create);
   HTTPDef.Methods.Add('serveTLS', TVMFunction.Create);
+  HTTPDef.Methods.Add('logRequests', TVMFunction.Create);
   HTTPDef.Methods.Add('poolStats', TVMFunction.Create);
   HTTPDef.Methods.Add('poolConfig', TVMFunction.Create);
   HTTPDef.Methods.Add('poolClear', TVMFunction.Create);
@@ -34189,6 +34308,7 @@ begin
   HTTPInst.Members.DefineVar('post', TValue.CreateNative(@Native_HTTP_Post));
   HTTPInst.Members.DefineVar('getAsync',TValue.CreateNative(@Native_HTTP_GetAsync));
   HTTPInst.Members.DefineVar('serveTLS',TValue.CreateNative(@Native_HTTP_ServeTLS));
+  HTTPInst.Members.DefineVar('logRequests', TValue.CreateNative(@Native_HTTP_LogRequests));
   HTTPInst.Members.DefineVar('poolStats', TValue.CreateNative(@Native_HTTP_PoolStats));
   HTTPInst.Members.DefineVar('poolConfig', TValue.CreateNative(@Native_HTTP_PoolConfig));
   HTTPInst.Members.DefineVar('poolClear', TValue.CreateNative(@Native_HTTP_PoolClear));  
@@ -37205,6 +37325,9 @@ begin
   GMetrics.Sorted := True;
   GMetrics.Duplicates := dupIgnore;
   GMetricsLock := TCriticalSection.Create;
+  GHTTPLogExclude := TStringList.Create;
+  GHTTPLogExclude.Sorted := True;
+  GHTTPLogExclude.Duplicates := dupIgnore;
 
   InitThreadErrors;
 
