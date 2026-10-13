@@ -2001,6 +2001,10 @@ var //global
   GHTTPLogExclude: TStringList = nil;
   GHTTPLogSlowMs: Integer = 1000;
 
+  // A.7 — Health checks
+  GHealthChecks: TDictValue = nil;
+  GHealthLock: TCriticalSection = nil;
+
   ActiveThreads: LongInt = 0;// Menyimpan status jumlah thread aktif
   ThreadEvent: PRTLEvent;
 
@@ -33109,6 +33113,222 @@ begin
   end;
 end;
 
+//A.7 — Health Checks═══════════════════════════════════════════
+//═══════════════════════════════════════════════════════════════ }
+
+function Native_HealthRegister(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+begin
+  if (Args.Count <> 2) or (TValue(Args[0]).DataType <> dtString) or
+     (TValue(Args[1]).DataType <> dtFunction) then
+  begin
+    errMSG.callerror(140, 'health.register(name, fn)', errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateBool(False));
+  end;
+  if not Assigned(GHealthLock) or not Assigned(GHealthChecks) then
+    Exit(TValue.CreateBool(False));
+  GHealthLock.Acquire;
+  try
+    GHealthChecks.SetValue(TValue(Args[0]).StrVal, TValue(Args[1]).Clone);
+  finally
+    GHealthLock.Release;
+  end;
+  Result := TValue.CreateBool(True);
+end;
+
+function Native_HealthUnregister(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+begin
+  if (Args.Count <> 1) or (TValue(Args[0]).DataType <> dtString) then
+  begin
+    errMSG.callerror(139, 'health.unregister(name)', errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateBool(False));
+  end;
+  if not Assigned(GHealthLock) or not Assigned(GHealthChecks) then
+    Exit(TValue.CreateBool(False));
+  GHealthLock.Acquire;
+  try
+    if GHealthChecks.HasKey(TValue(Args[0]).StrVal) then
+    begin
+      GHealthChecks.Remove(TValue(Args[0]).StrVal);
+      Result := TValue.CreateBool(True);
+    end
+    else
+      Result := TValue.CreateBool(False);
+  finally
+    GHealthLock.Release;
+  end;
+end;
+
+function Native_HealthList(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  Arr: TValueList;
+  Keys: TStringArray;
+  i: Integer;
+begin
+  Arr := TValueList.Create(True);
+  try
+    if Assigned(GHealthLock) and Assigned(GHealthChecks) then
+    begin
+      GHealthLock.Acquire;
+      try
+        Keys := GHealthChecks.GetKeys;
+      finally
+        GHealthLock.Release;
+      end;
+      for i := 0 to High(Keys) do
+        Arr.Add(TValue.CreateStr(Keys[i]));
+    end;
+    Result := TValue.CreateArray(Arr);
+  except
+    Arr.Free;
+    raise;
+  end;
+end;
+
+function Native_HealthCheck(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  Results, Overall, CheckDict: TDictValue;
+  Keys, RKeys: TStringArray;
+  i, j, okCount, failCount: Integer;
+  Fn, ResVal, OkVal, Rv: TValue;
+  MiniVM: TVM;
+  TmpChunk: TChunk;
+  StartTick, Elapsed: QWord;
+  StatusStr: string;
+  HasOk, IsOk, ErrCaught: Boolean;
+begin
+  Results := TDictValue.Create;
+  okCount := 0;
+  failCount := 0;
+
+  if not Assigned(GHealthLock) or not Assigned(GHealthChecks) then
+  begin
+    Overall := TDictValue.Create;
+    Overall.SetValue('status', TValue.CreateStr('ok'));
+    Overall.SetValue('checks', TValue.CreateDict(Results));
+    Exit(TValue.CreateDict(Overall));
+  end;
+
+  GHealthLock.Acquire;
+  try
+    Keys := GHealthChecks.GetKeys;
+  finally
+    GHealthLock.Release;
+  end;
+
+  for i := 0 to High(Keys) do
+  begin
+    Fn := nil;
+    GHealthLock.Acquire;
+    try
+      Fn := GHealthChecks.GetValueClone(Keys[i]);
+    finally
+      GHealthLock.Release;
+    end;
+
+    if not Assigned(Fn) then Continue;
+    if Fn.DataType <> dtFunction then
+    begin
+      Fn.Free;
+      Continue;
+    end;
+
+    StartTick := GetTickCount64;
+    if Assigned(CallEnv) then
+      MiniVM := TVM.Create(CallEnv.GetGlobal)
+    else
+      MiniVM := TVM.Create(nil);
+    TmpChunk := TChunk.Create;
+    ResVal := nil;
+    ErrCaught := False;
+    try
+      TmpChunk.AddInstruction(opcConstant, TmpChunk.AddConstant(Fn));
+      Fn := nil;   // ownership transferred to Constants
+      TmpChunk.AddInstruction(opcCall, 0);
+      TmpChunk.AddInstruction(opcReturn);
+      try
+        ResVal := MiniVM.Run(TmpChunk);
+      except
+        on E: Exception do
+        begin
+          ErrCaught := True;
+          CheckDict := TDictValue.Create;
+          CheckDict.SetValue('ok', TValue.CreateBool(False));
+          CheckDict.SetValue('error', TValue.CreateStr(E.Message));
+          Elapsed := GetTickCount64 - StartTick;
+          CheckDict.SetValue('ms', TValue.CreateNum(Elapsed));
+          Results.SetValue(Keys[i], TValue.CreateDict(CheckDict));
+          Inc(failCount);
+        end;
+      end;
+    finally
+      if Assigned(TmpChunk) then TmpChunk.Free;
+      if Assigned(MiniVM) then MiniVM.Free;
+      if Assigned(Fn) then Fn.Free;   // only if not yet transferred
+    end;
+
+    if ErrCaught then Continue;
+
+    Elapsed := GetTickCount64 - StartTick;
+    CheckDict := TDictValue.Create;
+
+    if Assigned(ResVal) and (ResVal.DataType = dtBoolean) then
+    begin
+      CheckDict.SetValue('ok', TValue.CreateBool(ResVal.BoolVal));
+      if ResVal.BoolVal then Inc(okCount) else Inc(failCount);
+    end
+    else if Assigned(ResVal) and (ResVal.DataType = dtDict) then
+    begin
+      HasOk := ResVal.DictVal.HasKey('ok');
+      IsOk := True;
+      if HasOk then
+      begin
+        OkVal := ResVal.DictVal.GetValueClone('ok');
+        if Assigned(OkVal) then
+        begin
+          IsOk := OkVal.IsTrue;
+          OkVal.Free;
+        end;
+      end;
+      CheckDict.SetValue('ok', TValue.CreateBool(IsOk));
+      if IsOk then Inc(okCount) else Inc(failCount);
+
+      RKeys := ResVal.DictVal.GetKeys;
+      for j := 0 to High(RKeys) do
+      begin
+        if RKeys[j] = 'ok' then Continue;
+        Rv := ResVal.DictVal.GetValueClone(RKeys[j]);
+        if Assigned(Rv) then CheckDict.SetValue(RKeys[j], Rv);
+      end;
+    end
+    else
+    begin
+      CheckDict.SetValue('ok', TValue.CreateBool(True));
+      if Assigned(ResVal) then
+        CheckDict.SetValue('info', ResVal.Clone)
+      else
+        CheckDict.SetValue('info', TValue.CreateNull);
+      Inc(okCount);
+    end;
+
+    CheckDict.SetValue('ms', TValue.CreateNum(Elapsed));
+    Results.SetValue(Keys[i], TValue.CreateDict(CheckDict));
+    if Assigned(ResVal) then ResVal.Free;
+  end;
+
+  if failCount = 0 then
+    StatusStr := 'ok'
+  else if okCount = 0 then
+    StatusStr := 'down'
+  else
+    StatusStr := 'degraded';
+
+  Overall := TDictValue.Create;
+  Overall.SetValue('status', TValue.CreateStr(StatusStr));
+  Overall.SetValue('checks', TValue.CreateDict(Results));
+  Result := TValue.CreateDict(Overall);
+end;//end A.7 — Health Checks
+
+
 function Native_HTTP_LogRequests(Args: TObjectList; CallEnv: TSymbolTable): TValue;
 var
   Config: TValue;
@@ -34000,13 +34220,13 @@ var
   CryptoDef, NetDef, HTTPDef, FSDef,
   DLLDef, TLSDef, NativeLibDef, 
   WSDef, PkgDef, LogDef, ConfigDef,
-  SignalDef, MetricsDef : TTypeDefinition; 
+  SignalDef, MetricsDef, HealthDef : TTypeDefinition; 
   
   MathInst, HardInst, TimeInst, SysInst, 
   CryptoInst, NetInst, HTTPInst, FSInst,
   DLLInst, TLSInst, NativeLibInst, 
   WSInst, PkgInst, LogInst, ConfigInst,
-  SignalInst, MetricsInst: TInstanceValue; 
+  SignalInst, MetricsInst, HealthInst: TInstanceValue; 
 
 begin
   SignalDef := TTypeDefinition.Create('SignalLib', tkClass);
@@ -34034,6 +34254,18 @@ begin
   ConfigInst.Members.DefineVar('set',      TValue.CreateNative(@Native_ConfigSet));
   ConfigInst.Members.DefineVar('has',      TValue.CreateNative(@Native_ConfigHas));
   ConfigInst.Members.DefineVar('all',      TValue.CreateNative(@Native_ConfigAll));
+
+  HealthDef := TTypeDefinition.Create('HealthLib', tkClass);
+  HealthDef.Methods.Add('register',   TVMFunction.Create);
+  HealthDef.Methods.Add('unregister', TVMFunction.Create);
+  HealthDef.Methods.Add('check',      TVMFunction.Create);
+  HealthDef.Methods.Add('list',       TVMFunction.Create);
+  
+  HealthInst := TInstanceValue.Create(HealthDef);
+  HealthInst.Members.DefineVar('register',   TValue.CreateNative(@Native_HealthRegister));
+  HealthInst.Members.DefineVar('unregister', TValue.CreateNative(@Native_HealthUnregister));
+  HealthInst.Members.DefineVar('check',      TValue.CreateNative(@Native_HealthCheck));
+  HealthInst.Members.DefineVar('list',       TValue.CreateNative(@Native_HealthList));
 
   MetricsDef := TTypeDefinition.Create('MetricsLib', tkClass);
   MetricsDef.Methods.Add('define',    TVMFunction.Create);
@@ -34519,6 +34751,7 @@ begin
   GEnvv.DefineVar('config', TValue.CreateObj(ConfigInst));
   GEnvv.DefineVar('signal', TValue.CreateObj(SignalInst));
   GEnvv.DefineVar('metrics', TValue.CreateObj(MetricsInst));
+  GEnvv.DefineVar('health', TValue.CreateObj(HealthInst));
 
   GEnvv.DefineVar('getTick', TValue.CreateNative(@Native_GetTick),true);
   GEnvv.DefineVar('sleep', TValue.CreateNative(@Native_Sleep),true); 
@@ -37328,6 +37561,8 @@ begin
   GHTTPLogExclude := TStringList.Create;
   GHTTPLogExclude.Sorted := True;
   GHTTPLogExclude.Duplicates := dupIgnore;
+  GHealthChecks := TDictValue.Create;
+  GHealthLock := TCriticalSection.Create;
 
   InitThreadErrors;
 
