@@ -298,6 +298,16 @@ type
     Value: TValue;
     Next: PDictItem;
   end;  
+  PHTTPPooledConn = ^THTTPPooledConn;
+  THTTPPooledConn = record
+    Key: string;
+    Host: string;
+    Port: Integer;
+    Sock: Integer;
+    TLSConn: TTLSConnection;
+    TLSContextRef: TTLSContext;
+    LastUsedTick: QWord;
+  end;
   PEventTask = ^TEventTask;
   TEventTask = record
     TaskType: TEventTaskType;
@@ -1887,6 +1897,10 @@ type
   procedure FreeFSAsyncTasks; forward;
   procedure EnsureGlobalsInit; forward;
   procedure CheckPendingSignals(CallEnv: TSymbolTable); forward;
+  function HTTPPoolGet(const Key: string): PHTTPPooledConn; forward;
+  function HTTPPoolPut(const Key, Host: string; Port, Sock: Integer; 
+    TLSConn: TTLSConnection; TLSContextRef: TTLSContext): Boolean; forward;
+
 
 { ====================================================================
   IMPLEMENTASI
@@ -1918,6 +1932,14 @@ var //global
   GShutdownHooks: TValueList = nil;
   GShutdownLock: TCriticalSection = nil;
   GShutdownRunning: LongInt = 0;
+
+  // HTTP Pooling (A.1)
+  GHTTPPool: TList = nil;
+  GHTTPPoolLock: TCriticalSection = nil;
+  GHTTPPoolHits: Int64 = 0;
+  GHTTPPoolMisses: Int64 = 0;
+  GHTTPPoolMaxPerHost: Integer = 8;
+  GHTTPPoolIdleMs: Integer = 30000;
 
   ActiveThreads: LongInt = 0;// Menyimpan status jumlah thread aktif
   ThreadEvent: PRTLEvent;
@@ -26808,6 +26830,18 @@ var
   hLine, hName, hVal: string;
         
   ErrDetail: string; 
+
+  // A.1 — Pool
+  PoolKey: string;
+  PooledConn: PHTTPPooledConn;
+  ContentLength:integer;
+  ResContentLength: Integer;
+  ResConnClose: Boolean;
+  Reusable: Boolean;
+  HeaderParsed: Boolean;
+  hdrLines: TStringArray;
+  hdrIdx: Integer;
+  hdrLine: string;
   
   procedure DBG_HTTP(const Msg: string);
   begin
@@ -26884,15 +26918,79 @@ begin
     end
     else
       Port := DefaultPort;
+    
     DBG_HTTP('URL parsed: host=' + Host + ' port=' + IntToStr(Port) + ' path=' + Path);
     
-    if not NetConnect(Host, Port, HTTP_CLIENT_TIMEOUT, Sock) then
+    // Determine verify BEFORE pool key (affects pool identity)
+    if UseTLS then
     begin
-      errMSG.callerror(145, 'http.request: connect gagal — ' + NetLastError,
-                       errMSG.xrow, errMSG.xcol);
-      Exit(TValue.CreateNull);
-    end;
+      if GDangerousEnvAllowed then
+        NoVerifyEnv := GetEnvironmentVariable('PASCAK_TLS_NO_VERIFY')
+      else
+        NoVerifyEnv := '';
+      VerifyEnabled := NoVerifyEnv <> '1';
+      if VerifyEnabled and Assigned(HeadersList) then
+      begin
+        hIdx := 0;
+        while hIdx < HeadersList.Count do
+        begin
+          hLine := HeadersList[hIdx];
+          ColonPos := Pos(':', hLine);
+          if ColonPos > 0 then
+          begin
+            hName := Trim(Copy(hLine, 1, ColonPos - 1));
+            hVal := Trim(Copy(hLine, ColonPos + 1, Length(hLine)));
+            if (LowerCase(hName) = 'x-pascak-no-verify') and (hVal = '1') then
+            begin
+              VerifyEnabled := False;
+              Break;
+            end;
+          end;
+          Inc(hIdx);
+        end;
+      end;
+    end
+    else
+      VerifyEnabled := True;
     
+    // Build pool key
+    PoolKey := Host + ':' + IntToStr(Port) + ':' +
+               IfThen(UseTLS, 'T', 'P') + ':' +
+               IfThen(VerifyEnabled, 'V', 'N');
+    
+    Sock := -1;
+    TLSConn := nil;
+    TLSContextLocal := nil;
+    
+    // Try pool first
+    PooledConn := nil;
+    if Assigned(GHTTPPoolLock) then
+      PooledConn := HTTPPoolGet(PoolKey);
+    
+    if Assigned(PooledConn) then
+    begin
+      Sock := PooledConn^.Sock;
+      TLSConn := PooledConn^.TLSConn;
+      TLSContextLocal := PooledConn^.TLSContextRef;
+      PooledConn^.TLSConn := nil;
+      PooledConn^.TLSContextRef := nil;
+      PooledConn^.Sock := -1;
+      Dispose(PooledConn);
+      Inc(GHTTPPoolHits);
+      DBG_HTTP('pool HIT — reusing conn');
+    end
+    else
+    begin
+      Inc(GHTTPPoolMisses);
+      DBG_HTTP('pool MISS — new connect');
+      if not NetConnect(Host, Port, HTTP_CLIENT_TIMEOUT, Sock) then
+      begin
+        errMSG.callerror(145, 'http.request: connect gagal — ' + NetLastError,
+                         errMSG.xrow, errMSG.xcol);
+        Exit(TValue.CreateNull);
+      end;
+    end;
+  
     // ✅ E-2: wrap dengan TLS jika https://
     TLSConn := nil;
     TLSContextLocal := nil;
@@ -26904,36 +27002,6 @@ begin
         errMSG.callerror(144, 'http.request: TLS tidak tersedia (libssl belum di-load)',
                          errMSG.xrow, errMSG.xcol);
         Exit(TValue.CreateNull);
-      end;
-      
-      // ✅ FASE 1.4: env override hanya di-honor bila --dev dipass.
-      // Per-request header `X-Pascak-No-Verify` tetap berlaku (script-controlled).
-      if GDangerousEnvAllowed then
-        NoVerifyEnv := GetEnvironmentVariable('PASCAK_TLS_NO_VERIFY')
-      else
-        NoVerifyEnv := '';
-      VerifyEnabled := NoVerifyEnv <> '1';
-      
-      // Cek juga header per-call (kalau user set eksplisit)
-      if VerifyEnabled and Assigned(HeadersList) then
-      begin
-        hIdx := 0;
-        while hIdx < HeadersList.Count do
-        begin
-          hLine := HeadersList[hIdx];
-          colonPos := pos(':', hLine);
-          if colonPos > 0 then
-          begin
-            hName := trim(copy(hLine, 1, colonPos - 1));
-            hVal := trim(copy(hLine, colonPos + 1, length(hLine)));
-            if (lowercase(hName) = 'x-pascak-no-verify') and (hVal = '1') then
-            begin
-              VerifyEnabled := false;
-              break;
-            end;
-          end;
-          hIdx := hIdx + 1;
-        end;
       end;
       
       TLSContextLocal := GetSharedTLSContext(VerifyEnabled);
@@ -26969,7 +27037,12 @@ begin
       
       DBG_HTTP('TLS handshake OK');
     end;    
-    
+   
+    // A.1: force keep-alive for pooling
+    if not Assigned(HeadersList) then
+      HeadersList := TStringList.Create;
+    HeadersList.Add('Connection: keep-alive');
+   
     try
       RawReq := BuildHTTPRequest(Method, Path, Host, HeadersList, StrToRaw(BodyStr));
       DBG_HTTP('sending request, len=' + IntToStr(Length(RawReq)));
@@ -26992,22 +27065,64 @@ begin
       end;
       
       RespBuf := '';
+      HeaderEnd := -1;
+      ContentLength := -1;
+      ResContentLength := -1;
+      ResConnClose := False;
+      HeaderParsed := False;
+      
       while True do
       begin
         if UseTLS then
-        begin
-          R := TLSRecv(TLSConn, 4096, Chunk);
-          DBG_HTTP('TLSRecv R=' + IntToStr(R) + ' accumulated=' + IntToStr(Length(RespBuf)));
-        end
+          R := TLSRecv(TLSConn, 4096, Chunk)
         else
-        begin
           R := NetRecvTimeout(Sock, 4096, HTTP_CLIENT_TIMEOUT, Chunk);
-          DBG_HTTP('TLSRecv R=' + IntToStr(R) + ' accumulated=' + IntToStr(Length(RespBuf)));
-        end;
         if R <= 0 then Break;
         RespBuf := RespBuf + Chunk;
+        
+        // Parse headers once we have full header block
+        if not HeaderParsed then
+        begin
+          HeaderEnd := LocalFindCRLFCRLF(RespBuf);
+          if HeaderEnd > 0 then
+          begin
+            HeaderParsed := True;
+            HeaderBlock := Copy(RespBuf, 1, HeaderEnd - 1);
+            hdrLines := HeaderBlock.Split([#13#10]);
+            for hdrIdx := 1 to High(hdrLines) do
+            begin
+              hdrLine := hdrLines[hdrIdx];
+              if (Length(hdrLine) >= 15) and
+                 SameText(Copy(hdrLine, 1, 15), 'Content-Length:') then
+                ResContentLength := StrToIntDef(
+                  Trim(Copy(hdrLine, 16, Length(hdrLine))), -1)
+              else if (Length(hdrLine) >= 18) and
+                      SameText(Copy(hdrLine, 1, 18), 'Transfer-Encoding:') then
+              begin
+                if Pos('chunked', LowerCase(hdrLine)) > 0 then
+                begin
+                  ResContentLength := -1;
+                  ResConnClose := True;
+                end;
+              end
+              else if (Length(hdrLine) >= 11) and
+                      SameText(Copy(hdrLine, 1, 11), 'Connection:') then
+              begin
+                if Pos('close', LowerCase(hdrLine)) > 0 then
+                  ResConnClose := True;
+              end;
+            end;
+          end;
+        end;
+        
+        // Stop early if we have full body
+        if HeaderParsed and (ResContentLength >= 0) then
+        begin
+          if Length(RespBuf) >= HeaderEnd + 3 + ResContentLength then
+            Break;
+        end;
       end;
-      DBG_HTTP('read done, total=' + IntToStr(Length(RespBuf)) + ' bytes');
+      DBG_HTTP('read done, total=' + IntToStr(Length(RespBuf)) + ' bytes');      
       
       HeaderEnd := LocalFindCRLFCRLF(RespBuf);
       DBG_HTTP('HeaderEnd=' + IntToStr(HeaderEnd) + ' BodyStart=' + IntToStr(HeaderEnd + 4));
@@ -27086,9 +27201,39 @@ begin
       
       Result := TValue.CreateDict(ResultDict);
     finally
-      if UseTLS then
+      // A.1: Decide pool vs close
+      Reusable := HeaderParsed and (ResContentLength >= 0) and
+                  (not ResConnClose) and (Sock >= 0);
+      
+      if Reusable and Assigned(GHTTPPoolLock) then
       begin
-        if Assigned(TLSConn) then
+        if HTTPPoolPut(PoolKey, Host, Port, Sock, TLSConn, TLSContextLocal) then
+        begin
+          DBG_HTTP('pool RETURN — conn back to pool');
+          Sock := -1;
+          TLSConn := nil;
+          TLSContextLocal := nil;
+        end
+        else
+        begin
+          DBG_HTTP('pool REJECT — pool full, closing');
+          if UseTLS and Assigned(TLSConn) then
+          begin
+            TLSClose(TLSConn);
+            TLSConn.Release;
+            TLSConn := nil;
+          end;
+          if Assigned(TLSContextLocal) then
+          begin
+            TLSContextLocal.Release;
+            TLSContextLocal := nil;
+          end;
+          if Sock >= 0 then NetClose(Sock);
+        end;
+      end
+      else
+      begin
+        if UseTLS and Assigned(TLSConn) then
         begin
           TLSClose(TLSConn);
           TLSConn.Release;
@@ -27099,8 +27244,8 @@ begin
           TLSContextLocal.Release;
           TLSContextLocal := nil;
         end;
+        if Sock >= 0 then NetClose(Sock);
       end;
-      NetClose(Sock);
     end;
   finally
     if Assigned(HeadersList) then HeadersList.Free;
@@ -32323,6 +32468,201 @@ begin
   end;
 end;//end Signal Handling
 
+//A.1 — HTTP Connection Pool══════════════════════════════════════
+//═══════════════════════════════════════════════════════════════ }
+
+procedure HTTPPooledClose(c: PHTTPPooledConn);
+begin
+  if not Assigned(c) then Exit;
+  if Assigned(c^.TLSConn) then
+  begin
+    try TLSClose(c^.TLSConn); except end;
+    try c^.TLSConn.Release; except end;
+    c^.TLSConn := nil;
+  end;
+  if Assigned(c^.TLSContextRef) then
+  begin
+    try c^.TLSContextRef.Release; except end;
+    c^.TLSContextRef := nil;
+  end;
+  if c^.Sock >= 0 then
+  begin
+    try NetClose(c^.Sock); except end;
+    c^.Sock := -1;
+  end;
+  Dispose(c);
+end;
+
+function HTTPPoolGet(const Key: string): PHTTPPooledConn;
+var
+  i: Integer;
+  c: PHTTPPooledConn;
+  NowTick: QWord;
+begin
+  Result := nil;
+  if not Assigned(GHTTPPoolLock) or not Assigned(GHTTPPool) then Exit;
+  NowTick := GetTickCount64;
+  GHTTPPoolLock.Acquire;
+  try
+    i := GHTTPPool.Count - 1;
+    while i >= 0 do
+    begin
+      c := PHTTPPooledConn(GHTTPPool[i]);
+      if not Assigned(c) then
+      begin
+        GHTTPPool.Delete(i);
+        Dec(i); Continue;
+      end;
+      // Expired?
+      if (NowTick - c^.LastUsedTick) > QWord(GHTTPPoolIdleMs) then
+      begin
+        GHTTPPool.Delete(i);
+        HTTPPooledClose(c);
+        Dec(i); Continue;
+      end;
+      if c^.Key = Key then
+      begin
+        Result := c;
+        GHTTPPool.Delete(i);
+        Exit;
+      end;
+      Dec(i);
+    end;
+  finally
+    GHTTPPoolLock.Release;
+  end;
+end;
+
+function HTTPPoolPut(const Key, Host: string; Port, Sock: Integer;
+  TLSConn: TTLSConnection; TLSContextRef: TTLSContext): Boolean;
+var
+  c: PHTTPPooledConn;
+  CountSameHost, i: Integer;
+begin
+  Result := False;
+  if Sock < 0 then Exit;
+  if not Assigned(GHTTPPoolLock) or not Assigned(GHTTPPool) then Exit;
+
+  GHTTPPoolLock.Acquire;
+  try
+    // Count existing conns for this key
+    CountSameHost := 0;
+    for i := 0 to GHTTPPool.Count - 1 do
+    begin
+      c := PHTTPPooledConn(GHTTPPool[i]);
+      if Assigned(c) and (c^.Key = Key) then Inc(CountSameHost);
+    end;
+
+    if CountSameHost >= GHTTPPoolMaxPerHost then
+    begin
+      // Pool full for this host — reject
+      Exit(False);
+    end;
+
+    New(c);
+    c^.Key := Key;
+    c^.Host := Host;
+    c^.Port := Port;
+    c^.Sock := Sock;
+    c^.TLSConn := TLSConn;
+    c^.TLSContextRef := TLSContextRef;
+    c^.LastUsedTick := GetTickCount64;
+    GHTTPPool.Add(c);
+    Result := True;
+  finally
+    GHTTPPoolLock.Release;
+  end;
+end;
+
+procedure HTTPPoolCleanupExpired;
+var
+  i: Integer;
+  c: PHTTPPooledConn;
+  NowTick: QWord;
+begin
+  if not Assigned(GHTTPPoolLock) or not Assigned(GHTTPPool) then Exit;
+  NowTick := GetTickCount64;
+  GHTTPPoolLock.Acquire;
+  try
+    i := GHTTPPool.Count - 1;
+    while i >= 0 do
+    begin
+      c := PHTTPPooledConn(GHTTPPool[i]);
+      if (not Assigned(c)) or
+         ((NowTick - c^.LastUsedTick) > QWord(GHTTPPoolIdleMs)) then
+      begin
+        GHTTPPool.Delete(i);
+        if Assigned(c) then HTTPPooledClose(c);
+      end;
+      Dec(i);
+    end;
+  finally
+    GHTTPPoolLock.Release;
+  end;
+end;
+
+procedure HTTPPoolClearAll;
+var
+  i: Integer;
+  c: PHTTPPooledConn;
+begin
+  if not Assigned(GHTTPPoolLock) or not Assigned(GHTTPPool) then Exit;
+  GHTTPPoolLock.Acquire;
+  try
+    for i := 0 to GHTTPPool.Count - 1 do
+    begin
+      c := PHTTPPooledConn(GHTTPPool[i]);
+      if Assigned(c) then HTTPPooledClose(c);
+    end;
+    GHTTPPool.Clear;
+  finally
+    GHTTPPoolLock.Release;
+  end;
+end;
+
+function Native_HTTP_PoolStats(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var D: TDictValue;
+begin
+  D := TDictValue.Create;
+  try
+    D.SetValue('hits', TValue.CreateNum(GHTTPPoolHits));
+    D.SetValue('misses', TValue.CreateNum(GHTTPPoolMisses));
+    D.SetValue('maxPerHost', TValue.CreateNum(GHTTPPoolMaxPerHost));
+    D.SetValue('idleMs', TValue.CreateNum(GHTTPPoolIdleMs));
+    GHTTPPoolLock.Acquire;
+    try
+      D.SetValue('idle', TValue.CreateNum(GHTTPPool.Count));
+    finally
+      GHTTPPoolLock.Release;
+    end;
+    Result := TValue.CreateDict(D);
+  except
+    D.Free;
+    raise;
+  end;
+end;
+
+function Native_HTTP_PoolConfig(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+begin
+  if (Args.Count < 1) or (Args.Count > 2) then
+  begin
+    errMSG.callerror(140, 'http.poolConfig(maxPerHost, [idleMs])',
+                     errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateBool(False));
+  end;
+  if TValue(Args[0]).DataType = dtNumeric then
+    GHTTPPoolMaxPerHost := Trunc(TValue(Args[0]).NumVal);
+  if (Args.Count = 2) and (TValue(Args[1]).DataType = dtNumeric) then
+    GHTTPPoolIdleMs := Trunc(TValue(Args[1]).NumVal);
+  Result := TValue.CreateBool(True);
+end;
+
+function Native_HTTP_PoolClear(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+begin
+  HTTPPoolClearAll;
+  Result := TValue.CreateBool(True);
+end;//end HTTP Connection Pool
+
 // A.2 — Structured Logging═══════════════════════════════════════
 //═══════════════════════════════════════════════════════════════ }
 function LogArgsToString(Args: TObjectList): string;
@@ -32985,6 +33325,9 @@ begin
   HTTPDef.Methods.Add('post', TVMFunction.Create);
   HTTPDef.Methods.Add('getAsync', TVMFunction.Create);
   HTTPDef.Methods.Add('serveTLS', TVMFunction.Create);
+  HTTPDef.Methods.Add('poolStats', TVMFunction.Create);
+  HTTPDef.Methods.Add('poolConfig', TVMFunction.Create);
+  HTTPDef.Methods.Add('poolClear', TVMFunction.Create);
 
   HTTPInst := TInstanceValue.Create(HTTPDef);
   HTTPInst.Members.DefineVar('serve', TValue.CreateNative(@Native_HTTP_Serve));
@@ -32997,6 +33340,9 @@ begin
   HTTPInst.Members.DefineVar('post', TValue.CreateNative(@Native_HTTP_Post));
   HTTPInst.Members.DefineVar('getAsync',TValue.CreateNative(@Native_HTTP_GetAsync));
   HTTPInst.Members.DefineVar('serveTLS',TValue.CreateNative(@Native_HTTP_ServeTLS));
+  HTTPInst.Members.DefineVar('poolStats', TValue.CreateNative(@Native_HTTP_PoolStats));
+  HTTPInst.Members.DefineVar('poolConfig', TValue.CreateNative(@Native_HTTP_PoolConfig));
+  HTTPInst.Members.DefineVar('poolClear', TValue.CreateNative(@Native_HTTP_PoolClear));  
   
   WSDef := TTypeDefinition.Create('WSLib', tkClass);
   TTypeDefinition(WSDef).Methods.Add('serve', TVMFunction.Create);
@@ -35656,7 +36002,9 @@ begin
   GSignalCallbackTERM := TValueList.Create(True);
   GShutdownHooks := TValueList.Create(True);
   GShutdownLock := TCriticalSection.Create;
-
+  GHTTPPool := TList.Create;
+  GHTTPPoolLock := TCriticalSection.Create;
+  
   InitThreadErrors;
 
   InitWSServers;
@@ -35926,6 +36274,11 @@ begin
       except
       end;    
       
+      try
+        HTTPPoolClearAll;
+      except
+      end;
+
       Engine.Shutdown;
       
       // ✅ FIX: Process zombies SEBELUM Engine.Free.
