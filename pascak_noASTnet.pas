@@ -39173,8 +39173,8 @@ begin
   else
     EnvPolicy := '';    
     
-  GDebugEnabled := True;
-  FillChar(GDebugOpcodeCounts, SizeOf(GDebugOpcodeCounts), 0);   // reset semua ke 0
+  GDebugEnabled := (GetEnvironmentVariable('PASCAK_DEBUG') = '1');
+  FillChar(GDebugOpcodeCounts, SizeOf(GDebugOpcodeCounts), 0);  
   
   HasRunawayThreads := False;
   GlobalInit := False;
@@ -39738,7 +39738,8 @@ begin
         begin 
           IOLock.Acquire;
           try 
-            Writeln('--- Eksekusi Selesai ---'); 
+            if GetEnvironmentVariable('PASCAK_DEBUG') = '1' then
+              Writeln('--- Eksekusi Selesai ---'); 
           finally 
             if Assigned(ScriptThreadLock) then 
             begin
@@ -39756,7 +39757,10 @@ begin
         if Assigned(IOLock) then 
         begin 
           IOLock.Acquire;
-          try Writeln('--- Eksekusi Selesai (mode terbatas) ---'); 
+          try 
+            if GetEnvironmentVariable('PASCAK_DEBUG') = '1' then
+              Writeln('--- Eksekusi Selesai (mode terbatas) ---');             
+            
           finally IOLock.Release; end;
         end;
       end;
@@ -39825,7 +39829,7 @@ begin
     Inc(ArgIdx);
   end;
   
-  if GDangerousEnvAllowed then
+  if GDangerousEnvAllowed and (GetEnvironmentVariable('PASCAK_DEBUG') = '1') then
   begin
     Writeln('[boot] DEV MODE — env overrides enabled ' +
             '(PASCAK_EXEC_POLICY, PASCAK_TLS_NO_VERIFY)');
