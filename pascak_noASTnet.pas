@@ -105,6 +105,7 @@ type
   TValue              = class;
   TSymbolTable        = class;
   TNode               = class;
+  TBlockNode          = class;
   TFunctionNode       = class;
   TChunk              = class;
   TValueList          = class;
@@ -531,6 +532,49 @@ type
     destructor Destroy; override;
   end;TNodeList = specialize TFPGObjectList<TNode>;
 
+{ ═══════════════════════════════════════════════════════════════
+  E.2 — Linter
+  ═══════════════════════════════════════════════════════════════ }
+  TLintVar = class
+  public
+    Name: string;
+    Line, Col: Integer;
+    Used: Boolean;
+    IsParam: Boolean;
+    IsConst: Boolean;
+  end;
+
+  TLinter = class
+  public
+    FIssues: TStringList;
+    FScopes: TList;
+    FFileName: string;
+    FWarningCount: Integer;
+    FErrorCount: Integer;
+
+    procedure AddWarn(Line, Col: Integer; const Code, Msg: string);
+    procedure AddErr(Line, Col: Integer; const Code, Msg: string);
+    procedure PushScope;
+    procedure PopScope;
+    procedure DeclareVar(const Name: string; Line, Col: Integer;
+      IsParam, IsConst: Boolean);
+    procedure MarkUsed(const Name: string);
+    function FindVar(const Name: string): TLintVar;
+
+    procedure WalkStmt(Node: TNode);
+    procedure WalkBlock(B: TBlockNode; IsScope: Boolean);
+    procedure WalkExprList(List: TNodeList); overload;
+    procedure WalkExprList(List: TObjectList); overload;    
+    //procedure WalkExprList(List: TNodeList);
+  public
+    constructor Create;
+    destructor Destroy; override;
+    procedure Lint(Node: TNode; const AFileName: string);
+    function HasIssues: Boolean;
+    function HasErrors: Boolean;
+    function FormatReport: string;
+  end;
+  
   TDeferNode = class(TNode)
   public
     Body: TNode;
@@ -33949,6 +33993,487 @@ begin
   end;
 end;//end Metrics (Prometheus-compatible)
 
+//linter=================================
+//=======================================
+constructor TLinter.Create;
+begin
+  inherited Create;
+  FIssues := TStringList.Create;
+  FScopes := TList.Create;
+  FFileName := '';
+  FWarningCount := 0;
+  FErrorCount := 0;
+end;
+
+destructor TLinter.Destroy;
+var i: Integer;
+begin
+  for i := 0 to FScopes.Count - 1 do
+  begin
+    if Assigned(FScopes[i]) then
+      TList(FScopes[i]).Free;
+  end;
+  FScopes.Free;
+  FIssues.Free;
+  inherited;
+end;
+
+procedure TLinter.AddWarn(Line, Col: Integer; const Code, Msg: string);
+begin
+  FIssues.Add(Code + ':' + IntToStr(Line) + ':' + IntToStr(Col) +
+              ' warning ' + Msg);
+  Inc(FWarningCount);
+end;
+
+procedure TLinter.AddErr(Line, Col: Integer; const Code, Msg: string);
+begin
+  FIssues.Add(Code + ':' + IntToStr(Line) + ':' + IntToStr(Col) +
+              ' error   ' + Msg);
+  Inc(FErrorCount);
+end;
+
+procedure TLinter.PushScope;
+begin
+  FScopes.Add(TList.Create);
+end;
+
+procedure TLinter.PopScope;
+var
+  i: Integer;
+  Scope: TList;
+  V: TLintVar;
+begin
+  if FScopes.Count = 0 then Exit;
+  Scope := TList(FScopes[FScopes.Count - 1]);
+  for i := 0 to Scope.Count - 1 do
+  begin
+    V := TLintVar(Scope[i]);
+    if (not V.Used) and (not V.IsParam) and (not V.IsConst) then
+      AddWarn(V.Line, V.Col, 'W001', 'unused variable ''' + V.Name + '''');
+    V.Free;
+  end;
+  Scope.Free;
+  FScopes.Delete(FScopes.Count - 1);
+end;
+
+procedure TLinter.DeclareVar(const Name: string; Line, Col: Integer;
+  IsParam, IsConst: Boolean);
+var
+  Scope: TList;
+  V, Existing: TLintVar;
+  i: Integer;
+begin
+  if (Name = '') or (FScopes.Count = 0) then Exit;
+  Scope := TList(FScopes[FScopes.Count - 1]);
+
+  for i := 0 to Scope.Count - 1 do
+  begin
+    Existing := TLintVar(Scope[i]);
+    if Existing.Name = Name then
+    begin
+      AddErr(Line, Col, 'E001',
+        'duplicate declaration of ''' + Name + ''' ' +
+        '(first at line ' + IntToStr(Existing.Line) + ')');
+      Exit;
+    end;
+  end;
+
+  V := TLintVar.Create;
+  V.Name := Name;
+  V.Line := Line;
+  V.Col := Col;
+  V.Used := False;
+  V.IsParam := IsParam;
+  V.IsConst := IsConst;
+  Scope.Add(V);
+end;
+
+function TLinter.FindVar(const Name: string): TLintVar;
+var
+  i, j: Integer;
+  Scope: TList;
+  V: TLintVar;
+begin
+  for i := FScopes.Count - 1 downto 0 do
+  begin
+    Scope := TList(FScopes[i]);
+    for j := 0 to Scope.Count - 1 do
+    begin
+      V := TLintVar(Scope[j]);
+      if V.Name = Name then Exit(V);
+    end;
+  end;
+  Result := nil;
+end;
+
+procedure TLinter.MarkUsed(const Name: string);
+var V: TLintVar;
+begin
+  V := FindVar(Name);
+  if Assigned(V) then V.Used := True;
+end;
+
+procedure TLinter.WalkExprList(List: TNodeList);
+var i: Integer;
+begin
+  if not Assigned(List) then Exit;
+  for i := 0 to List.Count - 1 do
+    WalkStmt(TNode(List[i]));
+end;
+
+procedure TLinter.WalkExprList(List: TObjectList);
+var i: Integer;
+begin
+  if not Assigned(List) then Exit;
+  for i := 0 to List.Count - 1 do
+    WalkStmt(TNode(List[i]));
+end;
+
+procedure TLinter.WalkBlock(B: TBlockNode; IsScope: Boolean);
+var
+  i: Integer;
+  Stmt: TNode;
+  Reachable: Boolean;
+begin
+  if not Assigned(B) then Exit;
+  if IsScope then PushScope;
+  try
+    Reachable := True;
+    for i := 0 to B.Statements.Count - 1 do
+    begin
+      Stmt := TNode(B.Statements[i]);
+
+      if (not Reachable) and (not (Stmt is TNoOpNode)) and
+         (not (Stmt is TFunctionNode)) and (not (Stmt is TClassDeclNode)) then
+        AddWarn(Stmt.Line, Stmt.Col, 'W002',
+          'unreachable code after terminator');
+
+      WalkStmt(Stmt);
+
+      if (Stmt is TReturnNode) or (Stmt is TThrowNode) or
+         (Stmt is TBreakNode) or (Stmt is TContinueNode) then
+        Reachable := False;
+    end;
+  finally
+    if IsScope then PopScope;
+  end;
+end;
+
+procedure TLinter.WalkStmt(Node: TNode);
+var
+  i: Integer;
+  Fn: TFunctionNode;
+  CD: TClassDeclNode;
+begin
+  if Node = nil then Exit;
+
+  // ─── Declarations ───
+  if Node is TVarDeclNode then
+  begin
+    if Assigned(TVarDeclNode(Node).Expr) then
+      WalkStmt(TVarDeclNode(Node).Expr);
+    DeclareVar(TVarDeclNode(Node).VarName, Node.Line, Node.Col,
+      False, TVarDeclNode(Node).IsConst);
+  end
+  else if Node is TFunctionNode then
+  begin
+    Fn := TFunctionNode(Node);
+    PushScope;
+    try
+      for i := 0 to High(Fn.Params) do
+      begin
+        DeclareVar(Fn.Params[i].Name, Fn.Line, Fn.Col, True, False);
+        if Assigned(Fn.Params[i].DefaultExpr) then
+          WalkStmt(Fn.Params[i].DefaultExpr);
+      end;
+      if Assigned(Fn.Body) then
+        WalkStmt(Fn.Body);
+    finally
+      PopScope;
+    end;
+    if Fn.Name <> '' then
+      DeclareVar(Fn.Name, Node.Line, Node.Col, False, False);
+  end
+  else if Node is TClassDeclNode then
+  begin
+    CD := TClassDeclNode(Node);
+    DeclareVar(CD.sClassName, Node.Line, Node.Col, False, False);
+    PushScope;
+    try
+      DeclareVar('self', Node.Line, Node.Col, True, False);
+      for i := 0 to CD.Methods.Count - 1 do
+        WalkStmt(TNode(CD.Methods[i]));
+    finally
+      PopScope;
+    end;
+  end
+
+  // ─── Block ───
+  else if Node is TBlockNode then
+    WalkBlock(TBlockNode(Node), TBlockNode(Node).IsScope)
+
+  // ─── Statement types ───
+  else if Node is TVariableNode then
+    MarkUsed(TVariableNode(Node).VarName)
+
+  else if Node is TAssignmentNode then
+  begin
+    MarkUsed(TAssignmentNode(Node).TargetName);
+    WalkStmt(TAssignmentNode(Node).Expr);
+  end
+
+  else if Node is TMultiAssignNode then
+  begin
+    for i := 0 to TMultiAssignNode(Node).Targets.Count - 1 do
+      MarkUsed(TMultiAssignNode(Node).Targets[i]);
+    WalkStmt(TMultiAssignNode(Node).Expr);
+  end
+
+  else if Node is TReturnNode then
+  begin
+    if Assigned(TReturnNode(Node).Expr) then
+      WalkStmt(TReturnNode(Node).Expr);
+  end
+
+  else if Node is TThrowNode then
+  begin
+    if Assigned(TThrowNode(Node).Expr) then
+      WalkStmt(TThrowNode(Node).Expr);
+  end
+
+  else if Node is TIfNode then
+  begin
+    WalkStmt(TIfNode(Node).Condition);
+    if Assigned(TIfNode(Node).ThenBranch) then
+      WalkStmt(TIfNode(Node).ThenBranch);
+    if Assigned(TIfNode(Node).ElseBranch) then
+      WalkStmt(TIfNode(Node).ElseBranch);
+  end
+
+  else if Node is TWhileNode then
+  begin
+    WalkStmt(TWhileNode(Node).Condition);
+    if Assigned(TWhileNode(Node).Body) then
+      WalkStmt(TWhileNode(Node).Body);
+  end
+
+  else if Node is TRepeatNode then
+  begin
+    if Assigned(TRepeatNode(Node).Body) then
+      WalkStmt(TRepeatNode(Node).Body);
+    WalkStmt(TRepeatNode(Node).Condition);
+  end
+
+  else if Node is TForNode then
+  begin
+    WalkStmt(TForNode(Node).StartExpr);
+    WalkStmt(TForNode(Node).EndExpr);
+    if Assigned(TForNode(Node).StepExpr) then
+      WalkStmt(TForNode(Node).StepExpr);
+    PushScope;
+    try
+      DeclareVar(TForNode(Node).VarName, Node.Line, Node.Col, False, False);
+      if Assigned(TForNode(Node).Body) then
+        WalkStmt(TForNode(Node).Body);
+    finally
+      PopScope;
+    end;
+  end
+
+  else if Node is TForEachNode then
+  begin
+    WalkStmt(TForEachNode(Node).CollectionExpr);
+    PushScope;
+    try
+      DeclareVar(TForEachNode(Node).VarName, Node.Line, Node.Col, False, False);
+      if Assigned(TForEachNode(Node).Body) then
+        WalkStmt(TForEachNode(Node).Body);
+    finally
+      PopScope;
+    end;
+  end
+
+  else if Node is TTryCatchNode then
+  begin
+    if Assigned(TTryCatchNode(Node).TryBlock) then
+      WalkStmt(TTryCatchNode(Node).TryBlock);
+    if Assigned(TTryCatchNode(Node).CatchBlock) then
+    begin
+      PushScope;
+      try
+        if TTryCatchNode(Node).CatchVar <> '' then
+          DeclareVar(TTryCatchNode(Node).CatchVar, Node.Line, Node.Col,
+            False, False);
+        WalkStmt(TTryCatchNode(Node).CatchBlock);
+      finally
+        PopScope;
+      end;
+    end;
+    if Assigned(TTryCatchNode(Node).FinallyBlock) then
+      WalkStmt(TTryCatchNode(Node).FinallyBlock);
+  end
+
+  else if Node is TCaseNode then
+  begin
+    WalkStmt(TCaseNode(Node).TargetExpr);
+    for i := 0 to High(TCaseNode(Node).Branches) do
+    begin
+      if Assigned(TCaseNode(Node).Branches[i].MatchExpr) then
+        WalkStmt(TCaseNode(Node).Branches[i].MatchExpr);
+      if Assigned(TCaseNode(Node).Branches[i].Body) then
+        WalkStmt(TCaseNode(Node).Branches[i].Body);
+    end;
+    if Assigned(TCaseNode(Node).ElseBranch) then
+      WalkStmt(TCaseNode(Node).ElseBranch);
+  end
+
+  else if Node is TLockNode then
+  begin
+    if Assigned(TLockNode(Node).Body) then
+      WalkStmt(TLockNode(Node).Body);
+  end
+
+  else if Node is TDeferNode then
+  begin
+    if Assigned(TDeferNode(Node).Body) then
+      WalkStmt(TDeferNode(Node).Body);
+  end
+
+  else if Node is TYieldNode then
+  begin
+    if Assigned(TYieldNode(Node).Expr) then
+      WalkStmt(TYieldNode(Node).Expr);
+  end
+
+  // ─── Expressions ───
+  else if Node is TBinaryOpNode then
+  begin
+    WalkStmt(TBinaryOpNode(Node).Left);
+    WalkStmt(TBinaryOpNode(Node).Right);
+  end
+
+  else if Node is TUnaryOpNode then
+  begin
+    if Assigned(TUnaryOpNode(Node).Expr) then
+      WalkStmt(TUnaryOpNode(Node).Expr);
+  end
+
+  else if Node is TTernaryNode then
+  begin
+    WalkStmt(TTernaryNode(Node).Condition);
+    WalkStmt(TTernaryNode(Node).TrueBranch);
+    WalkStmt(TTernaryNode(Node).FalseBranch);
+  end
+
+  else if Node is TFunctionCallNode then
+  begin
+    WalkStmt(TFunctionCallNode(Node).FuncExpr);
+    WalkExprList(TFunctionCallNode(Node).Args);
+  end
+
+  else if Node is TMethodCallNode then
+  begin
+    WalkStmt(TMethodCallNode(Node).Target);
+    WalkExprList(TMethodCallNode(Node).Args);
+  end
+
+  else if Node is TNewNode then
+  begin
+    MarkUsed(TNewNode(Node).sClassName);
+    WalkExprList(TNewNode(Node).Args);
+  end
+
+  else if Node is TMemberAccessNode then
+    WalkStmt(TMemberAccessNode(Node).Target)
+
+  else if Node is TMemberAssignNode then
+  begin
+    WalkStmt(TMemberAssignNode(Node).Target);
+    WalkStmt(TMemberAssignNode(Node).Expr);
+  end
+
+  else if Node is TArrayAccessNode then
+  begin
+    WalkStmt(TArrayAccessNode(Node).FTarget);
+    WalkStmt(TArrayAccessNode(Node).FIndexExpr);
+  end
+
+  else if Node is TArrayAssignNode then
+  begin
+    WalkStmt(TArrayAssignNode(Node).FTarget);
+    WalkStmt(TArrayAssignNode(Node).FIndexExpr);
+    WalkStmt(TArrayAssignNode(Node).FValueExpr);
+  end
+
+  else if Node is TArrayLiteralNode then
+    WalkExprList(TArrayLiteralNode(Node).FElements)
+
+  else if Node is TArraySliceNode then
+  begin
+    WalkStmt(TArraySliceNode(Node).Target);
+    WalkStmt(TArraySliceNode(Node).StartExpr);
+    WalkStmt(TArraySliceNode(Node).EndExpr);
+    WalkStmt(TArraySliceNode(Node).StepExpr);
+  end
+
+  else if Node is TDictLiteralNode then
+    WalkExprList(TDictLiteralNode(Node).FValues)
+
+  else if Node is TListComprehensionNode then
+  begin
+    PushScope;
+    try
+      DeclareVar(TListComprehensionNode(Node).VarName, Node.Line, Node.Col,
+        False, False);
+      WalkStmt(TListComprehensionNode(Node).CollectionExpr);
+      if Assigned(TListComprehensionNode(Node).ConditionExpr) then
+        WalkStmt(TListComprehensionNode(Node).ConditionExpr);
+      WalkStmt(TListComprehensionNode(Node).OutputExpr);
+    finally
+      PopScope;
+    end;
+  end
+
+  else if Node is TImportExprNode then
+    WalkStmt(TImportExprNode(Node).PathExpr)
+
+  else if Node is TLiteralNode then
+  begin
+    // no-op
+  end
+  else if Node is TNoOpNode then
+  begin
+    // no-op
+  end;
+end;
+
+procedure TLinter.Lint(Node: TNode; const AFileName: string);
+begin
+  FFileName := AFileName;
+  if not Assigned(Node) then Exit;
+  PushScope;
+  try
+    WalkStmt(Node);
+  finally
+    PopScope;
+  end;
+end;
+
+function TLinter.HasIssues: Boolean;
+begin
+  Result := FIssues.Count > 0;
+end;
+
+function TLinter.HasErrors: Boolean;
+begin
+  Result := FErrorCount > 0;
+end;
+
+function TLinter.FormatReport: string;
+begin
+  Result := FIssues.Text;
+end;//end linter
+
 //E.1 — Formatter════════════════════════════════════════════════
 //═══════════════════════════════════════════════════════════════ }
 function FmtExtractFirstWord(const S: string): string;
@@ -38104,6 +38629,192 @@ begin
   Writeln('  FORMAT ', Path);
 end;
 
+function LintSingleFile(const Path: string; out Issues: string;
+  out WarningCount, ErrorCount: Integer): Boolean;
+var
+  Source: string;
+  Lex: TLexer;
+  Pars: TParser;
+  Root: TBlockNode;
+  Linter: TLinter;
+begin
+  Result := False;
+  Issues := '';
+  WarningCount := 0;
+  ErrorCount := 0;
+
+  if not FmtReadFile(Path, Source) then
+  begin
+    Issues := 'error 0:0 cannot read file';
+    Exit;
+  end;
+
+  Lex := nil; Pars := nil; Root := nil; Linter := nil;
+  try
+    try
+      Lex := TLexer.Create(Source);
+      Pars := TParser.Create(Lex);
+      Root := Pars.ParseMainProgram;
+    except
+      on E: Exception do
+      begin
+        Issues := 'error 0:0 parse: ' + E.Message;
+        Exit;
+      end;
+    end;
+
+    if not Assigned(Root) then
+    begin
+      Issues := 'error 0:0 empty AST';
+      Exit;
+    end;
+
+    Linter := TLinter.Create;
+    try
+      Linter.Lint(Root, Path);
+      Issues := Linter.FormatReport;
+      WarningCount := Linter.FWarningCount;
+      ErrorCount := Linter.FErrorCount;
+      Result := True;
+    finally
+      Linter.Free;
+    end;
+  finally
+    if Assigned(Root) then Root.Free;
+    if Assigned(Pars) then Pars.Free;
+    if Assigned(Lex) then Lex.Free;
+  end;
+end;
+
+procedure RunLintMode(const Target: string; Strict: Boolean);
+var
+  SR: TSearchRec;
+  Files: TStringList;
+  i, j: Integer;
+  Issues, RelPath: string;
+  TotalWarn, TotalErr, FilesWithIssues: Integer;
+  W, E: Integer;
+  TargetPath: string;
+  Lines: TStringArray;
+  Ln: string;
+
+  procedure ScanDir(const Dir: string);
+  begin
+    if not DirectoryExists(Dir) then Exit;
+    if FindFirst(IncludeTrailingPathDelimiter(Dir) + '*.pas', faAnyFile, SR) = 0 then
+    begin
+      try
+        repeat
+          if (SR.Name = '.') or (SR.Name = '..') then Continue;
+          if (SR.Attr and faDirectory) <> 0 then Continue;
+          Files.Add(IncludeTrailingPathDelimiter(Dir) + SR.Name);
+        until FindNext(SR) <> 0;
+      finally
+        FindClose(SR);
+      end;
+    end;
+  end;
+
+begin
+  EnsureGlobalsInit;
+  SetEnvVar('PASCAK_EXEC_POLICY', 'allow-all');
+  if not Assigned(errMSG) then
+    errMSG := Terror.Create;
+
+  Writeln('═══ Pascak Linter ═══');
+  
+  if Strict then
+    Writeln('Mode: --strict (warnings sebagai error)')
+  else
+    Writeln('Mode: lint');
+  Writeln;
+
+  Files := TStringList.Create;
+  try
+    TargetPath := ExpandFileName(Target);
+    if DirectoryExists(TargetPath) then
+      ScanDir(TargetPath)
+    else if FileExists(TargetPath) then
+      Files.Add(TargetPath)
+    else
+    begin
+      Writeln('ERROR: target tidak ditemukan: ', TargetPath);
+      Flush(Output);
+      {$IFDEF UNIX} libc__exit(2); {$ELSE} Halt(2); {$ENDIF}
+    end;
+
+    Files.Sort;
+
+    if Files.Count = 0 then
+    begin
+      Writeln('Tidak ada file *.pas ditemukan.');
+      Flush(Output);
+      {$IFDEF UNIX} libc__exit(2); {$ELSE} Halt(2); {$ENDIF}
+    end;
+
+    TotalWarn := 0; TotalErr := 0; FilesWithIssues := 0;
+
+    for i := 0 to Files.Count - 1 do
+    begin
+      if not LintSingleFile(Files[i], Issues, W, E) then
+      begin
+        Writeln(Files[i]);
+        Writeln('  ', Issues);
+        Inc(TotalErr);
+        Continue;
+      end;
+
+      if Issues = '' then Continue;
+
+      Inc(FilesWithIssues);
+      Inc(TotalWarn, W);
+      Inc(TotalErr, E);
+
+      Writeln(Files[i]);
+      Lines := Issues.Split([#10]);
+      for j := 0 to High(Lines) do
+      begin
+        Ln := Lines[j];
+        if Ln = '' then Continue;
+        Writeln('  ', Ln);
+      end;
+      Writeln;
+    end;
+
+    Writeln('═══ Summary ═══');
+    Writeln('  Files checked   : ', Files.Count);
+    Writeln('  Files w/issues  : ', FilesWithIssues);
+    Writeln('  Warnings        : ', TotalWarn);
+    Writeln('  Errors          : ', TotalErr);
+    Writeln;
+
+    Flush(Output);
+    Flush(ErrOutput);
+  
+    if TotalErr > 0 then
+    begin
+      {$IFDEF UNIX} libc__exit(1); {$ELSE} Halt(1); {$ENDIF}
+    end
+    else if Strict and (TotalWarn > 0) then
+    begin
+      {$IFDEF UNIX} libc__exit(1); {$ELSE} Halt(1); {$ENDIF}
+    end
+    else if TotalWarn > 0 then
+    begin
+      Writeln('RESULT: warnings present (no errors)');
+      {$IFDEF UNIX} libc__exit(0); {$ELSE} Halt(0); {$ENDIF}
+    end
+    else
+    begin
+      Writeln('RESULT: clean');
+      {$IFDEF UNIX} libc__exit(0); {$ELSE} Halt(0); {$ENDIF}
+    end;
+  finally
+    Files.Free;
+  end;
+  
+end;
+
 procedure RunFormatMode(const Target: string; CheckOnly: Boolean);
 var
   SR: TSearchRec;
@@ -38129,7 +38840,10 @@ var
   end;
 
 begin
+  EnsureGlobalsInit;
   SetEnvVar('PASCAK_EXEC_POLICY', 'allow-all');
+  if not Assigned(errMSG) then
+    errMSG := Terror.Create;
 
   Writeln('═══ Pascak Formatter ═══');
   if CheckOnly then
@@ -38178,11 +38892,16 @@ begin
 
     Flush(Output);
     Flush(ErrOutput);
+    
     if Errors > 0 then
+    begin
       {$IFDEF UNIX} libc__exit(2); {$ELSE} Halt(2); {$ENDIF}
+    end;
     if CheckOnly and (Changed > 0) then
+    begin
       {$IFDEF UNIX} libc__exit(1); {$ELSE} Halt(1); {$ENDIF}
-    {$IFDEF UNIX} libc__exit(0); {$ELSE} Halt(0); {$ENDIF}
+    end;
+    {$IFDEF UNIX} libc__exit(0); {$ELSE} Halt(0); {$ENDIF}  
   finally
     Files.Free;
   end;
@@ -39063,6 +39782,8 @@ var
   TestMode: Boolean;
   FmtMode: Boolean;
   FmtCheck: Boolean;
+  LintMode: Boolean;
+  LintStrict: Boolean;
 
 begin
   cscript := scriptTest;
@@ -39077,6 +39798,8 @@ begin
   TestMode := False;
   FmtMode := False;
   FmtCheck := False;  
+  LintMode := False;
+  LintStrict := False;
   
   ArgIdx := 1;
   while ArgIdx <= ParamCount do
@@ -39093,6 +39816,10 @@ begin
       FmtMode := True
     else if ParamStr(ArgIdx) = '--check' then
       FmtCheck := True    
+    else if ParamStr(ArgIdx) = '--lint' then
+      LintMode := True
+    else if ParamStr(ArgIdx) = '--strict' then
+      LintStrict := True    
     else if ScriptArg = '' then
       ScriptArg := ParamStr(ArgIdx);
     Inc(ArgIdx);
@@ -39102,6 +39829,18 @@ begin
   begin
     Writeln('[boot] DEV MODE — env overrides enabled ' +
             '(PASCAK_EXEC_POLICY, PASCAK_TLS_NO_VERIFY)');
+  end;
+
+  // E.2 — Linter mode
+  if LintMode then
+  begin
+    if ScriptArg = '' then
+    begin
+      Writeln('Usage: pascak --lint <file|dir> [--strict]');
+      {$IFDEF UNIX} libc__exit(2); {$ELSE} Halt(2); {$ENDIF}
+    end;
+    RunLintMode(ScriptArg, LintStrict);
+    {$IFDEF UNIX} libc__exit(0); {$ELSE} Halt(0); {$ENDIF}
   end;
 
   // E.1 — Formatter mode
