@@ -216,6 +216,23 @@ grep -n "Async File I/O" tutorial.md | head -3
   - Skip non-Pascak files (FPC unit style)
   - Result: 27 PASS, 0 FAIL, 2 SOFT-SKIP
 
+- **E.1** — Formatter CLI mode (`pascak --fmt`):
+  - `pascak --fmt <file|dir>` — format in-place
+  - `pascak --fmt --check <target>` — dry-run, exit 1 if reformat needed
+  - Stack-driven line formatter (begin/try/repeat/record/case/{)
+  - 2-space indent, block detection, middle keyword handling
+  - Dict literal multi-line correct indent
+  - Collapse blank lines, trim trailing whitespace, EOF newline
+
+- **E.2** — Linter CLI mode (`pascak --lint`):
+  - `pascak --lint <file|dir>` — report issues
+  - `pascak --lint --strict <target>` — warnings as errors
+  - W001 unused variable (scope-aware)
+  - W002 unreachable code after terminator
+  - E001 duplicate declaration in same scope
+  - AST walker with scope stack (function/class/loop/catch/list-comp)
+  - Exit code 0/1/2 untuk CI integration
+
 **Production Ops Bundle**
 
 - **A.4** — Metrics module (`metrics`):

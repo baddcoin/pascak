@@ -22,10 +22,13 @@ Dokumentasi lengkap API standard library Pascak VM.
 11. [SQLite](#sqlite)
 12. [Crypto](#crypto)
 13. [Filesystem](#filesystem)
-14. [Parser Tips](#parser-tips)
-15. [Sandbox](#sandbox)
-16. [Error Handling](#error-handling)
-17. [Platform Notes](#platform-notes)
+14. [Linter](#linter)
+15. [Formatter](#formatter)
+16. [Test Runner](#test-runner)
+17. [Parser Tips](#parser-tips)
+18. [Sandbox](#sandbox)
+19. [Error Handling](#error-handling)
+20. [Platform Notes](#platform-notes)
 ---
 
 ## Modul Global
@@ -172,6 +175,304 @@ begin
   // ... main logic ...
 end.
 ```
+## Linter
+
+Static analysis untuk script Pascak — detect unused variables, unreachable code, dll.
+
+### Cara Pakai
+
+```bash
+# Report issues (warning = OK, exit 0)
+pascak --lint script.pas
+pascak --lint src/
+
+# Strict mode — warning jadi error (exit 1)
+pascak --lint --strict script.pas
+pascak --lint --strict src/
+```
+
+### Output
+
+```
+═══ Pascak Linter ═══
+Mode: lint
+
+/path/to/script.pas
+  W001:2:7 warning unused variable 'temp'
+  W002:9:3 warning unreachable code after terminator
+
+═══ Summary ═══
+  Files checked   : 1
+  Files w/issues  : 1
+  Warnings        : 2
+  Errors          : 0
+
+RESULT: warnings present (no errors)
+```
+
+### Checks (v1)
+
+| Code | Level | Deskripsi |
+|---|---|---|
+| **W001** | Warning | Unused variable (per scope) |
+| **W002** | Warning | Unreachable code after `return`/`throw`/`break`/`continue` |
+| **E001** | Error | Duplicate declaration in same scope |
+| **E002** | Error | Const reassignment (detected at compile-time, akan muncul sebagai runtime error) |
+
+### Output Format
+
+Setiap issue:
+```
+<code>:<line>:<col> <level> <message>
+```
+
+Contoh:
+```
+W001:12:7 warning unused variable 'config'
+W002:20:3 warning unreachable code after terminator
+E001:8:3 error   duplicate declaration of 'x' (first at line 5)
+```
+
+### Exit Code
+
+| Code | Mode | Arti |
+|---|---|---|
+| `0` | `--lint` | Clean atau hanya warning |
+| `0` | `--lint --strict` | Clean |
+| `1` | `--lint` | Ada error (E001) |
+| `1` | `--lint --strict` | Ada error ATAU warning |
+| `2` | — | Error (file tidak ada, tidak bisa parse) |
+
+### Scope Tracking
+
+Linter track variables di setiap scope:
+
+| Scope type | Contoh |
+|---|---|
+| Top-level | `var x := 1;` di script body |
+| Function body | Parameter + lokal di function |
+| Class body | Fields + `self` |
+| Loop body | `for i` + `for x in arr` |
+| Catch body | `catch e` |
+| List comprehension | `[x * 2 for x in arr]` |
+
+**Unused variable check** dijalankan saat scope pop, kecuali:
+- Parameter fungsi → tidak di-warn (bisa di-ignore di caller)
+- Konstanta → tidak di-warn
+
+### Contoh
+
+**Input**:
+```pascal
+begin
+  var unused := 42;
+  var used := 10;
+  println(used);
+
+  if true then begin
+    var inner_unused := "hi";
+  end;
+
+  return;
+  println("never reached");
+end.
+```
+
+**Output**:
+```
+W001:2:7 warning unused variable 'unused'
+W001:7:9 warning unused variable 'inner_unused'
+W002:9:3 warning unreachable code after terminator
+```
+
+### CI Integration
+
+```bash
+#!/bin/bash
+# .github/workflows/ci.yml
+pascak --lint --strict src/ || {
+  echo "Linter found issues"
+  exit 1
+}
+```
+
+### Pre-commit Hook
+
+Buat file `.git/hooks/pre-commit`:
+
+```bash
+#!/bin/bash
+for f in $(git diff --cached --name-only | grep '\.pas$'); do
+  pasCak --lint --strict "$f" || exit 1
+done
+```
+
+(chmod +x file tersebut)
+
+### Limitations (v1)
+
+- **No cross-function analysis** — unused function tidak di-warn
+- **No type checking** — hanya cek struktur
+- **No dead store elimination** — `x := 1; x := 2;` tidak di-warn
+- **No shadowing warnings** — local var shadow global OK tanpa warning
+- **Order tidak always ascending** — scope pop terakhir bikin hasil keluar urutan
+
+### Kombinasi dengan Formatter
+
+**CI pipeline standard**:
+```bash
+#!/bin/bash
+set -e
+
+echo "1. Format check..."
+pascak --fmt --check src/ || {
+  echo "  FAILED. Run: pascak --fmt src/"
+  exit 1
+}
+
+echo "2. Lint check..."
+pascak --lint --strict src/ || {
+  echo "  FAILED"
+  exit 1
+}
+
+echo "3. Test..."
+PASCAK_EXEC_POLICY=allow-all pascak --test || exit 1
+
+echo "All checks passed"
+```
+
+---
+
+## Formatter
+
+Auto-formatter untuk script Pascak — standardisasi style, whitespace, indent.
+
+### Cara Pakai
+
+```bash
+# Format in-place (ubah file)
+pascak --fmt script.pas
+pascak --fmt src/                      # semua *.pas di folder
+
+# Dry-run (CI mode) — exit 1 kalau perlu reformat
+pascak --fmt --check script.pas
+pascak --fmt --check src/
+```
+
+### Output
+
+```
+═══ Pascak Formatter ═══
+Mode: format (in-place)
+
+  FORMAT /path/to/script.pas
+  OK     /path/to/another.pas
+
+═══ Summary ═══
+  Checked  : 2
+  Changed  : 1
+  Errors   : 0
+```
+
+### Exit Code
+
+| Code | Arti |
+|---|---|
+| `0` | Semua OK, atau format sukses |
+| `1` | `--check` mode + ada file perlu reformat |
+| `2` | Error (file tidak ada, format crash) |
+
+### Rules
+
+**Indent**:
+- 2 spasi per level
+- Block opener: `begin`, `try`, `repeat`, `record`, `case..of`, `{` (dict literal)
+- Block closer: `end`, `until`, `}`
+- Middle keywords (`else`, `except`, `finally`): dedent untuk baris sendiri
+
+**Whitespace**:
+- Trim trailing whitespace di setiap baris
+- Collapse multiple blank lines → 1
+- Tambah trailing newline di EOF
+
+**Continuation**:
+- Baris yang tidak diakhiri terminator (`;`, `end`, `begin`, `{`) → indent +1
+- **Kecuali** di dalam dict literal — sudah di-indent otomatis
+
+### Contoh
+
+**Before**:
+```pascal
+begin
+var x := 10;
+
+
+   if x > 5 then begin
+println("big");
+   end else begin
+       println("small");
+   end;
+end.
+```
+
+**After**:
+```pascal
+begin
+  var x := 10;
+
+  if x > 5 then begin
+    println("big");
+  end else begin
+    println("small");
+  end;
+end.
+```
+
+### Dict Literal
+
+```pascal
+// Input
+begin
+var d := {
+"a": 1,
+"b": {"nested": true},
+"c": [1,2,3]
+};
+println(d);
+end.
+
+// Output
+begin
+  var d := {
+    "a": 1,
+    "b": {"nested": true},
+    "c": [1,2,3]
+  };
+  println(d);
+end.
+```
+
+### CI Integration
+
+```bash
+#!/bin/bash
+# .github/workflows/ci.yml (contoh)
+pascak --fmt --check src/ || {
+  echo "Code tidak ter-format. Jalankan: pascak --fmt src/"
+  exit 1
+}
+```
+
+### Limitations (v1)
+
+- **No operator spacing normalization** — `a+b` tetap `a+b`
+- **No comment reflow** — comment tidak di-reindent
+- **Continuation line loses alignment** — multi-line expression di-indent +1, bukan align ke `(`
+- **No string content formatting** — string literal tidak diubah
+
+---
+
 ## Test Runner
 
 CLI mode untuk auto-discover dan menjalankan test suite.
