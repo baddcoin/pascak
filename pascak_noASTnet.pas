@@ -25918,7 +25918,6 @@ var
   LocalHandler: TValue;
   E: PHTTPServerEntry;
   Buffer, Chunk: RawByteString;
-  // ✅ Scalar locals — hindari managed record di loop
   ReqMethod, ReqPath, ReqQuery, ReqVersion: string;
   ReqBody: RawByteString;
   ReqNames, ReqValues: TStringList;
@@ -25928,26 +25927,28 @@ var
   RespNames, RespValues: TStringList;
   Parsed: Integer;
   ParseErr: string;
-  RawRes, ReqVal : TValue;
+  RawRes, ReqVal: TValue;
   ResponseBytes: RawByteString;
   MiniVM: TVM;
   TempChunk: TChunk;
-  RequestCount: Int64;
+  RequestCount, ConnRequestCount: Int64;
   R, i: Integer;
   Keys: TStringArray;
   StatusVal, HeadersVal, BodyVal, HeaderItemVal: TValue;
-  ReqDict: TDictValue;
-  HeadersDict: TDictValue;
-  
-  CookiesVal: TValue;
-  FileVal: TValue;
+  FileVal, CookiesVal, CKItemVal: TValue;
   CKKeys: TStringArray;
-  CKItemVal: TValue;
   CKNames, CKValues: TStringList;
   CookieHeader: string;
   SafePath: string;
-  FileStream: TFileStream;  
-  Cookiesdict: TDictValue;
+  FileStream: TFileStream;
+  CookiesDict, ReqDict, HeadersDict: TDictValue;
+  ConnectionClose: Boolean;
+  ConnIdleTimeout: Boolean;
+  HandlerStart, RequestTick: QWord;
+  Elapsed: QWord;
+  RidValue: string;
+  LogLine: string;
+  j: Integer;
 begin
   if (Args.Count <> 1) or (TValue(Args[0]).DataType <> dtNumeric) then
   begin
@@ -25969,73 +25970,123 @@ begin
   LocalHandler := E^.Handler;
   RequestCount := 0;
 
-  // ✅ Alokasi TStringList 1× di luar loop, hanya Clear per iterasi
   ReqNames := TStringList.Create;
   ReqValues := TStringList.Create;
   RespNames := TStringList.Create;
   RespValues := TStringList.Create;
+  CKNames := TStringList.Create;
+  CKValues := TStringList.Create;
 
   try
     while True do
     begin
-      // Global shutdown — hard stop
       if InterlockedCompareExchange(IsShuttingDown, 0, 0) = 1 then Break;
-    
-      // ✅ S-4: graceful stop — tunggu sampai request aktif selesai
-      if E^.StopRequested then
-      begin
-        // Tidak ada request aktif (loop kembali ke sini), aman exit
-        Break;
-      end;
-      
+      if E^.StopRequested then Break;
+
       if not NetAcceptTimeout(Sock, 1000, ClientSock) then
         Continue;
 
-      // Reset semua scalar untuk iterasi ini
-      Buffer := '';
-      ParseErr := '';
-      Parsed := 0;
-      ReqMethod := '';
-      ReqPath := '';
-      ReqQuery := '';
-      ReqVersion := '';
-      ReqBody := '';
-      ReqNames.Clear;
-      ReqValues.Clear;
-      RespStatus := 200;
-      RespStatusText := 'OK';
-      RespBody := '';
-      RespNames.Clear;
-      RespValues.Clear;
+      ConnRequestCount := 0;
+      ConnectionClose := False;
 
-      try
-        // ─── Read headers ───
+      // ─── A.1c: keep-alive loop ───
+      while (not ConnectionClose) and
+            (ConnRequestCount < KEEPALIVE_MAX_REQUESTS) and
+            (InterlockedCompareExchange(IsShuttingDown, 0, 0) = 0) do
+      begin
+        Buffer := '';
+        ParseErr := '';
+        Parsed := 0;
+        ReqMethod := '';
+        ReqPath := '';
+        ReqQuery := '';
+        ReqVersion := '';
+        ReqBody := '';
+        ReqNames.Clear;
+        ReqValues.Clear;
+        RespStatus := 200;
+        RespStatusText := 'OK';
+        RespBody := '';
+        RespNames.Clear;
+        RespValues.Clear;
+        CKNames.Clear;
+        CKValues.Clear;
+        RidValue := '';
+
+        ConnIdleTimeout := False;
+        RequestTick := GetTickCount64;
+
+        // ─── Read request with idle timeout ───
         while Length(Buffer) < HTTP_MAX_HEADER_BYTES do
         begin
-          R := NetRecvTimeout(ClientSock, 4096, 5000, Chunk);
-          if R <= 0 then Break;
+          R := NetRecvTimeout(ClientSock, 4096,
+                              KEEPALIVE_TIMEOUT_MS, Chunk);
+          if R = 0 then
+          begin
+            ConnIdleTimeout := True;
+            Break;
+          end;
+          if R < 0 then
+          begin
+            ConnIdleTimeout := True;
+            Break;
+          end;
           Buffer := Buffer + Chunk;
-          if ParseRawHTTPRequest(Buffer, 
-                                  ReqMethod, ReqPath, ReqQuery, ReqVersion,
-                                  ReqNames, ReqValues, ReqBody,
-                                  Parsed, ParseErr) then
+          if ParseRawHTTPRequest(Buffer,
+              ReqMethod, ReqPath, ReqQuery, ReqVersion,
+              ReqNames, ReqValues, ReqBody,
+              Parsed, ParseErr) then
             Break;
           if ParseErr <> 'incomplete headers' then
             Break;
         end;
 
-        if Parsed > 0 then
+        if ConnIdleTimeout then
+          Break;   // back to accept
+
+        if Parsed <= 0 then
         begin
+          RespStatus := 400;
+          RespStatusText := 'Bad Request';
+          RespNames.Add('Content-Type');
+          RespValues.Add('text/plain');
+          RespBody := RawByteString('400 Bad Request: ' + ParseErr);
+          ConnectionClose := True;
+        end
+        else
+        begin
+          // ─── Determine keep-alive vs close ───
+          ConnectionClose := False;
+          if ReqVersion = 'HTTP/1.0' then
+          begin
+            ConnectionClose := True;
+            for i := 0 to ReqNames.Count - 1 do
+              if SameText(ReqNames[i], 'Connection') and
+                 SameText(ReqValues[i], 'keep-alive') then
+              begin
+                ConnectionClose := False;
+                Break;
+              end;
+          end
+          else
+          begin
+            for i := 0 to ReqNames.Count - 1 do
+              if SameText(ReqNames[i], 'Connection') and
+                 SameText(ReqValues[i], 'close') then
+              begin
+                ConnectionClose := True;
+                Break;
+              end;
+          end;
+
           // ─── Build req dict ───
           ReqDict := TDictValue.Create;
           HeadersDict := TDictValue.Create;
-          CKNames := TStringList.Create;
-          CKValues := TStringList.Create;
+          CookiesDict := TDictValue.Create;
           try
             for i := 0 to ReqNames.Count - 1 do
               HeadersDict.SetValue(ReqNames[i], TValue.CreateStr(ReqValues[i]));
-            
-            // ✅ E-1b-2: parse cookies
+
             CookieHeader := '';
             for i := 0 to ReqNames.Count - 1 do
               if SameText(ReqNames[i], 'Cookie') then
@@ -26043,15 +26094,29 @@ begin
                 CookieHeader := ReqValues[i];
                 Break;
               end;
-            
-            CookiesDict := TDictValue.Create;
+
             if CookieHeader <> '' then
             begin
               ParseCookieHeader(CookieHeader, CKNames, CKValues);
               for i := 0 to CKNames.Count - 1 do
                 CookiesDict.SetValue(CKNames[i], TValue.CreateStr(CKValues[i]));
             end;
-            
+
+            // A.8 — Request ID
+            if GHTTPTraceEnabled then
+            begin
+              RidValue := '';
+              for i := 0 to ReqNames.Count - 1 do
+                if SameText(ReqNames[i], GHTTPTraceHeader) then
+                begin
+                  RidValue := ReqValues[i];
+                  Break;
+                end;
+              if RidValue = '' then
+                RidValue := GenerateRequestID;
+              ReqDict.SetValue('requestId', TValue.CreateStr(RidValue));
+            end;
+
             ReqDict.SetValue('method', TValue.CreateStr(ReqMethod));
             ReqDict.SetValue('path', TValue.CreateStr(ReqPath));
             ReqDict.SetValue('query', TValue.CreateStr(ReqQuery));
@@ -26062,14 +26127,11 @@ begin
             ReqVal := TValue.CreateDict(ReqDict);
           except
             ReqDict.Free;
-            CKNames.Free;
-            CKValues.Free;
             raise;
           end;
-          CKNames.Free;
-          CKValues.Free;
 
           // ─── Invoke handler ───
+          HandlerStart := GetTickCount64;
           RawRes := nil;
           MiniVM := TVM.Create(CallEnv);
           TempChunk := TChunk.Create;
@@ -26087,6 +26149,8 @@ begin
             ReqVal.Free;
           end;
 
+          Elapsed := GetTickCount64 - HandlerStart;
+
           // ─── Apply response ───
           if Assigned(RawRes) and (RawRes.DataType = dtDict) then
           begin
@@ -26097,7 +26161,7 @@ begin
                 RespStatus := Trunc(StatusVal.NumVal);
               StatusVal.Free;
             end;
-            
+
             HeadersVal := RawRes.DictVal.GetValueClone('headers');
             if Assigned(HeadersVal) and (HeadersVal.DataType = dtDict) then
             begin
@@ -26114,7 +26178,7 @@ begin
               end;
             end;
             if Assigned(HeadersVal) then HeadersVal.Free;
-            
+
             BodyVal := RawRes.DictVal.GetValueClone('body');
             if Assigned(BodyVal) then
             begin
@@ -26122,8 +26186,7 @@ begin
                 RespBody := StrToRaw(BodyVal.StrVal);
               BodyVal.Free;
             end;
-            
-            // ✅ E-1b-2: handle res.file — static file serving
+
             FileVal := RawRes.DictVal.GetValueClone('file');
             if Assigned(FileVal) and (FileVal.DataType = dtString) then
             begin
@@ -26132,11 +26195,12 @@ begin
               except
                 SafePath := '';
               end;
-              
+
               if (SafePath <> '') and FileExists(SafePath) then
               begin
                 try
-                  FileStream := TFileStream.Create(SafePath, fmOpenRead or fmShareDenyNone);
+                  FileStream := TFileStream.Create(SafePath,
+                    fmOpenRead or fmShareDenyNone);
                   try
                     SetLength(RespBody, FileStream.Size);
                     if FileStream.Size > 0 then
@@ -26144,8 +26208,6 @@ begin
                   finally
                     FileStream.Free;
                   end;
-                  
-                  // Auto Content-Type jika belum ada
                   if RespNames.IndexOf('Content-Type') < 0 then
                   begin
                     RespNames.Add('Content-Type');
@@ -26165,8 +26227,7 @@ begin
               end;
             end;
             if Assigned(FileVal) then FileVal.Free;
-            
-            // ✅ E-1b-2: handle res.cookies — set Set-Cookie headers
+
             CookiesVal := RawRes.DictVal.GetValueClone('cookies');
             if Assigned(CookiesVal) and (CookiesVal.DataType = dtDict) then
             begin
@@ -26182,34 +26243,71 @@ begin
                 if Assigned(CKItemVal) then CKItemVal.Free;
               end;
             end;
-            if Assigned(CookiesVal) then CookiesVal.Free;            
+            if Assigned(CookiesVal) then CookiesVal.Free;
           end;
-          
           if Assigned(RawRes) then RawRes.Free;
+
+          // A.8 — Echo request ID
+          if GHTTPTraceEnabled and GHTTPTraceResponseHeader and
+             (RidValue <> '') then
+          begin
+            RespNames.Add(GHTTPTraceHeader);
+            RespValues.Add(RidValue);
+          end;
+
+          // A.6 — Request logging
+          if GHTTPLogEnabled and (GHTTPLogExclude.IndexOf(ReqPath) < 0) then
+          begin
+            LogLine := '';
+            if GHTTPTraceEnabled and (RidValue <> '') then
+              LogLine := '[' + RidValue + '] ';
+            LogLine := LogLine + ReqMethod + ' ' + ReqPath + ' ' +
+                       IntToStr(RespStatus) + ' ' +
+                       IntToStr(Elapsed) + 'ms ' +
+                       IntToStr(Length(RespBody)) + 'b';
+            if (GHTTPLogSlowMs > 0) and (Elapsed >= QWord(GHTTPLogSlowMs)) then
+              LogWriteInternal(2, LogLine + ' (SLOW)')
+            else
+              LogWriteInternal(1, LogLine);
+          end;
+        end;
+
+        // ─── A.1c: Connection header ───
+        // Strip any existing Connection header from handler
+        j := 0;
+        while j < RespNames.Count do
+        begin
+          if SameText(RespNames[j], 'Connection') or
+             SameText(RespNames[j], 'Keep-Alive') then
+          begin
+            RespNames.Delete(j);
+            RespValues.Delete(j);
+          end
+          else
+            Inc(j);
+        end;
+
+        if ConnectionClose then
+        begin
+          RespNames.Add('Connection');
+          RespValues.Add('close');
         end
         else
         begin
-          RespStatus := 400;
-          RespStatusText := 'Bad Request';
-          RespNames.Add('Content-Type');
-          RespValues.Add('text/plain');
-          RespBody := RawByteString('400 Bad Request: ' + ParseErr);
+          RespNames.Add('Connection');
+          RespValues.Add('keep-alive');
+          RespNames.Add('Keep-Alive');
+          RespValues.Add('timeout=' +
+            IntToStr(KEEPALIVE_TIMEOUT_MS div 1000) +
+            ', max=' + IntToStr(KEEPALIVE_MAX_REQUESTS));
         end;
 
-        // ─── Build & send response ───
-        if RespStatus = 0 then RespStatus := 200;
-        if RespStatusText = '' then RespStatusText := HTTPStatusText(RespStatus);
-        
         ResponseBytes := BuildHTTPResponseRaw(RespStatus, RespStatusText,
           RespNames, RespValues, RespBody);
         NetSend(ClientSock, ResponseBytes);
-        
+
+        Inc(ConnRequestCount);
         Inc(RequestCount);
-      except
-        on Ex: Exception do
-        begin
-          // fail-silent untuk request tunggal
-        end;
       end;
 
       NetClose(ClientSock);
@@ -26219,6 +26317,8 @@ begin
     ReqValues.Free;
     RespNames.Free;
     RespValues.Free;
+    CKNames.Free;
+    CKValues.Free;
   end;
 
   Result := TValue.CreateNum(RequestCount);
