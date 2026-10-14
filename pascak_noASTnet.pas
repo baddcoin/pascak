@@ -219,6 +219,15 @@ type
     opcDefineOrReplaceGlobal
   );
 
+
+  TTestResult = record
+    Path: string;
+    Status: Integer;   // 0=pass, 1=fail, 2=skip
+    Duration: QWord;
+    Output: RawByteString;
+  end;
+  TTestResultArray = array of TTestResult;
+
   PNativeBuffer = ^TNativeBuffer;
   TNativeBuffer = record
     Magic: Cardinal;
@@ -2001,7 +2010,8 @@ var //global
   GHTTPLogEnabled: Boolean = False;
   GHTTPLogExclude: TStringList = nil;
   GHTTPLogSlowMs: Integer = 1000;
-
+  SR_GLOBAL: TSearchRec;
+  
   // A.7 — Health checks
   GHealthChecks: TDictValue = nil;
   GHealthLock: TCriticalSection = nil;
@@ -37608,6 +37618,393 @@ begin
   Writeln('Bye.');
 end;
 
+//E.5 — Test Runner══════════════════════════════════════════════
+//═══════════════════════════════════════════════════════════════ }
+{$IFDEF UNIX}
+function c_setenv(name: PAnsiChar; value: PAnsiChar; overwrite: cint): cint;
+  cdecl; external 'c' name 'setenv';
+function c_unsetenv(name: PAnsiChar): cint;
+  cdecl; external 'c' name 'unsetenv';
+{$ENDIF}
+
+procedure SetEnvVar(const Key, Value: string);
+begin
+  {$IFDEF UNIX}
+  if Value = '' then
+    c_unsetenv(PAnsiChar(AnsiString(Key)))
+  else
+    c_setenv(PAnsiChar(AnsiString(Key)), PAnsiChar(AnsiString(Value)), 1);
+  {$ENDIF}
+  {$IFDEF WINDOWS}
+  Windows.SetEnvironmentVariable(PChar(Key), PChar(Value));
+  {$ENDIF}
+end;
+
+function IsPascakScript(const Path: string): Boolean;
+var
+  F: TFileStream;
+  Buf: array[0..255] of Byte;
+  N, i, j: Integer;
+  FirstChar: Char;
+  Word1: string;
+begin
+  Result := False;
+  try
+    F := TFileStream.Create(Path, fmOpenRead or fmShareDenyNone);
+    try
+      N := F.Read(Buf, SizeOf(Buf));
+    finally
+      F.Free;
+    end;
+  except
+    Exit;
+  end;
+  if N = 0 then Exit;
+
+  // Find first non-whitespace char
+  i := 0;
+  while (i < N) and (Buf[i] in [Ord(' '), 9, 10, 13]) do
+    Inc(i);
+  if i >= N then Exit;
+
+  FirstChar := Char(Buf[i]);
+
+  // Reject FPC style: `{`, `unit`, `program`, `library`, `interface`
+  if FirstChar = '{' then Exit(False);
+
+  // Check first word
+  j := i;
+  Word1 := '';
+  while (j < N) and (j - i < 12) and
+        (Char(Buf[j]) in ['a'..'z', 'A'..'Z']) do
+  begin
+    Word1 := Word1 + Char(Buf[j]);
+    Inc(j);
+  end;
+  Word1 := LowerCase(Word1);
+  if (Word1 = 'unit') or (Word1 = 'program') or
+     (Word1 = 'library') or (Word1 = 'interface') then
+    Exit(False);
+
+  Result := True;
+end;
+
+procedure ReadTestWhitelist(const ManifestPath: string;
+  Results, SoftList: TStringList);
+var
+  SL: TStringList;
+  i, P1, P2: Integer;
+  Line, Fname: string;
+begin
+  if not FileExists(ManifestPath) then Exit;
+
+  SL := TStringList.Create;
+  try
+    try
+      SL.LoadFromFile(ManifestPath);
+    except
+      Exit;
+    end;
+
+    for i := 0 to SL.Count - 1 do
+    begin
+      Line := SL[i];
+
+      // Check runScriptTestEx first (soft — network dependent)
+      P1 := Pos('runScriptTestEx("', Line);
+      if P1 > 0 then
+      begin
+        P1 := P1 + Length('runScriptTestEx("');
+        P2 := Pos('"', Copy(Line, P1, Length(Line)));
+        if P2 > 0 then
+        begin
+          Fname := Copy(Line, P1, P2 - 1);
+          if Fname <> '' then
+          begin
+            Results.Add(Fname);
+            SoftList.Add(Fname);
+          end;
+        end;
+        Continue;
+      end;
+
+      // Hard test (runScriptTest)
+      P1 := Pos('runScriptTest("', Line);
+      if P1 > 0 then
+      begin
+        P1 := P1 + Length('runScriptTest("');
+        P2 := Pos('"', Copy(Line, P1, Length(Line)));
+        if P2 > 0 then
+        begin
+          Fname := Copy(Line, P1, P2 - 1);
+          if Fname <> '' then
+            Results.Add(Fname);
+        end;
+      end;
+    end;
+  finally
+    SL.Free;
+  end;
+end;
+
+procedure DiscoverTestFiles(const Dir: string;
+  Results, SoftList: TStringList);
+var
+  ManifestPath, TestPath: string;
+  Names: TStringList;
+  i: Integer;
+  TestDir: string;
+begin
+  TestDir := IncludeTrailingPathDelimiter(Dir) + 'test';
+  if not DirectoryExists(TestDir) then
+    TestDir := Dir;
+
+  ManifestPath := IncludeTrailingPathDelimiter(TestDir) + 'test_all.pas';
+  if FileExists(ManifestPath) then
+  begin
+    Names := TStringList.Create;
+    try
+      ReadTestWhitelist(ManifestPath, Names, SoftList);
+      for i := 0 to Names.Count - 1 do
+      begin
+        TestPath := IncludeTrailingPathDelimiter(TestDir) + Names[i];
+        if FileExists(TestPath) and IsPascakScript(TestPath) then
+          Results.Add(TestPath);
+      end;
+    finally
+      Names.Free;
+    end;
+    Exit;
+  end;
+
+  // Fallback flat scan
+  if FindFirst(IncludeTrailingPathDelimiter(TestDir) + 'test_*.pas',
+               faAnyFile, SR_GLOBAL) = 0 then
+  begin
+    try
+      repeat
+        if (SR_GLOBAL.Name = '.') or (SR_GLOBAL.Name = '..') then Continue;
+        if (SR_GLOBAL.Attr and faDirectory) <> 0 then Continue;
+        if SameText(SR_GLOBAL.Name, 'test_all.pas') then Continue;
+        TestPath := IncludeTrailingPathDelimiter(TestDir) + SR_GLOBAL.Name;
+        if IsPascakScript(TestPath) then
+          Results.Add(TestPath);
+      until FindNext(SR_GLOBAL) <> 0;
+    finally
+      FindClose(SR_GLOBAL);
+    end;
+  end;
+end;
+
+procedure RunSingleTest(const EnginePath, TestPath: string;
+  out TRes: TTestResult);
+var
+  Stdout, Stderr: RawByteString;
+  ExitCode: Integer;
+  Start: QWord;
+  Args: array of string;
+  Tail: RawByteString;
+begin
+  Start := GetTickCount64;
+
+  TRes.Path := TestPath;
+  TRes.Status := 1;
+  TRes.Duration := 0;
+  TRes.Output := '';
+
+  SetLength(Args, 2);
+  Args[0] := '--dev';
+  Args[1] := TestPath;
+
+  if not ProcExec(EnginePath, Args, Stdout, Stderr, ExitCode, 60000) then
+  begin
+    TRes.Duration := GetTickCount64 - Start;
+    TRes.Output := RawByteString('ProcExec failed: ' + ProcLastError);
+    Exit;
+  end;
+
+  TRes.Duration := GetTickCount64 - Start;
+
+  if Length(Stdout) > 2000 then
+    Tail := Copy(Stdout, Length(Stdout) - 2000, 2000)
+  else
+    Tail := Stdout;
+  TRes.Output := Tail;
+
+  if ExitCode = 0 then
+  begin
+    if (Pos('FAIL:', Tail) > 0) or
+       (Pos('SOME TESTS FAILED', Tail) > 0) then
+      TRes.Status := 1
+    else
+      TRes.Status := 0;
+    Exit;
+  end;
+
+  if (Pos('SKIP', Tail) > 0) and (Pos('FAIL:', Tail) = 0) then
+  begin
+    TRes.Status := 2;
+    Exit;
+  end;
+
+  TRes.Status := 1;
+end;
+
+procedure RunTestMode(const BaseDir, SpecificTarget: string);
+var
+  EnginePath: string;
+  Files: TStringList;
+  SoftList: TStringList;
+  Results: TTestResultArray;
+  Passed, Failed, Skipped, i, j: Integer;
+  FailedList: TStringList;
+  TargetPath, FileName: string;
+  Policy: TExecPolicy;
+begin
+  // E.5: runner butuh spawn subprocess → set policy allow-all
+  SetEnvVar('PASCAK_EXEC_POLICY', 'allow-all');
+  
+  Policy := TExecPolicy.Create;
+  Policy.Mode := epmAllowAll;
+  ProcSetExecPolicy(Policy);
+  Policy.Free;
+  
+  EnginePath := ExpandFileName(ParamStr(0));
+  if not FileExists(EnginePath) then
+  begin
+    Writeln('ERROR: engine binary tidak ditemukan: ', EnginePath);
+    
+    Flush(Output); Flush(ErrOutput);
+    {$IFDEF UNIX} libc__exit(2); {$ELSE} Halt(2); {$ENDIF}
+    Exit;
+  end;
+
+  Writeln('═══ Pascak Test Runner ═══');
+  Writeln('Engine : ', EnginePath);
+  Writeln;
+
+  Files := TStringList.Create;
+  SoftList := TStringList.Create;
+  FailedList := TStringList.Create;
+  try
+    if SpecificTarget <> '' then
+    begin
+      TargetPath := ExpandFileName(SpecificTarget);
+      if DirectoryExists(TargetPath) then
+        DiscoverTestFiles(TargetPath, Files, SoftList)
+      else if FileExists(TargetPath) then
+        Files.Add(TargetPath)
+      else
+      begin
+        Writeln('ERROR: target tidak ditemukan: ', TargetPath);
+        Flush(Output);
+        {$IFDEF UNIX} libc__exit(2); {$ELSE} Halt(2); {$ENDIF}
+      end;
+    end
+    else
+    begin
+      TargetPath := IncludeTrailingPathDelimiter(BaseDir) + 'test';
+      if DirectoryExists(TargetPath) then
+        DiscoverTestFiles(TargetPath, Files, SoftList)
+      else
+        DiscoverTestFiles(BaseDir, Files, SoftList);
+    end;
+  
+    Files.Sort;
+
+    if Files.Count = 0 then
+    begin
+      Writeln('Tidak ada file test_*.pas ditemukan.');
+      
+      Flush(Output); Flush(ErrOutput);
+      {$IFDEF UNIX} libc__exit(2); {$ELSE} Halt(2); {$ENDIF}
+    end;
+
+    Writeln('Ditemukan ', Files.Count, ' file test');
+    Writeln;
+
+    SetLength(Results, Files.Count);
+    Passed := 0; Failed := 0; Skipped := 0;
+
+    for i := 0 to Files.Count - 1 do
+    begin
+      FileName := ExtractFileName(Files[i]);
+      Write('[', i + 1, '/', Files.Count, '] ', FileName, ' ... ');
+      Flush(Output);
+
+      RunSingleTest(EnginePath, Files[i], Results[i]);
+
+      case Results[i].Status of
+        0: begin
+             Inc(Passed);
+             Writeln('PASS (', Results[i].Duration, 'ms)');
+           end;
+        1: begin
+             // Check if soft (network) — mark as skip instead of fail
+             if SoftList.IndexOf(ExtractFileName(Files[i])) >= 0 then
+             begin
+               Inc(Skipped);
+               Writeln('SOFT-SKIP (network)');
+             end
+             else
+             begin
+               Inc(Failed);
+               Writeln('FAIL (', Results[i].Duration, 'ms)');
+               FailedList.Add(Files[i]);
+             end;
+           end;
+        2: begin
+             Inc(Skipped);
+             Writeln('SKIP');
+           end;
+      end;
+    end;
+
+    Writeln;
+    Writeln('═══ Summary ═══');
+    Writeln('  Passed  : ', Passed);
+    Writeln('  Failed  : ', Failed);
+    Writeln('  Skipped : ', Skipped);
+    Writeln;
+
+    if Failed > 0 then
+    begin
+      Writeln('Failed tests:');
+      for i := 0 to FailedList.Count - 1 do
+      begin
+        Writeln('  x ', ExtractFileName(FailedList[i]));
+        for j := 0 to Files.Count - 1 do
+        begin
+          if Files[j] = FailedList[i] then
+          begin
+            Writeln('    --- last output ---');
+            Writeln('    ', StringReplace(
+              string(Results[j].Output), #10, #10'    ', [rfReplaceAll]));
+            Writeln('    -------------------');
+            Break;
+          end;
+        end;
+      end;
+      Writeln;
+      Writeln('RESULT: FAIL');
+      
+      Flush(Output); Flush(ErrOutput);
+      {$IFDEF UNIX} libc__exit(1); {$ELSE} Halt(1); {$ENDIF}
+    end
+    else
+    begin
+      Writeln('RESULT: PASS');
+      
+      Flush(Output); Flush(ErrOutput);
+      {$IFDEF UNIX} libc__exit(0); {$ELSE} Halt(0); {$ENDIF}
+    end;
+  finally
+    Files.Free;
+    SoftList.Free;
+    FailedList.Free;
+  end;
+end;//end E.5 — Test Runner
+
 procedure EnsureGlobalsInit;
 begin
   if Assigned(IOLock) then Exit;
@@ -38325,7 +38722,8 @@ var
   ScriptArg: string;
   ArgIdx: Integer;
   ReplMode: Boolean;
-
+  TestMode: Boolean;
+  
 begin
   cscript := scriptTest;
   
@@ -38336,6 +38734,7 @@ begin
   DebugMode := False;
   ScriptArg := '';
   ReplMode := False;
+  TestMode := False;
   ArgIdx := 1;
   while ArgIdx <= ParamCount do
   begin
@@ -38345,6 +38744,8 @@ begin
       GDangerousEnvAllowed := True
     else if ParamStr(ArgIdx) = '--repl' then
       ReplMode := True
+    else if ParamStr(ArgIdx) = '--test' then
+      TestMode := True    
     else if ScriptArg = '' then
       ScriptArg := ParamStr(ArgIdx);
     Inc(ArgIdx);
@@ -38356,6 +38757,24 @@ begin
             '(PASCAK_EXEC_POLICY, PASCAK_TLS_NO_VERIFY)');
   end;
 
+  // E.5 — Test mode
+  if TestMode then
+  begin
+    NetInit;
+    ProcInit;
+    try
+      RunTestMode(GetCurrentDir, ScriptArg);
+    finally
+      ProcShutdown;
+      NetShutdown;
+    end;
+    {$IFDEF UNIX}
+    libc__exit(0);
+    {$ELSE}
+    Halt(0);
+    {$ENDIF}
+  end;
+  
   // B.3 — REPL mode
   if ReplMode then
   begin
