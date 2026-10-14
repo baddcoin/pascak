@@ -23,12 +23,13 @@ Dokumentasi lengkap API standard library Pascak VM.
 12. [Crypto](#crypto)
 13. [Filesystem](#filesystem)
 14. [Linter](#linter)
-15. [Formatter](#formatter)
-16. [Test Runner](#test-runner)
-17. [Parser Tips](#parser-tips)
-18. [Sandbox](#sandbox)
-19. [Error Handling](#error-handling)
-20. [Platform Notes](#platform-notes)
+15. [Embedding](#embedding)
+16. [Formatter](#formatter)
+17. [Test Runner](#test-runner)
+18. [Parser Tips](#parser-tips)
+19. [Sandbox](#sandbox)
+20. [Error Handling](#error-handling)
+21. [Platform Notes](#platform-notes)
 ---
 
 ## Modul Global
@@ -341,6 +342,330 @@ PASCAK_EXEC_POLICY=allow-all pascak --test || exit 1
 
 echo "All checks passed"
 ```
+
+---
+## Embedding
+
+Public API untuk embed Pascak VM di aplikasi Pascal host (Lazarus, Delphi, FPC).
+
+**Unit**: `pascak_embed.pas` — subprocess-based wrapper.
+
+### Quick Start
+
+```pascal
+program my_host;
+
+{$MODE OBJFPC}{$H+}
+
+uses SysUtils, pascak_embed;
+
+var
+  Engine: TPascakEmbed;
+  R: TPascakResult;
+begin
+  Engine := TPascakEmbed.Create('/path/to/pascak_noASTnet');
+  try
+    Engine.SetDevMode(True);
+    Engine.SetExecPolicy('allow-all');
+    
+    R := Engine.ExecuteString('begin println("Hello from host!"); end.');
+    
+    if R.ExitCode = 0 then
+      Writeln('Output: ', Trim(R.Stdout))
+    else
+      Writeln('Error: ', R.Stderr);
+  finally
+    Engine.Free;
+  end;
+end.
+```
+
+**Compile**:
+```bash
+fpc -Mobjfpc -Sh -Fu/path/to/pascak my_host.pas
+```
+
+---
+
+### `TPascakEmbed.Create(binaryPath) → TPascakEmbed`
+
+Constructor. Validasi binary exists — raise `EPascakEmbedError` kalau tidak.
+
+```pascal
+var E := TPascakEmbed.Create(ExpandFileName('~/pascak_noASTnet'));
+```
+
+**Default config**:
+- ExecPolicy: `"none"` (deny-all)
+- MemoryQuota: 256 MB
+- Timeout: 60000 ms (60 detik)
+- DevMode: `false`
+- TempDir: `$TMPDIR` → `$HOME` → cwd
+
+---
+
+### `ExecuteString(source) → TPascakResult`
+
+Execute script dari source string. Ditulis ke file temp, dijalankan, hasil di-capture.
+
+```pascal
+R := E.ExecuteString(
+  'begin'#10 +
+  '  var name := "World";'#10 +
+  '  println("Hello, ", name);'#10 +
+  'end.');
+```
+
+**Return `TPascakResult`**:
+| Field | Tipe | Deskripsi |
+|---|---|---|
+| `ExitCode` | Integer | 0 = success, 1 = script error, 2 = config error |
+| `Stdout` | string | Output dari script (`println`, dll) |
+| `Stderr` | string | Output error |
+| `DurationMs` | QWord | Wall-clock time |
+| `TimedOut` | Boolean | True kalau timeout di-kill |
+
+---
+
+### `ExecuteFile(path) → TPascakResult`
+
+Execute script dari file. Sama seperti `ExecuteString` tapi tidak buat file temp.
+
+```pascal
+R := E.ExecuteFile('/path/to/script.pas');
+```
+
+---
+
+### Configuration Methods
+
+Semua config method **tidak langsung apply** — di-apply pada `Execute*` berikutnya.
+
+#### `SetEnv(key, value)`
+
+Set env var untuk child process.
+
+```pascal
+E.SetEnv('DATABASE_URL', 'postgres://localhost/mydb');
+E.SetEnv('API_KEY', 'secret');
+E.SetEnv('MY_VAR', 'hello');
+```
+
+**Default passthrough** (inherit dari parent otomatis): `PATH`, `HOME`, `TMPDIR`, `LANG`, `LC_ALL`, `PREFIX`, `TERM`, `USER`.
+
+**Catatan**: setelah `SetEnv` dipanggil minimal 1×, custom env **menggantikan** default. Kalau butuh var lain dari parent, set manual.
+
+#### `ClearEnv`
+
+Hapus semua custom env var. Kembali ke inherit-all dari parent.
+
+```pascal
+E.ClearEnv;
+```
+
+#### `SetExecPolicy(policy)`
+
+Control child process exec policy.
+
+```pascal
+E.SetExecPolicy('none');             // deny all (default)
+E.SetExecPolicy('allow-all');        // development
+E.SetExecPolicy('whitelist:git,ls'); // specific binaries
+```
+
+Setara dengan `PASCAK_EXEC_POLICY` env + `--dev` flag.
+
+#### `SetMemoryQuota(mb)`
+
+Set memory quota untuk child dalam MB.
+
+```pascal
+E.SetMemoryQuota(64);    // 64 MB
+E.SetMemoryQuota(1024);  // 1 GB
+```
+
+#### `SetTimeout(ms)`
+
+Timeout per `Execute*`. 0 = unlimited.
+
+```pascal
+E.SetTimeout(30000);   // 30s
+E.SetTimeout(0);       // no limit
+```
+
+Child di-kill via SIGTERM kalau melebihi timeout.
+
+#### `SetDevMode(enabled)`
+
+Enable `--dev` flag ke child. Wajib untuk:
+- `sys.exec` (exec policy dari env)
+- `sys.env` untuk baca env var
+- TLS override via env
+
+```pascal
+E.SetDevMode(True);
+```
+
+#### `SetTempDir(dir)`
+
+Override folder untuk temp file (default: `$TMPDIR`).
+
+```pascal
+E.SetTempDir('/data/data/com.termux/files/home/tmp');
+```
+
+---
+
+### Diagnostics
+
+#### `BinaryExists → Boolean`
+
+Cek binary engine ada.
+
+#### `BinaryVersion → string`
+
+Spawn engine untuk dapat versi. Return `"Pascak VM"` atau empty string.
+
+```pascal
+Writeln('Engine: ', E.BinaryVersion);
+```
+
+---
+
+### Error Handling
+
+Semua error structural di-raise sebagai `EPascakEmbedError`:
+- Binary path kosong
+- Binary tidak ditemukan
+- Script file tidak ditemukan (untuk `ExecuteFile`)
+
+**Script runtime errors** tidak raise — masuk ke `R.ExitCode` + `R.Stderr`.
+
+```pascal
+try
+  E := TPascakEmbed.Create('/nonexistent/binary');
+except
+  on E: EPascakEmbedError do
+    Writeln('Config error: ', E.Message);
+end;
+
+// Runtime error — tidak raise
+R := E.ExecuteString('begin undefined(); end.');
+if R.ExitCode <> 0 then
+  Writeln('Script error: ', R.Stderr);
+```
+
+---
+
+### Use Cases
+
+#### Plugin System
+
+```pascal
+// Host app: load plugin dari folder
+function RunPlugin(const Path: string): Boolean;
+var
+  E: TPascakEmbed;
+  R: TPascakResult;
+begin
+  E := TPascakEmbed.Create(GetEnginePath);
+  try
+    E.SetDevMode(True);
+    E.SetExecPolicy('allow-all');
+    E.SetEnv('PLUGIN_DIR', ExtractFilePath(Path));
+    
+    R := E.ExecuteFile(Path);
+    Result := R.ExitCode = 0;
+    
+    if not Result then
+      Writeln('Plugin failed: ', R.Stderr);
+  finally
+    E.Free;
+  end;
+end;
+```
+
+#### Rule Engine
+
+```pascal
+function EvaluateRule(const RuleSource, JsonData: string): string;
+var
+  E: TPascakEmbed;
+  Script: string;
+  R: TPascakResult;
+begin
+  E := TPascakEmbed.Create(GetEnginePath);
+  try
+    E.SetDevMode(True);
+    E.SetEnv('RULE_INPUT', JsonData);
+    
+    Script :=
+      'begin'#10 +
+      '  var data := jsonParse(sys.env("RULE_INPUT"));'#10 +
+      RuleSource + #10 +
+      'end.';
+    
+    R := E.ExecuteString(Script);
+    Result := Trim(R.Stdout);
+  finally
+    E.Free;
+  end;
+end;
+```
+
+#### Scripting Layer untuk Game / Tools
+
+```pascal
+// Game host: load level logic dari script
+procedure LoadLevel(const LevelName: string);
+var
+  E: TPascakEmbed;
+  R: TPascakResult;
+begin
+  E := TPascakEmbed.Create('engine');
+  try
+    E.SetDevMode(True);
+    E.SetExecPolicy('whitelist:ffmpeg,convert');
+    E.SetEnv('LEVEL', LevelName);
+    
+    R := E.ExecuteFile('levels/' + LevelName + '.pas');
+    if R.ExitCode <> 0 then
+      raise Exception.Create('Level load failed: ' + R.Stderr);
+  finally
+    E.Free;
+  end;
+end;
+```
+
+---
+
+### Performance
+
+| Metrik | Nilai |
+|---|---|
+| **Startup overhead** | ~2 detik per `Execute*` (spawn process, parse, compile) |
+| **Throughput** | ~0.5 script/detik untuk short script |
+| **Memory** | Isolated — parent tidak terpengaruh |
+
+**Optimization**:
+- Untuk batch, gabung jadi 1 script
+- Untuk interaktif, gunakan `--repl` mode via `TProcess` langsung
+- **B.7b backlog**: in-process embed tanpa subprocess (~0.1s overhead)
+
+---
+
+### Limitations (v1)
+
+| Feature | Status |
+|---|---|
+| Subprocess isolation | ✅ |
+| Config env / exec policy / memory / timeout | ✅ |
+| Stdout / stderr capture | ✅ |
+| Exit code normalized | ✅ |
+| Native callback dari host | ❌ (B.7b) |
+| Shared memory / FFI bidirectional | ❌ (B.7b) |
+| Streaming stdout (live) | ❌ |
+| Windows signal handling | ⚠️ (Partial) |
 
 ---
 

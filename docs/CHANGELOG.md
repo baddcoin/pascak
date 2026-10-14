@@ -258,6 +258,23 @@ grep -n "Async File I/O" tutorial.md | head -3
   - Test: 12 assertions
 
 ## [Unreleased]
+### Added
+
+**Embedding API (B.7)**
+
+- **B.7** — Public embedding API (`pascak_embed.pas` unit):
+  - `TPascakEmbed` class: subprocess-based wrapper
+  - `ExecuteString(source)` / `ExecuteFile(path)` — run script
+  - `SetEnv` / `ClearEnv` / `SetExecPolicy` / `SetMemoryQuota` /
+    `SetTimeout` / `SetDevMode` / `SetTempDir`
+  - `TPascakResult`: `{ExitCode, Stdout, Stderr, DurationMs, TimedOut}`
+  - Environment passthrough default: PATH, HOME, TMPDIR, LANG,
+    LC_ALL, PREFIX, TERM, USER
+  - Unix exit code normalized (`WEXITSTATUS`)
+  - Use case: plugin system, rule engine, scripting layer
+  - Limitations: ~2s startup per execute, no in-process callback (B.7b)
+
+
 **Bundle C — WebSocket Client**
 
 - **C.1** — WebSocket client `ws.connect(url, [config])`:
