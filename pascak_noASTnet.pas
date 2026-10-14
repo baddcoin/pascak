@@ -172,6 +172,7 @@ type
                           fkFloat32, fkFloat64, fkPointer, fkBool);
   TWSClientState      = (wscsConnecting, wscsHandshake, wscsOpen,
                           wscsClosing, wscsClosed);
+  TFormatBlockKind    = (fbkBegin, fbkCase, fbkTry, fbkRecord, fbkRepeat, fbkBrace, fbkNone);  
   
   //VIRTUAL MECHINE
   TVMOpCode = (
@@ -33948,6 +33949,170 @@ begin
   end;
 end;//end Metrics (Prometheus-compatible)
 
+//E.1 — Formatter════════════════════════════════════════════════
+//═══════════════════════════════════════════════════════════════ }
+function FmtExtractFirstWord(const S: string): string;
+var i, j: Integer;
+begin
+  Result := '';
+  i := 1;
+  while (i <= Length(S)) and not (S[i] in ['a'..'z', 'A'..'Z', '_']) do Inc(i);
+  j := i;
+  while (j <= Length(S)) and (S[j] in ['a'..'z', 'A'..'Z', '0'..'9', '_']) do Inc(j);
+  if j > i then Result := LowerCase(Copy(S, i, j - i));
+end;
+
+function FmtExtractLastWord(const S: string): string;
+var i, j: Integer;
+begin
+  Result := '';
+  i := Length(S);
+  while (i > 0) and not (S[i] in ['a'..'z', 'A'..'Z', '_']) do Dec(i);
+  j := i;
+  while (j > 0) and (S[j] in ['a'..'z', 'A'..'Z', '0'..'9', '_']) do Dec(j);
+  if i > j then Result := LowerCase(Copy(S, j + 1, i - j));
+end;
+
+function FmtIsLineComplete(const L: string): Boolean;
+var
+  LastCh: Char;
+  LastW: string;
+begin
+  if L = '' then Exit(True);
+  LastCh := L[Length(L)];
+  if LastCh = ';' then Exit(True);
+  if LastCh = '{' then Exit(True);   // dict literal opener — indentation handled by push rule
+  LastW := FmtExtractLastWord(L);  
+  if (LastW = 'begin') or (LastW = 'end') or (LastW = 'try') or
+     (LastW = 'repeat') or (LastW = 'record') or (LastW = 'else') or
+     (LastW = 'then') or (LastW = 'do') or (LastW = 'of') or
+     (LastW = 'except') or (LastW = 'finally') then
+    Exit(True);
+  Result := False;
+end;
+
+function FormatPascakSource(const Source: string): string;
+var
+  Lines: TStringArray;
+  OutLines: TStringList;
+  Stack: array of TFormatBlockKind;
+  StackTop, i, Indent, EffectiveIndent: Integer;
+  Line, Trimmed, LowerTrimmed, FirstWord, LastWord: string;
+  PrevComplete: Boolean;
+  PrevBlank: Boolean;
+  IsCloser: Boolean;
+  
+  procedure Push(K: TFormatBlockKind);
+  begin
+    if StackTop >= Length(Stack) then
+      SetLength(Stack, Length(Stack) + 32);
+    Stack[StackTop] := K;
+    Inc(StackTop);
+  end;
+
+  function Pop: TFormatBlockKind;
+  begin
+    if StackTop <= 0 then Exit(fbkNone);
+    Dec(StackTop);
+    Result := Stack[StackTop];
+  end;
+
+  function Peek: TFormatBlockKind;
+  begin
+    if StackTop <= 0 then Exit(fbkNone);
+    Result := Stack[StackTop - 1];
+  end;
+
+  function StripCR(const L: string): string;
+  begin
+    Result := L;
+    if (Length(Result) > 0) and (Result[Length(Result)] = #13) then
+      SetLength(Result, Length(Result) - 1);
+  end;
+
+begin
+  Lines := Source.Split([#10]);
+  OutLines := TStringList.Create;
+  SetLength(Stack, 32);
+  StackTop := 0;
+  Indent := 0;
+  PrevComplete := True;
+  PrevBlank := False;
+
+  try
+    for i := 0 to High(Lines) do
+    begin
+      Line := StripCR(Lines[i]);
+      Trimmed := Trim(Line);
+
+      if Trimmed = '' then
+      begin
+        if (OutLines.Count > 0) and (not PrevBlank) then
+        begin
+          OutLines.Add('');
+          PrevBlank := True;
+        end;
+        Continue;
+      end;
+      PrevBlank := False;
+
+      LowerTrimmed := LowerCase(Trimmed);
+      FirstWord := FmtExtractFirstWord(Trimmed);
+      LastWord := FmtExtractLastWord(Trimmed);
+
+      // Dedent for closers (pop stack + indent)
+      IsCloser := (FirstWord = 'end') or (FirstWord = 'until') or
+                  ((Length(Trimmed) > 0) and (Trimmed[1] = '}'));
+      if IsCloser then
+      begin
+        Pop;
+        if Indent > 0 then Dec(Indent);
+      end;
+
+      EffectiveIndent := Indent;
+
+      // Middle keywords
+      if (FirstWord = 'except') or (FirstWord = 'finally') then
+      begin
+        if EffectiveIndent > 0 then Dec(EffectiveIndent);
+      end
+      else if FirstWord = 'else' then
+      begin
+        if Peek = fbkCase then
+          if EffectiveIndent > 0 then Dec(EffectiveIndent);
+      end
+      // Continuation line
+      else if (not PrevComplete) and (Peek <> fbkBrace) and (not IsCloser) then
+        Inc(EffectiveIndent);        
+        
+      if EffectiveIndent < 0 then EffectiveIndent := 0;
+
+      OutLines.Add(StringOfChar(' ', EffectiveIndent * 2) + Trimmed);
+
+      // Openers (post-emit)
+      if LastWord = 'begin' then
+      begin Push(fbkBegin); Inc(Indent); end
+      else if LastWord = 'try' then
+      begin Push(fbkTry); Inc(Indent); end
+      else if LastWord = 'repeat' then
+      begin Push(fbkRepeat); Inc(Indent); end
+      else if LastWord = 'record' then
+      begin Push(fbkRecord); Inc(Indent); end
+      else if (FirstWord = 'case') and (Pos(' of', LowerTrimmed) > 0) then
+      begin Push(fbkCase); Inc(Indent); end
+      else if (Length(Trimmed) > 0) and (Trimmed[Length(Trimmed)] = '{') and
+              (Pos('//', Trimmed) = 0) then
+      begin Push(fbkBrace); Inc(Indent); end;
+
+      PrevComplete := FmtIsLineComplete(Trimmed);
+    end;
+
+    Result := OutLines.Text;
+  finally
+    OutLines.Free;
+  end;
+end;
+
 // A.2 — Structured Logging═══════════════════════════════════════
 //═══════════════════════════════════════════════════════════════ }
 function LogArgsToString(Args: TObjectList): string;
@@ -37850,6 +38015,179 @@ begin
   TRes.Status := 1;
 end;
 
+function FmtReadFile(const Path: string; out Content: string): Boolean;
+var
+  FS: TFileStream;
+begin
+  Result := False;
+  Content := '';
+  if not FileExists(Path) then Exit;
+  try
+    FS := TFileStream.Create(Path, fmOpenRead or fmShareDenyNone);
+    try
+      SetLength(Content, FS.Size);
+      if FS.Size > 0 then
+        FS.ReadBuffer(Content[1], FS.Size);
+    finally
+      FS.Free;
+    end;
+    Result := True;
+  except
+    Result := False;
+  end;
+end;
+
+function FmtWriteFile(const Path, Content: string): Boolean;
+var
+  FS: TFileStream;
+begin
+  Result := False;
+  try
+    FS := TFileStream.Create(Path, fmCreate);
+    try
+      if Length(Content) > 0 then
+        FS.WriteBuffer(Content[1], Length(Content));
+    finally
+      FS.Free;
+    end;
+    Result := True;
+  except
+    Result := False;
+  end;
+end;
+
+procedure FmtProcessFile(const Path: string; CheckOnly: Boolean;
+  var ChangedCount, CheckedCount, ErrorCount: Integer);
+var
+  Source, Formatted: string;
+begin
+  Inc(CheckedCount);
+  if not FmtReadFile(Path, Source) then
+  begin
+    Writeln('ERROR: tidak bisa baca ', Path);
+    Inc(ErrorCount);
+    Exit;
+  end;
+
+  try
+    Formatted := FormatPascakSource(Source);
+  except
+    on E: Exception do
+    begin
+      Writeln('ERROR: format gagal pada ', Path, ' — ', E.Message);
+      Inc(ErrorCount);
+      Exit;
+    end;
+  end;
+
+  if Formatted = Source then
+  begin
+    Writeln('  OK    ', Path);
+    Exit;
+  end;
+
+  Inc(ChangedCount);
+
+  if CheckOnly then
+  begin
+    Writeln('  REFORMAT ', Path);
+    Exit;
+  end;
+
+  if not FmtWriteFile(Path, Formatted) then
+  begin
+    Writeln('ERROR: tidak bisa tulis ', Path);
+    Inc(ErrorCount);
+    Exit;
+  end;
+
+  Writeln('  FORMAT ', Path);
+end;
+
+procedure RunFormatMode(const Target: string; CheckOnly: Boolean);
+var
+  SR: TSearchRec;
+  Files: TStringList;
+  i, Changed, Checked, Errors: Integer;
+  TargetPath: string;
+
+  procedure ScanDir(const Dir: string);
+  begin
+    if not DirectoryExists(Dir) then Exit;
+    if FindFirst(IncludeTrailingPathDelimiter(Dir) + '*.pas', faAnyFile, SR) = 0 then
+    begin
+      try
+        repeat
+          if (SR.Name = '.') or (SR.Name = '..') then Continue;
+          if (SR.Attr and faDirectory) <> 0 then Continue;
+          Files.Add(IncludeTrailingPathDelimiter(Dir) + SR.Name);
+        until FindNext(SR) <> 0;
+      finally
+        FindClose(SR);
+      end;
+    end;
+  end;
+
+begin
+  SetEnvVar('PASCAK_EXEC_POLICY', 'allow-all');
+
+  Writeln('═══ Pascak Formatter ═══');
+  if CheckOnly then
+    Writeln('Mode: --check (dry-run, tidak ubah file)')
+  else
+    Writeln('Mode: format (in-place)');
+  Writeln;
+
+  Files := TStringList.Create;
+  try
+    TargetPath := ExpandFileName(Target);
+    if TargetPath = '' then
+      TargetPath := GetCurrentDir;
+
+    if DirectoryExists(TargetPath) then
+      ScanDir(TargetPath)
+    else if FileExists(TargetPath) then
+      Files.Add(TargetPath)
+    else
+    begin
+      Writeln('ERROR: target tidak ditemukan: ', TargetPath);
+      Flush(Output);
+      {$IFDEF UNIX} libc__exit(2); {$ELSE} Halt(2); {$ENDIF}
+    end;
+
+    Files.Sort;
+
+    if Files.Count = 0 then
+    begin
+      Writeln('Tidak ada file *.pas ditemukan.');
+      Flush(Output);
+      {$IFDEF UNIX} libc__exit(2); {$ELSE} Halt(2); {$ENDIF}
+    end;
+
+    Changed := 0; Checked := 0; Errors := 0;
+
+    for i := 0 to Files.Count - 1 do
+      FmtProcessFile(Files[i], CheckOnly, Changed, Checked, Errors);
+
+    Writeln;
+    Writeln('═══ Summary ═══');
+    Writeln('  Checked  : ', Checked);
+    Writeln('  Changed  : ', Changed);
+    Writeln('  Errors   : ', Errors);
+    Writeln;
+
+    Flush(Output);
+    Flush(ErrOutput);
+    if Errors > 0 then
+      {$IFDEF UNIX} libc__exit(2); {$ELSE} Halt(2); {$ENDIF}
+    if CheckOnly and (Changed > 0) then
+      {$IFDEF UNIX} libc__exit(1); {$ELSE} Halt(1); {$ENDIF}
+    {$IFDEF UNIX} libc__exit(0); {$ELSE} Halt(0); {$ENDIF}
+  finally
+    Files.Free;
+  end;
+end;
+
 procedure RunTestMode(const BaseDir, SpecificTarget: string);
 var
   EnginePath: string;
@@ -38723,7 +39061,9 @@ var
   ArgIdx: Integer;
   ReplMode: Boolean;
   TestMode: Boolean;
-  
+  FmtMode: Boolean;
+  FmtCheck: Boolean;
+
 begin
   cscript := scriptTest;
   
@@ -38735,6 +39075,9 @@ begin
   ScriptArg := '';
   ReplMode := False;
   TestMode := False;
+  FmtMode := False;
+  FmtCheck := False;  
+  
   ArgIdx := 1;
   while ArgIdx <= ParamCount do
   begin
@@ -38746,6 +39089,10 @@ begin
       ReplMode := True
     else if ParamStr(ArgIdx) = '--test' then
       TestMode := True    
+    else if ParamStr(ArgIdx) = '--fmt' then
+      FmtMode := True
+    else if ParamStr(ArgIdx) = '--check' then
+      FmtCheck := True    
     else if ScriptArg = '' then
       ScriptArg := ParamStr(ArgIdx);
     Inc(ArgIdx);
@@ -38757,6 +39104,18 @@ begin
             '(PASCAK_EXEC_POLICY, PASCAK_TLS_NO_VERIFY)');
   end;
 
+  // E.1 — Formatter mode
+  if FmtMode then
+  begin
+    if ScriptArg = '' then
+    begin
+      Writeln('Usage: pascak --fmt <file|dir> [--check]');
+      {$IFDEF UNIX} libc__exit(2); {$ELSE} Halt(2); {$ENDIF}
+    end;
+    RunFormatMode(ScriptArg, FmtCheck);
+    {$IFDEF UNIX} libc__exit(0); {$ELSE} Halt(0); {$ENDIF}
+  end;
+  
   // E.5 — Test mode
   if TestMode then
   begin
