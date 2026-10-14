@@ -135,3 +135,7 @@ test/ws_echo.pas
 /test_poller
 /test_poller_tcp
 /test_websocket_unit
+
+# ── Embed demo binary ──
+/embed_demo
+/embed_demo.o
