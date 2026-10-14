@@ -172,6 +172,167 @@ begin
   // ... main logic ...
 end.
 ```
+## Test Runner
+
+CLI mode untuk auto-discover dan menjalankan test suite.
+
+### Cara Pakai
+
+```bash
+# Discover + run semua test di test/
+pascak --test
+
+# Run satu file spesifik
+pascak --test test/test_json.pas
+
+# Discover di folder tertentu
+pascak --test path/to/tests/
+```
+
+**Catatan**: butuh `PASCAK_EXEC_POLICY=allow-all` di env (atau `--dev` flag) supaya subprocess spawn diizinkan:
+
+```bash
+PASCAK_EXEC_POLICY=allow-all ~/pascak_noASTnet --test
+```
+
+### Discovery
+
+**Primary**: baca whitelist dari `test/test_all.pas`.
+
+File `test_all.pas` yang sudah ada mendaftar test resmi dengan dua fungsi:
+
+```pascal
+// Hard test — fail berarti exit 1
+runScriptTest("test_json.pas");
+
+// Soft test — fail karena network di-skip, bukan fail
+runScriptTestEx("test_tls_cache.pas", true);
+```
+
+Runner parse file ini dan skip file yang bukan bagian dari official suite.
+
+**Fallback**: kalau `test_all.pas` tidak ada, flat scan `test/*.pas`.
+
+### Output
+
+```
+═══ Pascak Test Runner ═══
+Engine : /path/to/pascak_noASTnet
+
+Ditemukan 29 file test
+
+[1/29] test_json.pas ... PASS (1963ms)
+[2/29] test_crypto.pas ... PASS (1972ms)
+...
+[12/29] test_phase_t2a_2.pas ... SOFT-SKIP (network)
+...
+[29/29] test_ws_tls_nbs.pas ... PASS (3606ms)
+
+═══ Summary ═══
+  Passed  : 27
+  Failed  : 0
+  Skipped : 2
+
+RESULT: PASS
+```
+
+### Exit Code
+
+| Code | Arti |
+|---|---|
+| `0` | Semua test PASS (atau soft-skip) |
+| `1` | Ada minimal 1 test FAIL |
+| `2` | Tidak ada file test ditemukan, atau error target |
+
+Cocok untuk CI:
+
+```bash
+PASCAK_EXEC_POLICY=allow-all ~/pascak_noASTnet --test || exit 1
+```
+
+### Behaviour Detail
+
+**Isolasi**: setiap test dijalankan di **subprocess terpisah**. Isolated state, tidak ada leakage antar test.
+
+**Timeout**: 60 detik per test. Test yang hang akan di-kill.
+
+**Env propagation**: runner set `PASCAK_EXEC_POLICY=allow-all` untuk child supaya test bisa spawn subprocess sendiri (mis. Python WS client).
+
+**Skip rule**:
+- File FPC-unit style (dimulai `{` atau `unit X;`) → skip
+- Subfolder `.git`, `.pascak_tmp`, `testError`, `builLibTest` → skip
+- File `test_all.pas` sendiri → skip (ini manifest)
+
+**Diagnostic**: kalau fail, runner cetak 2KB terakhir dari output test.
+
+### Menulis Test yang Compatible
+
+Test harus berupa **script Pascak valid**:
+
+```pascal
+// test_myfeature.pas — Ok
+begin
+  testBegin("My Feature");
+
+  assertEqual(2, 1 + 1, "basic math");
+  assertTrue(true, "always pass");
+
+  testEnd();
+  sys.exit(testSummary());
+end.
+```
+
+**Bukan**:
+
+```pascal
+// test_myfeature.pas — Runner akan skip (FPC unit style)
+{ ====================================
+  FPC Test Unit — not runnable by --test
+  ==================================== }
+unit TestMyFeature;
+interface
+...
+```
+
+**Test template**:
+
+```pascal
+begin
+  testBegin("<category — name>");
+
+  // ... assertions ...
+
+  testEnd();
+  sys.exit(testSummary());
+end.
+```
+
+`testSummary()` return jumlah failed. `sys.exit(N)` propagate ke runner.
+
+### Register ke Official Suite
+
+Untuk menambahkan test ke suite resmi, edit `test/test_all.pas`:
+
+```pascal
+// Hard test (harus pass)
+runScriptTest("test_myfeature.pas");
+
+// Soft test (network dependent)
+runScriptTestEx("test_myfeature_network.pas", true);
+```
+
+Runner akan otomatis menemukan test di run berikutnya.
+
+### Known Limitations
+
+- **Sequential**: test jalan satu per satu. Untuk suite besar (>50 test), bisa jadi lambat.
+- **Network soft-skip**: test yang fail karena network di-mark skip, tapi tidak ada retry.
+- **Parallel mode**: belum ada (backlog).
+
+**Cocok untuk**: pre-commit check, CI step, before-release validation.
+
+---
+
 ## Metrics
 
 Prometheus-compatible metrics module — counter, gauge, histogram.

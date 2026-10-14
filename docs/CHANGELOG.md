@@ -201,6 +201,21 @@ ls -la CHANGELOG.md
 grep -n "Filesystem" pascak_api.md | head -3
 grep -n "Async File I/O" tutorial.md | head -3
 ```
+
+**DX Bundle**
+
+- **E.5** — Test runner CLI mode (`pascak --test`):
+  - `pascak --test` — discover + run all test
+  - `pascak --test <file>` — run single file
+  - `pascak --test <dir>` — discover in specific dir
+  - Whitelist-based discovery via `test/test_all.pas`
+  - Hard test vs soft test (network) separation
+  - Subprocess isolation, 60s timeout per test
+  - Env auto-propagation (PASCAK_EXEC_POLICY=allow-all)
+  - Exit code 0/1/2 untuk CI integration
+  - Skip non-Pascak files (FPC unit style)
+  - Result: 27 PASS, 0 FAIL, 2 SOFT-SKIP
+
 **Production Ops Bundle**
 
 - **A.4** — Metrics module (`metrics`):
