@@ -1970,6 +1970,62 @@ assertEqual(0, s.idle, "pool empty");
 ```
 
 ---
+### Transfer-Encoding: Chunked
+
+HTTP client **otomatis decode** chunked response (RFC 7230 §4.1). Tidak perlu setup — transparan.
+
+```pascal
+// Server yang kirim chunked (banyak CDN, API gateway)
+var r := http.get("https://example.com/");
+println("body len: ", len(r.body));              // decoded body
+println("Transfer-Encoding: ", r.headers["Transfer-Encoding"]);  // "chunked"
+println("Content-Length: ", r.headers["Content-Length"]);        // null
+```
+
+**Coverage**:
+- ✅ `Content-Length` response → pool reuse
+- ✅ `Transfer-Encoding: chunked` → pool reuse
+- ✅ Chunk extension (`;` setelah size) → skip otomatis
+- ✅ Incomplete chunked → fallback close (no pool)
+
+**Chunked + pooling**: server yang pakai chunked sekarang **bisa di-pool** — tidak perlu new connection per request.
+
+### Server Keep-Alive
+
+HTTP server (`http.listen` **dan** `http.listenAsync`) support HTTP/1.1 keep-alive otomatis:
+
+| Config | Default |
+|---|---|
+| `KEEPALIVE_MAX_REQUESTS` | 100 request per connection |
+| `KEEPALIVE_TIMEOUT_MS` | 30000 ms (30 detik idle) |
+
+**Server** kirim header otomatis:
+```
+Connection: keep-alive
+Keep-Alive: timeout=30, max=100
+```
+
+**Client** (pool) deteksi + reuse socket — 1 handshake untuk 100 request.
+
+**Test**:
+```pascal
+// 100 request sequential ke server keep-alive
+var start := time.now();
+for i := 1 to 100 do
+  http.get("http://127.0.0.1:8080/api");
+println("Elapsed: ", time.now() - start);
+// ~1s dengan keep-alive, ~10s tanpa
+```
+
+**Behavior**:
+- HTTP/1.0 → default close (keep-alive hanya kalau client minta)
+- HTTP/1.1 → default keep-alive
+- Client kirim `Connection: close` → server tutup setelah response
+- Server idle 30s → tutup otomatis
+- Max 100 request → tutup untuk hindari resource leak
+
+---
+
 
 ### Env override untuk TLS verify
 
@@ -2286,6 +2342,96 @@ function onMessage(conn, msg) begin
   // ✅ spawn worker atau timer
 end;
 ```
+
+### Auto-Reconnect
+
+WS client bisa otomatis reconnect setelah disconnect. Backoff exponential, capped.
+
+```pascal
+var c := ws.connect("wss://api.example.com/ws", {
+  "onOpen":         lambda conn : println("connected"),
+  "onMessage":      lambda conn, msg : println("recv: ", msg),
+  "onClose":        lambda conn, code : println("closed: ", code),
+  "autoReconnect":  true,        // ← enable
+  "reconnectMinMs": 1000,        // ← backoff awal (default 1000)
+  "reconnectMaxMs": 30000        // ← backoff cap (default 30000)
+});
+```
+
+**Backoff pattern**:
+```
+Attempt 1: wait 1000ms  (min)
+Attempt 2: wait 2000ms
+Attempt 3: wait 4000ms
+Attempt 4: wait 8000ms
+Attempt 5: wait 16000ms
+Attempt 6: wait 30000ms (capped at max)
+...
+```
+
+**Trigger**:
+- Connect gagal (DNS, TCP, TLS)
+- Handshake gagal (401, accept mismatch)
+- Server tutup koneksi (`onClose` fire)
+- Network error mid-stream
+
+**Setiap (re)connect sukses**:
+- `onOpen` fire ulang
+- Client handshake baru (Sec-WebSocket-Key regenerate)
+
+**Setiap disconnect**:
+- `onClose` fire dengan close code
+
+**Matikan auto-reconnect**:
+```pascal
+c.close();   // explicit close → disable + stop retry
+```
+
+**Runtime counter**:
+```pascal
+println("attempts: ", c.attempts());   // jumlah retry sejauh ini
+```
+
+**Use case**:
+- Microservice di mobile network (WiFi ↔ 4G handoff)
+- Long-lived feed dari remote server
+- Auto-recover setelah server restart
+- Resilient connector untuk tidak-managed network
+
+**Best practice**:
+```pascal
+function onOpen(conn) begin
+  log.info("WS connected: ", conn.id);
+  // Re-subscribe / re-auth setelah reconnect
+  conn.send(jsonStringify({"action": "subscribe", "channel": "updates"}));
+end;
+
+var c := ws.connect(url, {
+  "onOpen": onOpen,
+  "onMessage": onMessage,
+  "autoReconnect": true,
+  "reconnectMinMs": 500,
+  "reconnectMaxMs": 10000
+});
+```
+
+**Catatan**:
+- Auto-reconnect **disabled** by default (`false`)
+- Untuk production, set `reconnectMaxMs` sesuai SLA server (mis. 30s untuk API publik)
+- Untuk development, `reconnectMinMs: 200` bikin iterasi cepat
+
+### Handle Methods
+
+| Method | Return | Deskripsi |
+|---|---|---|
+| `c.send(msg)` | bool | Kirim text frame |
+| `c.sendBytes(data)` | bool | Kirim binary frame |
+| `c.close([code])` | bool | Close + disable auto-reconnect |
+| `c.isOpen()` | bool | Cek state |
+| `c.attempts()` | int | Reconnect attempts sejauh ini |
+| `c.state()` | string | `connecting\|handshake\|open\|closing\|closed` |
+
+---
 
 ### `ws.serve(port, config) → serverHandle`
 

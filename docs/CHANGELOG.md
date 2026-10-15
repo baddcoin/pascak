@@ -260,6 +260,35 @@ grep -n "Async File I/O" tutorial.md | head -3
 ## [Unreleased]
 ### Added
 
+**HTTP + WS Polish (2026-10-15)**
+
+- **A.1b** — Chunked transfer decoder untuk HTTP client:
+  - Auto-decode `Transfer-Encoding: chunked` response
+  - Chunk extension (`;` setelah size) skip otomatis
+  - Chunked + complete → pool reuse works
+  - Incomplete → fallback close
+  - Fix: skip TLS handshake on pool hit (avoid SSL error +
+    memory leak)
+  - Coverage: Content-Length + chunked → 100% pool coverage
+
+- **A.1c** — HTTP server keep-alive untuk blocking `http.listen`:
+  - Reuse socket: 100 request per connection
+  - Idle timeout 30s per request
+  - HTTP/1.0 default close, HTTP/1.1 default keep-alive
+  - Response header: `Connection: keep-alive` +
+    `Keep-Alive: timeout=30, max=100`
+  - Throughput: ~10× improvement for sequential requests
+  - Both server modes (`listen` + `listenAsync`) now support keep-alive
+
+- **C.2** — WebSocket client auto-reconnect:
+  - Config: `autoReconnect`, `reconnectMinMs`, `reconnectMaxMs`
+  - Exponential backoff: min × 2^attempt, capped at max
+  - `onOpen` fires on each successful reconnect
+  - `onClose` fires on each disconnect
+  - `c.attempts()` → retry counter
+  - `c.close()` → explicit close disables retry
+  - Use case: mobile network, long-lived feed, resilient connector
+
 **Embedding API (B.7)**
 
 - **B.7** — Public embedding API (`pascak_embed.pas` unit):
