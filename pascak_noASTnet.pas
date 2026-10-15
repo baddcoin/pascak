@@ -27393,6 +27393,79 @@ begin
 end;
 //WebSocket Native Bindings end
 
+{ A.1b — Decode chunked transfer encoding (RFC 7230 §4.1)
+  Input: full response buffer, Offset = posisi byte pertama setelah headers
+  Output: Decoded = body yang sudah di-decode (tanpa chunk metadata)
+  Return: True kalau terminator '0\r\n' ketemu (complete), False kalau incomplete/invalid }
+function DecodeChunkedBody(const Data: RawByteString; Offset: Integer;
+  out Decoded: RawByteString): Boolean;
+var
+  Pos, LineEnd, DataStart, DataEnd, i: Integer;
+  SizeHex: string;
+  ChunkSize: Int64;
+  c: Char;
+begin
+  Result := False;
+  Decoded := '';
+  if (Offset < 1) or (Offset > Length(Data)) then Exit;
+
+  Pos := Offset;
+  while Pos <= Length(Data) do
+  begin
+    // Cari akhir baris chunk-size
+    LineEnd := Pos;
+    while (LineEnd <= Length(Data)) and (Data[LineEnd] <> #10) do
+      Inc(LineEnd);
+    if LineEnd > Length(Data) then Exit;   // incomplete
+
+    // Extract hex size (skip extension setelah ';')
+    SizeHex := '';
+    i := Pos;
+    while (i < LineEnd) and (Data[i] <> ';') and (Data[i] <> #13) do
+    begin
+      SizeHex := SizeHex + Data[i];
+      Inc(i);
+    end;
+
+    // Parse hex
+    ChunkSize := 0;
+    for i := 1 to Length(SizeHex) do
+    begin
+      c := SizeHex[i];
+      if (c >= '0') and (c <= '9') then
+        ChunkSize := ChunkSize * 16 + (Ord(c) - Ord('0'))
+      else if (c >= 'a') and (c <= 'f') then
+        ChunkSize := ChunkSize * 16 + (Ord(c) - Ord('a') + 10)
+      else if (c >= 'A') and (c <= 'F') then
+        ChunkSize := ChunkSize * 16 + (Ord(c) - Ord('A') + 10)
+      else
+        Exit;   // invalid hex
+    end;
+
+    // Advance past CRLF
+    Pos := LineEnd + 1;
+
+    // Chunk size 0 = end
+    if ChunkSize = 0 then
+    begin
+      Result := True;
+      Exit;
+    end;
+
+    // Read chunk data
+    DataStart := Pos;
+    DataEnd := DataStart + ChunkSize - 1;
+    if DataEnd > Length(Data) then Exit;   // incomplete
+
+    Decoded := Decoded + Copy(Data, DataStart, ChunkSize);
+    Pos := DataEnd + 1;
+
+    // Skip CRLF after data
+    if (Pos <= Length(Data)) and (Data[Pos] = #13) then Inc(Pos);
+    if (Pos <= Length(Data)) and (Data[Pos] = #10) then Inc(Pos);
+  end;
+end;
+
 // menghindari dependency ke fungsi internal pascak_http.pas.
 function LocalFindCRLFCRLF(const S: RawByteString): Integer;
 var 
@@ -27447,9 +27520,12 @@ var
   // A.1 — Pool
   PoolKey: string;
   PooledConn: PHTTPPooledConn;
-  ContentLength:integer;
+  ContentLength: integer;
   ResContentLength: Integer;
   ResConnClose: Boolean;
+  ResChunked: Boolean;
+  ChunkBody: RawByteString;
+  ChunkComplete: Boolean;
   Reusable: Boolean;
   HeaderParsed: Boolean;
   hdrLines: TStringArray;
@@ -27570,16 +27646,13 @@ begin
     PoolKey := Host + ':' + IntToStr(Port) + ':' +
                IfThen(UseTLS, 'T', 'P') + ':' +
                IfThen(VerifyEnabled, 'V', 'N');
-    
+ 
     Sock := -1;
-    TLSConn := nil;
-    TLSContextLocal := nil;
-    
     // Try pool first
     PooledConn := nil;
     if Assigned(GHTTPPoolLock) then
       PooledConn := HTTPPoolGet(PoolKey);
-    
+
     if Assigned(PooledConn) then
     begin
       Sock := PooledConn^.Sock;
@@ -27603,11 +27676,10 @@ begin
         Exit(TValue.CreateNull);
       end;
     end;
-  
+    
     // ✅ E-2: wrap dengan TLS jika https://
-    TLSConn := nil;
-    TLSContextLocal := nil;
-    if UseTLS then
+    // A.1: skip handshake kalau pool hit (TLSConn sudah connected)
+    if UseTLS and (not Assigned(TLSConn)) then
     begin
       if not TLSInit then
       begin
@@ -27616,7 +27688,7 @@ begin
                          errMSG.xrow, errMSG.xcol);
         Exit(TValue.CreateNull);
       end;
-      
+    
       TLSContextLocal := GetSharedTLSContext(VerifyEnabled);
       if not Assigned(TLSContextLocal) then
       begin
@@ -27625,13 +27697,11 @@ begin
                          errMSG.xrow, errMSG.xcol);
         Exit(TValue.CreateNull);
       end;
-      
+    
       if not TLSConnect(TLSContextLocal, Sock, Host, TLSConn) then
       begin
-        // ✅ FIX: TLSConn selalu valid — aman akses LastError.
-        // Kita harus Release TLSConn dan TLSContextLocal secara benar.
         ErrDetail := 'http.request: TLS handshake gagal — ' + TLSConn.LastError;
-        
+    
         if Assigned(TLSConn) then
         begin
           TLSConn.Release;
@@ -27643,14 +27713,14 @@ begin
           TLSContextLocal := nil;
         end;
         NetClose(Sock);
-        
+    
         errMSG.callerror(144, ErrDetail, errMSG.xrow, errMSG.xcol);
         Exit(TValue.CreateNull);
       end;
-      
+    
       DBG_HTTP('TLS handshake OK');
-    end;    
-   
+    end;
+    
     // A.1: force keep-alive for pooling
     if not Assigned(HeadersList) then
       HeadersList := TStringList.Create;
@@ -27682,7 +27752,9 @@ begin
       ContentLength := -1;
       ResContentLength := -1;
       ResConnClose := False;
-      HeaderParsed := False;
+      ResChunked := False;
+      ChunkComplete := False;
+      HeaderParsed := False; 
       
       while True do
       begin
@@ -27709,15 +27781,17 @@ begin
                  SameText(Copy(hdrLine, 1, 15), 'Content-Length:') then
                 ResContentLength := StrToIntDef(
                   Trim(Copy(hdrLine, 16, Length(hdrLine))), -1)
+              
               else if (Length(hdrLine) >= 18) and
                       SameText(Copy(hdrLine, 1, 18), 'Transfer-Encoding:') then
               begin
                 if Pos('chunked', LowerCase(hdrLine)) > 0 then
                 begin
                   ResContentLength := -1;
-                  ResConnClose := True;
+                  ResChunked := True;
                 end;
               end
+              
               else if (Length(hdrLine) >= 11) and
                       SameText(Copy(hdrLine, 1, 11), 'Connection:') then
               begin
@@ -27728,14 +27802,25 @@ begin
           end;
         end;
         
-        // Stop early if we have full body
+        // Stop early: Content-Length known
         if HeaderParsed and (ResContentLength >= 0) then
         begin
           if Length(RespBuf) >= HeaderEnd + 3 + ResContentLength then
             Break;
         end;
+        
+        // Stop early: chunked, cek terminator '0\r\n'
+        if HeaderParsed and ResChunked then
+        begin
+          if DecodeChunkedBody(RespBuf, HeaderEnd + 4, ChunkBody) then
+          begin
+            ChunkComplete := True;
+            Break;
+          end;
+        end;
+        
       end;
-      DBG_HTTP('read done, total=' + IntToStr(Length(RespBuf)) + ' bytes');      
+      DBG_HTTP('read done, total=' + IntToStr(Length(RespBuf)) + ' bytes');
       
       HeaderEnd := LocalFindCRLFCRLF(RespBuf);
       DBG_HTTP('HeaderEnd=' + IntToStr(HeaderEnd) + ' BodyStart=' + IntToStr(HeaderEnd + 4));
@@ -27748,6 +27833,23 @@ begin
       
       HeaderBlock := Copy(RespBuf, 1, HeaderEnd - 1);
       BodyStart := HeaderEnd + 4;
+      
+      // A.1b — De-chunk body kalau chunked
+      if ResChunked then
+      begin
+        if not ChunkComplete then
+        begin
+          // Fallback: coba decode sekali lagi
+          if not DecodeChunkedBody(RespBuf, BodyStart, ChunkBody) then
+          begin
+            // Incomplete — tutup socket, tidak reusable
+            ChunkBody := '';
+            ResConnClose := True;
+          end
+          else
+            ChunkComplete := True;
+        end;
+      end;      
       
       Lines := HeaderBlock.Split([#13#10]);
       DBG_HTTP('header lines=' + IntToStr(Length(Lines)));
@@ -27793,14 +27895,26 @@ begin
       ResultDict.SetValue('headers', TValue.CreateDict(HeadersDict));
       
       DBG_HTTP('building body from ' + IntToStr(BodyStart) + ' to ' + IntToStr(Length(RespBuf)));
-      if (BodyStart >= 1) and (BodyStart <= Length(RespBuf)) then
+      
+      // A.1b — pakai de-chunked body kalau chunked
+      if ResChunked then
       begin
-        SetLength(BodySlice, Length(RespBuf) - BodyStart + 1);
-        if Length(BodySlice) > 0 then
-          Move(RespBuf[BodyStart], BodySlice[1], Length(BodySlice));
+        if ChunkComplete then
+          BodySlice := ChunkBody
+        else
+          BodySlice := '';
       end
       else
-        BodySlice := '';
+      begin
+        if (BodyStart >= 1) and (BodyStart <= Length(RespBuf)) then
+        begin
+          SetLength(BodySlice, Length(RespBuf) - BodyStart + 1);
+          if Length(BodySlice) > 0 then
+            Move(RespBuf[BodyStart], BodySlice[1], Length(BodySlice));
+        end
+        else
+          BodySlice := '';
+      end;
       
       if Length(BodySlice) > 0 then
       begin
@@ -27814,10 +27928,11 @@ begin
       
       Result := TValue.CreateDict(ResultDict);
     finally
-      // A.1: Decide pool vs close
-      Reusable := HeaderParsed and (ResContentLength >= 0) and
-                  (not ResConnClose) and (Sock >= 0);
-      
+      // A.1 + A.1b: Decide pool vs close
+      Reusable := HeaderParsed and (not ResConnClose) and (Sock >= 0) and
+                  (((ResContentLength >= 0)) or
+                   (ResChunked and ChunkComplete));     
+                   
       if Reusable and Assigned(GHTTPPoolLock) then
       begin
         if HTTPPoolPut(PoolKey, Host, Port, Sock, TLSConn, TLSContextLocal) then
