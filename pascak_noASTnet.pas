@@ -1874,7 +1874,11 @@ type
     OnMessage: TValue;
     OnClose: TValue;
     OnError: TValue;
-  
+    AutoReconnect: Boolean;
+    ReconnectMinMs: Integer;
+    ReconnectMaxMs: Integer;
+    ReconnectAttempts: Integer;
+
     constructor Create(const AID: string);
     destructor Destroy; override;
     procedure Retain;
@@ -27003,6 +27007,30 @@ begin
         Conn.Verify := V.IsTrue;
         V.Free;
       end;
+  
+      // C.2 — Auto-reconnect
+      V := Config.DictVal.GetValueClone('autoReconnect');
+      if Assigned(V) then
+      begin
+        Conn.AutoReconnect := V.IsTrue;
+        V.Free;
+      end;
+  
+      V := Config.DictVal.GetValueClone('reconnectMinMs');
+      if Assigned(V) then
+      begin
+        if V.DataType = dtNumeric then
+          Conn.ReconnectMinMs := Trunc(V.NumVal);
+        V.Free;
+      end;
+  
+      V := Config.DictVal.GetValueClone('reconnectMaxMs');
+      if Assigned(V) then
+      begin
+        if V.DataType = dtNumeric then
+          Conn.ReconnectMaxMs := Trunc(V.NumVal);
+        V.Free;
+      end;
     end;
   end;
 
@@ -30207,6 +30235,7 @@ var
   ServerConn: TWSConnection;
   ClientConn: TWSClientConn;
   Payload: RawByteString;
+  ClosePayload: RawByteString;
   Code: Word;
 begin
   Result := nil;
@@ -30241,20 +30270,25 @@ begin
       end
       else if MethodName = 'close' then
       begin
+        ClientConn.AutoReconnect := False;   // ← disable first
         Code := WS_CLOSE_NORMAL;
         if (Length(Args) >= 1) and (Args[0].DataType = dtNumeric) then
           Code := Word(Trunc(Args[0].NumVal));
-        
+        // Build close payload: 2 bytes big-endian code
+        SetLength(ClosePayload, 2);
+        ClosePayload[1] := Char((Code shr 8) and $FF);
+        ClosePayload[2] := Char(Code and $FF);
         WSClientSendRaw(ClientConn, BuildWSClientFrame(wsClose,
-          Copy(BuildWSClose(Code, ''), 3, Length(BuildWSClose(Code, '')) - 2), True));        
-        
+          ClosePayload, True));
         ClientConn.State := wscsClosing;
         Result := TValue.CreateBool(True);
       end
       else if MethodName = 'isOpen' then
         Result := TValue.CreateBool(ClientConn.State = wscsOpen)
+      else if MethodName = 'attempts' then
+        Result := TValue.CreateNum(ClientConn.ReconnectAttempts)
       else if MethodName = 'id' then
-        Result := TValue.CreateStr(ClientConn.ID)
+        Result := TValue.CreateStr(ClientConn.ID)      
       else if MethodName = 'state' then
       begin
         case ClientConn.State of
@@ -30364,7 +30398,7 @@ begin
           // Only route WS-specific methods; fall through for dict methods
           if (MethodName = 'send') or (MethodName = 'sendBytes') or
              (MethodName = 'close') or (MethodName = 'isOpen') or
-             (MethodName = 'state') then
+             (MethodName = 'attempts') or (MethodName = 'state') then          
           begin
             WSIdStr := TargetObj.DictVal.GetValueClone('__ws_id');
             try
@@ -37932,7 +37966,13 @@ begin
   OnMessage := nil;
   OnClose := nil;
   OnError := nil;
-end;
+
+  // C.2
+  AutoReconnect := False;
+  ReconnectMinMs := 1000;
+  ReconnectMaxMs := 30000;
+  ReconnectAttempts := 0;
+end;  
 
 destructor TWSClientConn.Destroy;
 begin
@@ -38002,259 +38042,337 @@ var
   ConnHandle, MsgVal, CodeVal: TValue;
   SavedContext: TEngineContext;
   ShouldExit: Boolean;
+  Attempts, BackoffMs: Integer;
+  ShouldRetry: Boolean;
+
+  procedure CleanupForRetry;
+  begin
+    if Assigned(FConn.TLSConn) then
+    begin
+      try TLSClose(FConn.TLSConn); except end;
+      try FConn.TLSConn.Release; except end;
+      FConn.TLSConn := nil;
+    end;
+    if Assigned(FConn.TLSContext) then
+    begin
+      try FConn.TLSContext.Release; except end;
+      FConn.TLSContext := nil;
+    end;
+    if FConn.Sock >= 0 then
+    begin
+      try NetClose(FConn.Sock); except end;
+      FConn.Sock := -1;
+    end;
+    if Assigned(FConn.Parser) then
+      FConn.Parser.Free;
+    FConn.Parser := TWSFrameParser.Create(False);
+  end;
 begin
   SavedContext := GCurrentContext;
   if not Assigned(errMSG) then errMSG := Terror.Create;
 
+  Attempts := 0;
+  BackoffMs := FConn.ReconnectMinMs;
+  if BackoffMs < 100 then BackoffMs := 100;
+
   try
-    // ─── 1. TCP connect ───
-    if not NetConnect(FConn.Host, FConn.Port, 10000, FConn.Sock) then
-    begin
-      FConn.LastError := 'connect gagal: ' + NetLastError;
-      FConn.State := wscsClosed;
-      if Assigned(FConn.OnError) then
-      begin
-        MsgVal := TValue.CreateStr(FConn.LastError);
-        try CallWSCallback(FConn.OnError, [TValue.CreateNull, MsgVal]);
-        finally MsgVal.Free; end;
-      end;
-      Exit;
-    end;
+    repeat
+      ShouldRetry := False;
+      ShouldExit := False;
+      FragActive := False;
+      FragBuf := '';
 
-    // ─── 2. TLS handshake ───
-    if FConn.IsTLS then
-    begin
-      if not TLSInit then
-      begin
-        FConn.LastError := 'libssl tidak tersedia';
-        FConn.State := wscsClosed;
-        Exit;
-      end;
-      FConn.TLSContext := GetSharedTLSContext(FConn.Verify);
-      if not Assigned(FConn.TLSContext) then
-      begin
-        FConn.LastError := 'TLS context gagal dibuat';
-        FConn.State := wscsClosed;
-        Exit;
-      end;
-      if not TLSConnect(FConn.TLSContext, FConn.Sock, FConn.Host,
-                        FConn.TLSConn) then
-      begin
-        FConn.LastError := 'TLS handshake gagal: ' + FConn.TLSConn.LastError;
-        FConn.State := wscsClosed;
-        Exit;
-      end;
-    end;
-
-    // ─── 3. Send handshake ───
-    Handshake := BuildWSClientHandshake(FConn.Host, FConn.Path,
-                  FConn.Port, FConn.IsTLS, ClientKey);
-    if not WSClientSendRaw(FConn, Handshake) then
-    begin
-      FConn.LastError := 'send handshake gagal';
-      FConn.State := wscsClosed;
-      Exit;
-    end;
-    FConn.State := wscsHandshake;
-
-    // ─── 4. Read handshake response ───
-    BufAccum := '';
-    HdrEnd := 0;
-    while Length(BufAccum) < HTTP_MAX_HEADER_BYTES do
-    begin
-      if Assigned(FConn.TLSConn) then
-        R := TLSRecvTimeout(FConn.TLSConn, 4096, 10000, Buf)
-      else
-        R := NetRecvTimeout(FConn.Sock, 4096, 10000, Buf);
-      if R <= 0 then Break;
-      BufAccum := BufAccum + Buf;
-
-      for i := 1 to Length(BufAccum) - 3 do
-        if (BufAccum[i] = #13) and (BufAccum[i+1] = #10) and
-           (BufAccum[i+2] = #13) and (BufAccum[i+3] = #10) then
+      // ═══════════════════════════════════════════════════════
+      //  Attempt body
+      // ═══════════════════════════════════════════════════════
+      try
+        // ─── 1. TCP connect ───
+        if not NetConnect(FConn.Host, FConn.Port, 10000, FConn.Sock) then
         begin
-          HdrEnd := i + 3;
-          Break;
-        end;
-      if HdrEnd > 0 then Break;
-    end;
-
-    if HdrEnd = 0 then
-    begin
-      FConn.LastError := 'handshake response tidak lengkap';
-      FConn.State := wscsClosed;
-      Exit;
-    end;
-
-    HeaderBlock := Copy(BufAccum, 1, HdrEnd - 3);
-    HdrLines := HeaderBlock.Split([#13#10]);
-    if Length(HdrLines) = 0 then
-    begin
-      FConn.LastError := 'handshake response kosong';
-      FConn.State := wscsClosed;
-      Exit;
-    end;
-
-    StatusLine := HdrLines[0];
-    if Pos(' 101 ', StatusLine) = 0 then
-    begin
-      FConn.LastError := 'handshake gagal: ' + StatusLine;
-      FConn.State := wscsClosed;
-      Exit;
-    end;
-
-    ExpectedAccept := ComputeWSAccept(ClientKey);
-    AcceptVal := '';
-    for i := 1 to High(HdrLines) do
-    begin
-      HdrLine := HdrLines[i];
-      if (Length(HdrLine) >= 21) and
-         SameText(Copy(HdrLine, 1, 21), 'Sec-WebSocket-Accept:') then
-        AcceptVal := Trim(Copy(HdrLine, 22, Length(HdrLine)));
-    end;
-
-    if AcceptVal <> ExpectedAccept then
-    begin
-      FConn.LastError := 'handshake accept mismatch';
-      FConn.State := wscsClosed;
-      Exit;
-    end;
-
-    // Any data after headers → parser
-    if Length(BufAccum) > HdrEnd then
-      FConn.Parser.Append(Copy(BufAccum, HdrEnd + 1, Length(BufAccum) - HdrEnd));
-
-    FConn.State := wscsOpen;
-
-    // ─── 5. Fire onOpen ───
-    if Assigned(FConn.OnOpen) then
-    begin
-      ConnHandle := BuildWSClientHandle(FConn);
-      try CallWSCallback(FConn.OnOpen, [ConnHandle]);
-      finally ConnHandle.Free; end;
-    end;
-
-    // ─── 6. Frame loop ───
-    FragActive := False;
-    FragBuf := '';
-    ShouldExit := False;
-
-    while not ShouldExit do
-    begin
-      if InterlockedCompareExchange(IsShuttingDown, 0, 0) = 1 then Break;
-      if FConn.State in [wscsClosing, wscsClosed] then Break;
-
-      // Parse pending frames
-      while FConn.Parser.TryParse(Frame) do
-      begin
-        case Frame.Opcode of
-          wsText, wsBinary:
+          FConn.LastError := 'connect gagal: ' + NetLastError;
+          FConn.State := wscsClosed;
+          if Assigned(FConn.OnError) then
+          begin
+            MsgVal := TValue.CreateStr(FConn.LastError);
+            try CallWSCallback(FConn.OnError, [TValue.CreateNull, MsgVal]);
+            finally MsgVal.Free; end;
+          end;
+        end
+        else
+        begin
+          // ─── 2. TLS handshake ───
+          if FConn.IsTLS then
+          begin
+            if not TLSInit then
             begin
-              if FragActive then
+              FConn.LastError := 'libssl tidak tersedia';
+              FConn.State := wscsClosed;
+            end
+            else
+            begin
+              FConn.TLSContext := GetSharedTLSContext(FConn.Verify);
+              if not Assigned(FConn.TLSContext) then
               begin
-                ShouldExit := True;
-                Break;
+                FConn.LastError := 'TLS context gagal dibuat';
+                FConn.State := wscsClosed;
+              end
+              else if not TLSConnect(FConn.TLSContext, FConn.Sock,
+                                     FConn.Host, FConn.TLSConn) then
+              begin
+                FConn.LastError := 'TLS handshake gagal: ' +
+                                   FConn.TLSConn.LastError;
+                FConn.State := wscsClosed;
               end;
-              if Frame.Fin then
+            end;
+          end;
+
+          // ─── 3. Send handshake + read response ───
+          if FConn.State <> wscsClosed then
+          begin
+            Handshake := BuildWSClientHandshake(FConn.Host, FConn.Path,
+                          FConn.Port, FConn.IsTLS, ClientKey);
+            if not WSClientSendRaw(FConn, Handshake) then
+            begin
+              FConn.LastError := 'send handshake gagal';
+              FConn.State := wscsClosed;
+            end
+            else
+            begin
+              FConn.State := wscsHandshake;
+
+              BufAccum := '';
+              HdrEnd := 0;
+              while Length(BufAccum) < HTTP_MAX_HEADER_BYTES do
               begin
-                if Assigned(FConn.OnMessage) then
-                begin
-                  ConnHandle := BuildWSClientHandle(FConn);
-                  MsgVal := TValue.CreateStr(string(Frame.Payload));
-                  try
-                    CallWSCallback(FConn.OnMessage, [ConnHandle, MsgVal]);
-                  finally
-                    MsgVal.Free;
-                    ConnHandle.Free;
+                if Assigned(FConn.TLSConn) then
+                  R := TLSRecvTimeout(FConn.TLSConn, 4096, 10000, Buf)
+                else
+                  R := NetRecvTimeout(FConn.Sock, 4096, 10000, Buf);
+                if R <= 0 then Break;
+                BufAccum := BufAccum + Buf;
+                for i := 1 to Length(BufAccum) - 3 do
+                  if (BufAccum[i] = #13) and (BufAccum[i+1] = #10) and
+                     (BufAccum[i+2] = #13) and (BufAccum[i+3] = #10) then
+                  begin
+                    HdrEnd := i + 3;
+                    Break;
                   end;
-                end;
+                if HdrEnd > 0 then Break;
+              end;
+
+              if HdrEnd = 0 then
+              begin
+                FConn.LastError := 'handshake response tidak lengkap';
+                FConn.State := wscsClosed;
               end
               else
               begin
-                FragActive := True;
-                FragOpcode := Frame.Opcode;
-                FragBuf := Frame.Payload;
-              end;
-            end;
-          wsContinuation:
-            begin
-              if not FragActive then
-              begin
-                ShouldExit := True;
-                Break;
-              end;
-              FragBuf := FragBuf + Frame.Payload;
-              if Frame.Fin then
-              begin
-                if Assigned(FConn.OnMessage) then
+                HeaderBlock := Copy(BufAccum, 1, HdrEnd - 3);
+                HdrLines := HeaderBlock.Split([#13#10]);
+                if Length(HdrLines) = 0 then
                 begin
-                  ConnHandle := BuildWSClientHandle(FConn);
-                  MsgVal := TValue.CreateStr(string(FragBuf));
-                  try
-                    CallWSCallback(FConn.OnMessage, [ConnHandle, MsgVal]);
-                  finally
-                    MsgVal.Free;
-                    ConnHandle.Free;
+                  FConn.LastError := 'handshake response kosong';
+                  FConn.State := wscsClosed;
+                end
+                else
+                begin
+                  StatusLine := HdrLines[0];
+                  if Pos(' 101 ', StatusLine) = 0 then
+                  begin
+                    FConn.LastError := 'handshake gagal: ' + StatusLine;
+                    FConn.State := wscsClosed;
+                  end
+                  else
+                  begin
+                    ExpectedAccept := ComputeWSAccept(ClientKey);
+                    AcceptVal := '';
+                    for i := 1 to High(HdrLines) do
+                    begin
+                      HdrLine := HdrLines[i];
+                      if (Length(HdrLine) >= 21) and
+                         SameText(Copy(HdrLine, 1, 21), 'Sec-WebSocket-Accept:') then
+                        AcceptVal := Trim(Copy(HdrLine, 22, Length(HdrLine)));
+                    end;
+
+                    if AcceptVal <> ExpectedAccept then
+                    begin
+                      FConn.LastError := 'handshake accept mismatch';
+                      FConn.State := wscsClosed;
+                    end
+                    else
+                    begin
+                      if Length(BufAccum) > HdrEnd then
+                        FConn.Parser.Append(Copy(BufAccum, HdrEnd + 1,
+                          Length(BufAccum) - HdrEnd));
+
+                      FConn.State := wscsOpen;
+
+                      // ─── onOpen ───
+                      if Assigned(FConn.OnOpen) then
+                      begin
+                        ConnHandle := BuildWSClientHandle(FConn);
+                        try CallWSCallback(FConn.OnOpen, [ConnHandle]);
+                        finally ConnHandle.Free; end;
+                      end;
+
+                      // ─── 4. Frame loop ───
+                      while not ShouldExit do
+                      begin
+                        if InterlockedCompareExchange(IsShuttingDown, 0, 0) = 1 then Break;
+                        if FConn.State in [wscsClosing, wscsClosed] then Break;
+
+                        while FConn.Parser.TryParse(Frame) do
+                        begin
+                          case Frame.Opcode of
+                            wsText, wsBinary:
+                              begin
+                                if FragActive then
+                                begin
+                                  ShouldExit := True;
+                                  Break;
+                                end;
+                                if Frame.Fin then
+                                begin
+                                  if Assigned(FConn.OnMessage) then
+                                  begin
+                                    ConnHandle := BuildWSClientHandle(FConn);
+                                    MsgVal := TValue.CreateStr(string(Frame.Payload));
+                                    try
+                                      CallWSCallback(FConn.OnMessage, [ConnHandle, MsgVal]);
+                                    finally
+                                      MsgVal.Free;
+                                      ConnHandle.Free;
+                                    end;
+                                  end;
+                                end
+                                else
+                                begin
+                                  FragActive := True;
+                                  FragOpcode := Frame.Opcode;
+                                  FragBuf := Frame.Payload;
+                                end;
+                              end;
+                            wsContinuation:
+                              begin
+                                if not FragActive then
+                                begin
+                                  ShouldExit := True;
+                                  Break;
+                                end;
+                                FragBuf := FragBuf + Frame.Payload;
+                                if Frame.Fin then
+                                begin
+                                  if Assigned(FConn.OnMessage) then
+                                  begin
+                                    ConnHandle := BuildWSClientHandle(FConn);
+                                    MsgVal := TValue.CreateStr(string(FragBuf));
+                                    try
+                                      CallWSCallback(FConn.OnMessage, [ConnHandle, MsgVal]);
+                                    finally
+                                      MsgVal.Free;
+                                      ConnHandle.Free;
+                                    end;
+                                  end;
+                                  FragActive := False;
+                                  FragBuf := '';
+                                end;
+                              end;
+                            wsPing:
+                              WSClientSendRaw(FConn, BuildWSClientFrame(wsPong,
+                                Frame.Payload, True));
+                            wsPong: ;
+                            wsClose:
+                              begin
+                                ParseClosePayload(Frame.Payload, CloseCode, CloseReason);
+                                WSClientSendRaw(FConn, BuildWSClientFrame(wsClose,
+                                  Copy(BuildWSClose(WS_CLOSE_NORMAL, ''),
+                                       3, 2), True));
+                                ShouldExit := True;
+                                Break;
+                              end;
+                          end;
+                        end;
+
+                        if ShouldExit then Break;
+
+                        if Assigned(FConn.TLSConn) then
+                          R := TLSRecvTimeout(FConn.TLSConn, 8192, 1000, Buf)
+                        else
+                          R := NetRecvTimeout(FConn.Sock, 8192, 1000, Buf);
+
+                        if R > 0 then
+                          FConn.Parser.Append(Buf)
+                        else if R = 0 then
+                          Break;
+                      end;
+
+                      // ─── onClose ───
+                      FConn.State := wscsClosed;
+                      if Assigned(FConn.OnClose) then
+                      begin
+                        ConnHandle := BuildWSClientHandle(FConn);
+                        CodeVal := TValue.CreateNum(WS_CLOSE_NORMAL);
+                        try CallWSCallback(FConn.OnClose, [ConnHandle, CodeVal]);
+                        finally
+                          CodeVal.Free;
+                          ConnHandle.Free;
+                        end;
+                      end;
+                    end;
                   end;
                 end;
-                FragActive := False;
-                FragBuf := '';
               end;
             end;
-          wsPing:
-            WSClientSendRaw(FConn, BuildWSFrame(wsPong, Frame.Payload, True));
-          wsPong: ;
-          wsClose:
-            begin
-              ParseClosePayload(Frame.Payload, CloseCode, CloseReason);
-              WSClientSendRaw(FConn, BuildWSClose(WS_CLOSE_NORMAL, ''));
-              ShouldExit := True;
-              Break;
-            end;
+          end;
+        end;
+      except
+        on E: Exception do
+        begin
+          FConn.LastError := E.Message;
+          FConn.State := wscsClosed;
+          PushThreadError('WSClient ' + E.ClassName + ': ' + E.Message);
         end;
       end;
 
-      if ShouldExit then Break;
+      // ═══════════════════════════════════════════════════════
+      //  Retry decision
+      // ═══════════════════════════════════════════════════════
+      if FConn.AutoReconnect and
+         (InterlockedCompareExchange(IsShuttingDown, 0, 0) = 0) and
+         (not Terminated) then
+        ShouldRetry := True;
 
-      if Assigned(FConn.TLSConn) then
-        R := TLSRecvTimeout(FConn.TLSConn, 8192, 1000, Buf)
-      else
-        R := NetRecvTimeout(FConn.Sock, 8192, 1000, Buf);
+      if ShouldRetry then
+      begin
+        CleanupForRetry;
+        Inc(Attempts);
+        FConn.ReconnectAttempts := Attempts;
 
-      if R > 0 then
-        FConn.Parser.Append(Buf)
-      else if R = 0 then
-        Break;   // clean close
-      // R < 0: timeout — continue loop
-    end;
+        if Assigned(IOLock) then
+        begin
+          IOLock.Acquire;
+          try
+            Writeln(ErrOutput, '[ws-client] ', FConn.ID,
+                    ' reconnecting in ', BackoffMs, 'ms (attempt ', Attempts, ')');
+            Flush(ErrOutput);
+          finally IOLock.Release; end;
+        end;
 
-    // ─── 7. Fire onClose ───
-    FConn.State := wscsClosed;
-    if Assigned(FConn.OnClose) then
-    begin
-      ConnHandle := BuildWSClientHandle(FConn);
-      CodeVal := TValue.CreateNum(WS_CLOSE_NORMAL);
-      try CallWSCallback(FConn.OnClose, [ConnHandle, CodeVal]);
-      finally
-        CodeVal.Free;
-        ConnHandle.Free;
+        Sleep(BackoffMs);
+        BackoffMs := BackoffMs * 2;
+        if BackoffMs > FConn.ReconnectMaxMs then
+          BackoffMs := FConn.ReconnectMaxMs;
+
+        FConn.State := wscsConnecting;
       end;
-    end;
-
-  except
-    on E: Exception do
-    begin
-      FConn.LastError := E.Message;
-      FConn.State := wscsClosed;
-      PushThreadError('WSClient ' + E.ClassName + ': ' + E.Message);
-    end;
+    until not ShouldRetry;
+  finally
+    UnregisterWSClientConn(FConn);
+    FConn.Release;
+    FlushThreadTLAB;
+    if Assigned(errMSG) then begin errMSG.Free; errMSG := nil; end;
+    GCurrentContext := SavedContext;
   end;
-
-  UnregisterWSClientConn(FConn);
-  FConn.Release;
-  FlushThreadTLAB;
-  if Assigned(errMSG) then begin errMSG.Free; errMSG := nil; end;
-  GCurrentContext := SavedContext;
 end;
 
 constructor TWSListenerThread.Create(AServerHandle: Integer;
