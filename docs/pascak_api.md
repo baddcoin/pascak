@@ -2420,6 +2420,145 @@ var c := ws.connect(url, {
 - Untuk production, set `reconnectMaxMs` sesuai SLA server (mis. 30s untuk API publik)
 - Untuk development, `reconnectMinMs: 200` bikin iterasi cepat
 
+### Subprotocol Negotiation
+
+WS client bisa offer daftar subprotocol; server pilih satu.
+
+```pascal
+var c := ws.connect("wss://api.example.com/ws", {
+  "onOpen":    lambda conn : println("proto: ", conn.protocol()),
+  "onMessage": lambda conn, msg : println("recv: ", msg),
+  "subprotocols": ["chat", "json-v1", "binary"]
+});
+
+// Setelah handshake, cek hasilnya
+println("negotiated: ", c.protocol());   // "chat" atau ""
+```
+
+**Behavior**:
+- Client kirim `Sec-WebSocket-Protocol: chat, json-v1, binary` di handshake
+- Server pilih satu dari daftar → response `Sec-WebSocket-Protocol: chat`
+- Client **verifikasi** hasil — kalau server pilih yang tidak di-offer → handshake gagal
+- Kalau server tidak pilih apapun → `c.protocol()` return empty string
+- Kalau tidak ada di `subprotocols` config → tidak kirim header → server boleh require atau tidak
+
+**Use case**:
+- Server multi-dialek (chat + json-v1 + binary protocol)
+- Negotiate versi schema (v1, v2)
+- Feature detection (subprotocol yang compatible dengan client ini)
+
+**Best practice**:
+```pascal
+function onOpen(conn) begin
+  var proto := conn.protocol();
+  if proto == "json-v1" then
+    sendMode := "json"
+  else if proto == "binary" then
+    sendMode := "binary"
+  else begin
+    log.warn("server tidak pilih subprotocol");
+    conn.close(1002);   // protocol error
+  end;
+end;
+```
+
+**Error handling**:
+```pascal
+// Server bisa reject handshake kalau tidak ada match
+// Client akan throw EPascakError, atau state jadi 'closed'
+try
+  var c := ws.connect(url, {"subprotocols": ["only-this-one"]});
+  if not c.isOpen() then
+    log.error("handshake gagal");
+except
+  on E: Exception do
+    log.error("connect error: ", E.Message);
+end;
+```
+
+### Compression (permessage-deflate)
+
+WS client bisa negosiasi permessage-deflate — kompresi per-message (RFC 7692).
+
+```pascal
+var c := ws.connect("wss://api.example.com/ws", {
+  "onMessage": lambda conn, msg : println("recv: ", len(msg), " bytes"),
+  "compression": "on",           // default: off
+  "compressionThreshold": 128    // byte (default 128)
+});
+
+// Client kirim payload besar → otomatis compress
+var payload := "";
+var i := 0;
+while i < 10000 do begin
+  payload := payload + "X";
+  i := i + 1;
+end;
+c.send(payload);   // ~200 bytes di wire setelah kompresi
+```
+
+**Behavior**:
+- Client kirim `Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits` saat enabled
+- Server response negotiate → `Sec-WebSocket-Extensions: permessage-deflate; ...`
+- Client set `RSV1` di frame header untuk frame yang dikompresi
+- Frame dengan `RSV1=1` dari server → client decompress otomatis
+- Fallback: kalau compressed ≥ original → kirim uncompressed (no RSV1)
+- Fallback: kalau inflate error saat terima → treat as raw (fail-silent)
+
+**Threshold**:
+- Payload < `compressionThreshold` → **tidak** dikompresi (overhead tidak worth)
+- Default 128 byte — cocok untuk chat/API
+- Untuk data binary besar (image/video), set higher (mis. 1024) — compression tidak efektif
+- Untuk data text (JSON, log), set lower (mis. 64)
+
+**Bandwidth saving** (untuk JSON chat):
+| Payload | Uncompressed | Compressed | Saving |
+|---|---|---|---|
+| 500 bytes | 500 | ~250 | 50% |
+| 2 KB | 2048 | ~700 | 66% |
+| 10 KB | 10240 | ~800 | 92% |
+
+**Kombinasi dengan subprotocol**:
+```pascal
+var c := ws.connect("wss://api.example.com/ws", {
+  "subprotocols": ["json-v1"],
+  "compression": "on",
+  "compressionThreshold": 256,   // JSON kecil sering < 256 byte
+  "onMessage": onMessage
+});
+```
+
+**Compatibility**:
+- ✅ Server `pascak_websocket` (dengan `compression: "on"`)
+- ✅ Python `websockets` library
+- ✅ Browser WebSocket API (native support)
+- ✅ Node.js `ws` library
+- ⚠️ Server tanpa permessage-deflate → client fallback ke uncompressed
+
+**Catatan penting**:
+- Compression **opt-in** — default off
+- Client & server **wajib** negotiate via extension header — tidak boleh asal kirim RSV1
+- Kalau client kirim RSV1 tanpa negotiate → server RFC-compliant **harus** close dengan 1002
+- Untuk **SECURITY**: **jangan** aktifkan compression untuk data sensitif (session token, password) — bisa kena **CRIME/BREACH attack**
+
+**Anti-pattern**:
+```pascal
+// ❌ JANGAN — compression + sensitive data di request yang sama
+ws.connect(url, {"compression": "on"});
+conn.send("Bearer " + sessionToken);
+conn.send("password=" + userPassword);
+
+// ✅ Pattern aman — pisah channel, atau disable compression
+var control := ws.connect(url, {"compression": "off"});
+control.send("Authorization: Bearer " + token);
+```
+
+**Untuk production**:
+- **Public API** → `compression: "off"` (hindari attack surface)
+- **Internal service** (trusted network) → `compression: "on"` untuk bandwidth
+- **Chat/log feed** (tidak sensitif) → `compression: "on"` + threshold 128
+
+---
 ### Handle Methods
 
 | Method | Return | Deskripsi |

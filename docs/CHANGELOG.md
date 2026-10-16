@@ -289,6 +289,31 @@ grep -n "Async File I/O" tutorial.md | head -3
   - `c.close()` → explicit close disables retry
   - Use case: mobile network, long-lived feed, resilient connector
 
+
+**WS Client Feature Parity (2026-10-16)**
+
+- **C.3** — WebSocket client subprotocol negotiation:
+  - Config key: `subprotocols: ["chat", "json-v1"]`
+  - Client sends `Sec-WebSocket-Protocol: <list>` in handshake
+  - Parses server's `Sec-WebSocket-Protocol` response
+  - Verifies negotiated protocol ∈ offered (else handshake fails)
+  - New handle method: `c.protocol()` → negotiated string or ''
+  - Fix: server path in `DispatchWSConnMethod` restored
+    (accidental client-path substitution broke `ws.listen` thread mode)
+
+- **C.4** — WebSocket client permessage-deflate compression:
+  - Config keys: `compression: 'on'`, `compressionThreshold: 128`
+  - Client sends extension offer in handshake
+  - Auto-compress text/binary frames ≥ threshold (if compressed < original)
+  - Auto-decompress RSV1 frames from server
+  - Fallback: skip compression if not effective; fail-silent on inflate error
+  - Threshold-based to avoid overhead for small payloads
+  - Security note: disable for sensitive data (CRIME/BREACH)
+
+**Result**: WS client now feature-parity with WS server:
+text/binary, fragmentation, ping/pong, TLS, subprotocol, compression,
+auto-reconnect with exponential backoff.
+
 **Embedding API (B.7)**
 
 - **B.7** — Public embedding API (`pascak_embed.pas` unit):
