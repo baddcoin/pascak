@@ -322,6 +322,15 @@ type
     Help: string;
     Values: TDictValue;
   end;
+  PCoTask = ^TCoTask;
+  TCoTask = record
+    TaskID: Int64;
+    VM: Pointer;
+    State: Integer;         // 0=pending, 1=running, 2=sleeping, 3=done, 4=error
+    WakeAt: QWord;
+    FinalValue: TValue;
+    ErrorMsg: string;
+  end;
   PHTTPPooledConn = ^THTTPPooledConn;
   THTTPPooledConn = record
     Key: string;
@@ -2016,7 +2025,8 @@ type
     TLSConn: TTLSConnection; TLSContextRef: TTLSContext): Boolean; forward;
   procedure LogWriteInternal(ALevel: Integer; const AMsg: string); forward;
   function GenerateRequestID: string; forward;
-
+  procedure TickCoTasks; forward;
+  
 { ====================================================================
   IMPLEMENTASI
   ==================================================================== }
@@ -2047,6 +2057,9 @@ var //global
   GShutdownHooks: TValueList = nil;
   GShutdownLock: TCriticalSection = nil;
   GShutdownRunning: LongInt = 0;
+  GCoTasks: specialize TFPGMap<Int64, PCoTask> = nil;
+  GCoTaskCounter: Int64 = 0;
+  GCoTaskLock: TCriticalSection = nil;
 
   // HTTP Pooling (A.1)
   GHTTPPool: TList = nil;
@@ -14626,17 +14639,31 @@ begin
       // --- COMPILASI PEMANGGILAN FUNGSI ---
       else if Node is TFunctionCallNode then
       begin
-        Compile(TFunctionCallNode(Node).FuncExpr, False); 
-
-        if CheckSpreadOperator(TFunctionCallNode(Node).Args) then
+        // D.1 — coSleep special-case: emit dict + yield
+        if (TFunctionCallNode(Node).FuncExpr is TVariableNode) and
+           (TVariableNode(TFunctionCallNode(Node).FuncExpr).VarName = 'coSleep') and
+           (TFunctionCallNode(Node).Args.Count = 1) then
         begin
-          CompileSpreadElements(TFunctionCallNode(Node).Args);
-          FChunk.AddInstruction(opcCallSpread); 
-        end else
+          FChunk.AddInstruction(opcConstant,
+            FChunk.AddConstant(TValue.CreateStr('__co_sleep')));
+          Compile(TNode(TFunctionCallNode(Node).Args[0]), False);
+          FChunk.AddInstruction(opcBuildDict, 1);
+          FChunk.AddInstruction(opcYield);
+        end
+        else
         begin
-          for i := 0 to TFunctionCallNode(Node).Args.Count - 1 do
-            Compile(TNode(TFunctionCallNode(Node).Args[i]), False); 
-          FChunk.AddInstruction(opcCall, TFunctionCallNode(Node).Args.Count); 
+          Compile(TFunctionCallNode(Node).FuncExpr, False); 
+      
+          if CheckSpreadOperator(TFunctionCallNode(Node).Args) then
+          begin
+            CompileSpreadElements(TFunctionCallNode(Node).Args);
+            FChunk.AddInstruction(opcCallSpread); 
+          end else
+          begin
+            for i := 0 to TFunctionCallNode(Node).Args.Count - 1 do
+              Compile(TNode(TFunctionCallNode(Node).Args[i]), False); 
+            FChunk.AddInstruction(opcCall, TFunctionCallNode(Node).Args.Count); 
+          end;
         end;
       end
     
@@ -17593,11 +17620,14 @@ begin
                 if FFrameCount = 0 then
                 begin
                   Result := ResultVal;
-                  Exit; 
+                  // D.1 fix: Break (bukan Exit) → FState := vmDead execute.
+                  // FHasResult := True → bottom tidak overwrite Result dgn Null.
+                  FHasResult := True;
+                  Break;
                 end;
                 
                 Push(ResultVal); 
-                CurrentFrame := @FFrames[FFrameCount - 1]; 
+                CurrentFrame := @FFrames[FFrameCount - 1];             
             end;
 
           opcReturnNull:
@@ -18953,6 +18983,7 @@ var
 begin
   Result := 0;
   CheckPendingSignals(CallEnv);
+  TickCoTasks;
   SavedContext := GCurrentContext;
   if Assigned(CallEnv) then
     try GCurrentContext := CallEnv.GetGlobal.Context;
@@ -35002,6 +35033,358 @@ begin
   end;
 end;
 
+//D.1 — Coroutine Scheduler══════════════════════════════════════
+//═══════════════════════════════════════════════════════════════ }
+function CoTaskFind(TID: Int64): PCoTask;
+var
+  Idx: Integer;
+begin
+  Result := nil;
+  if not Assigned(GCoTasks) then Exit;
+  Idx := GCoTasks.IndexOf(TID);
+  if Idx >= 0 then Result := GCoTasks.Data[Idx];
+end;
+
+procedure CoTaskFree(T: PCoTask);
+begin
+  if not Assigned(T) then Exit;
+  if Assigned(T^.VM) then
+  begin
+    try TVM(T^.VM).Free; except end;
+    T^.VM := nil;
+  end;
+  if Assigned(T^.FinalValue) then
+  begin
+    T^.FinalValue.Free;
+    T^.FinalValue := nil;
+  end;
+  Dispose(T);
+end;
+
+procedure CoTaskUnregister(TID: Int64);
+var
+  Idx: Integer;
+begin
+  if not Assigned(GCoTasks) then Exit;
+  Idx := GCoTasks.IndexOf(TID);
+  if Idx >= 0 then GCoTasks.Delete(Idx);
+end;
+
+procedure TickCoTasks;
+var
+  ReadyIDs: array of Int64;
+  i, j: Integer;
+  T: PCoTask;
+  VM: TVM;
+  Res, SleepVal: TValue;
+  NowTick: QWord;
+  SleepMs: Integer;
+  WasRunning: Boolean;
+begin
+  if not Assigned(GCoTasks) then Exit;
+
+  // Collect ready tasks
+  NowTick := GetTickCount64;
+  SetLength(ReadyIDs, 0);
+
+  GCoTaskLock.Acquire;
+  try
+    for i := 0 to GCoTasks.Count - 1 do
+    begin
+      T := GCoTasks.Data[i];
+      if not Assigned(T) then Continue;
+      if (T^.State = 0) or (T^.State = 2) then
+      begin
+        if NowTick >= T^.WakeAt then
+        begin
+          T^.State := 1;
+          SetLength(ReadyIDs, Length(ReadyIDs) + 1);
+          ReadyIDs[High(ReadyIDs)] := T^.TaskID;
+        end;
+      end;
+    end;
+  finally
+    GCoTaskLock.Release;
+  end;
+
+  // Resume each outside lock
+  for j := 0 to High(ReadyIDs) do
+  begin
+    T := CoTaskFind(ReadyIDs[j]);
+    if not Assigned(T) then Continue;
+
+    VM := TVM(T^.VM);
+    if not Assigned(VM) then
+    begin
+      T^.State := 4;
+      T^.ErrorMsg := 'VM hilang';
+      Continue;
+    end;
+
+    WasRunning := (VM.FState = vmReady) or (VM.FState = vmYielded);
+    Res := nil;
+    try
+      if VM.FState = vmReady then
+        Res := VM.Run(nil, True)
+      else if VM.FState = vmYielded then
+        Res := VM.Resume(nil)
+      else
+      begin
+        T^.State := 3;
+        Continue;
+      end;
+    except
+      on E: Exception do
+      begin
+        T^.State := 4;
+        T^.ErrorMsg := E.Message;
+        Continue;
+      end;
+    end;
+
+    // Interpret result based on VM state
+    if VM.FState = vmDead then
+    begin
+      T^.State := 3;
+      if Assigned(Res) then
+        T^.FinalValue := Res
+      else
+        T^.FinalValue := TValue.CreateNull;
+      Continue;
+    end;
+
+    // vmYielded — check for co_sleep marker
+    if Assigned(Res) and (Res.DataType = dtDict) and
+       Res.DictVal.HasKey('__co_sleep') then
+    begin
+      SleepVal := Res.DictVal.GetValueClone('__co_sleep');
+      SleepMs := 0;
+      if Assigned(SleepVal) and (SleepVal.DataType = dtNumeric) then
+        SleepMs := Trunc(SleepVal.NumVal);
+      if Assigned(SleepVal) then SleepVal.Free;
+      Res.Free;
+      T^.State := 2;
+      T^.WakeAt := GetTickCount64 + QWord(SleepMs);
+    end
+    else
+    begin
+      // Generic yield — treat as pending, resume next tick
+      if Assigned(Res) then Res.Free;
+      T^.State := 0;
+      T^.WakeAt := GetTickCount64 + 10;
+    end;
+  end;
+end;
+
+function Native_CoSpawn(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  TargetFunc: TValue;
+  CoVM: TVM;
+  T: PCoTask;
+  TID: Int64;
+begin
+  if (Args.Count <> 1) or (TValue(Args[0]).DataType <> dtFunction) then
+  begin
+    errMSG.callerror(140, 'coSpawn(fn) butuh 1 argumen fungsi',
+                     errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateNum(-1));
+  end;
+
+  TargetFunc := TValue(Args[0]);
+  if not Assigned(TargetFunc.FuncVal) then
+  begin
+    errMSG.callerror(144, 'coSpawn: fungsi tidak valid', errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateNum(-1));
+  end;
+
+  CoVM := TVM.Create(CallEnv.GetGlobal);
+  CoVM.FTop := 0;
+  CoVM.FFrameCount := 1;
+  CoVM.FFrames[0].FuncValue := TargetFunc.Clone;
+  CoVM.FFrames[0].Chunk := TargetFunc.FuncVal.Chunk;
+  CoVM.FFrames[0].IP := 0;
+  CoVM.FFrames[0].BaseSlot := 0;
+  if Assigned(TargetFunc.ClosureEnv) then
+    CoVM.FFrames[0].Env := TargetFunc.ClosureEnv
+  else
+    CoVM.FFrames[0].Env := CallEnv.GetGlobal;
+  
+  CoVM.FFrames[0].Env.Retain;
+  CoVM.FState := vmReady;
+  
+  // D.1 fix: init state yang biasanya di-set oleh Run(IsResume=False)
+  // — tanpa ini, FGlobalCache kosong -> AV saat opcGetGlobal
+  CoVM.FStartTime := GetTickCount64;
+  CoVM.FInstructionCount := 0;
+  CoVM.EnsureInlineCache(TargetFunc.FuncVal.Chunk.CodeCount);
+  
+  TID := InterlockedIncrement64(GCoTaskCounter);
+
+  New(T);
+  T^.TaskID := TID;
+  T^.VM := Pointer(CoVM);
+  T^.State := 0;
+  T^.WakeAt := GetTickCount64;
+  T^.FinalValue := nil;
+  T^.ErrorMsg := '';
+
+  GCoTaskLock.Acquire;
+  try
+    GCoTasks.Add(TID, T);
+  finally
+    GCoTaskLock.Release;
+  end;
+
+  Result := TValue.CreateNum(TID);
+end;
+
+function Native_CoWait(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  TID: Int64;
+  TimeoutMs: Integer;
+  StartTick: QWord;
+  T: PCoTask;
+begin
+  if (Args.Count < 1) or (Args.Count > 2) or
+     (TValue(Args[0]).DataType <> dtNumeric) then
+  begin
+    errMSG.callerror(139, 'coWait(taskID, [timeoutMs])',
+                     errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateNull);
+  end;
+
+  TID := Trunc(TValue(Args[0]).NumVal);
+  TimeoutMs := 0;
+  if Args.Count = 2 then
+    if TValue(Args[1]).DataType = dtNumeric then
+      TimeoutMs := Trunc(TValue(Args[1]).NumVal);
+
+  StartTick := GetTickCount64;
+
+  repeat
+    TickCoTasks;
+    T := CoTaskFind(TID);
+    if not Assigned(T) then
+      Exit(TValue.CreateNull);
+    if T^.State = 3 then
+    begin
+      // Done — return final value (clone) + unregister + free
+      if Assigned(T^.FinalValue) then
+        Result := T^.FinalValue.Clone
+      else
+        Result := TValue.CreateNull;
+      CoTaskUnregister(TID);
+      CoTaskFree(T);
+      Exit;
+    end;
+    if T^.State = 4 then
+    begin
+      CoTaskUnregister(TID);
+      CoTaskFree(T);
+      Exit(TValue.CreateNull);
+    end;
+    if (TimeoutMs > 0) and
+       ((GetTickCount64 - StartTick) > QWord(TimeoutMs)) then
+      Exit(TValue.CreateNull);
+    Sleep(10);
+  until False;
+end;
+
+function Native_CoWaitAll(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  i: Integer;
+  StartTick: QWord;
+  TimeoutMs: Integer;
+  AnyPending: Boolean;
+  T: PCoTask;
+begin
+  TimeoutMs := 0;
+  if (Args.Count = 1) and (TValue(Args[0]).DataType = dtNumeric) then
+    TimeoutMs := Trunc(TValue(Args[0]).NumVal);
+
+  StartTick := GetTickCount64;
+
+  repeat
+    TickCoTasks;
+    AnyPending := False;
+
+    // Cleanup done + check pending
+    GCoTaskLock.Acquire;
+    try
+      i := 0;
+      while i < GCoTasks.Count do
+      begin
+        T := GCoTasks.Data[i];
+        if not Assigned(T) then
+        begin
+          GCoTasks.Delete(i);
+          Continue;
+        end;
+        if (T^.State = 3) or (T^.State = 4) then
+        begin
+          CoTaskFree(T);
+          GCoTasks.Delete(i);
+          Continue;
+        end;
+        AnyPending := True;
+        Inc(i);
+      end;
+    finally
+      GCoTaskLock.Release;
+    end;
+
+    if not AnyPending then Break;
+    if (TimeoutMs > 0) and
+       ((GetTickCount64 - StartTick) > QWord(TimeoutMs)) then
+      Break;
+    Sleep(10);
+  until False;
+
+  Result := TValue.CreateNull;
+end;
+
+function Native_CoCount(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  i, Count: Integer;
+  T: PCoTask;
+begin
+  Count := 0;
+  if Assigned(GCoTasks) then
+  begin
+    GCoTaskLock.Acquire;
+    try
+      for i := 0 to GCoTasks.Count - 1 do
+      begin
+        T := GCoTasks.Data[i];
+        if Assigned(T) and ((T^.State = 0) or (T^.State = 1) or (T^.State = 2)) then
+          Inc(Count);
+      end;
+    finally
+      GCoTaskLock.Release;
+    end;
+  end;
+  Result := TValue.CreateNum(Count);
+end;
+
+function Native_CoCancel(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  TID: Int64;
+  T: PCoTask;
+begin
+  if (Args.Count <> 1) or (TValue(Args[0]).DataType <> dtNumeric) then
+  begin
+    errMSG.callerror(139, 'coCancel(taskID)', errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateBool(False));
+  end;
+  TID := Trunc(TValue(Args[0]).NumVal);
+  T := CoTaskFind(TID);
+  if not Assigned(T) then Exit(TValue.CreateBool(False));
+
+  CoTaskUnregister(TID);
+  CoTaskFree(T);
+  Result := TValue.CreateBool(True);
+end;//end D.1 — Coroutine Scheduler
+
 // A.2 — Structured Logging═══════════════════════════════════════
 //═══════════════════════════════════════════════════════════════ }
 function LogArgsToString(Args: TObjectList): string;
@@ -35936,6 +36319,12 @@ begin
   GEnvv.DefineVar('jsonPath', TValue.CreateNative(@Native_JsonPath), true);
   GEnvv.DefineVar('jsonStringify', TValue.CreateNative(@Native_JSONStringify),true);
   GEnvv.DefineVar('onShutdown', TValue.CreateNative(@Native_OnShutdown), true);
+  GEnvv.DefineVar('coSpawn',    TValue.CreateNative(@Native_CoSpawn), true);
+  GEnvv.DefineVar('coSleep',    TValue.CreateNative(@Native_CoSpawn), true);   // ← DUMMY
+  GEnvv.DefineVar('coWait',     TValue.CreateNative(@Native_CoWait), true);
+  GEnvv.DefineVar('coWaitAll',  TValue.CreateNative(@Native_CoWaitAll), true);
+  GEnvv.DefineVar('coCount',    TValue.CreateNative(@Native_CoCount), true);
+  GEnvv.DefineVar('coCancel',   TValue.CreateNative(@Native_CoCancel), true);  
   GEnvv.DefineVar('sqliteConnect', TValue.CreateNative(@Native_SQLiteConnect),true);
   GEnvv.DefineVar('sqliteExec', TValue.CreateNative(@Native_SQLiteExec),true);
   GEnvv.DefineVar('sqliteQuery', TValue.CreateNative(@Native_SQLiteQuery),true);
@@ -39615,6 +40004,9 @@ begin
   GSignalCallbackTERM := TValueList.Create(True);
   GShutdownHooks := TValueList.Create(True);
   GShutdownLock := TCriticalSection.Create;
+  GCoTasks := specialize TFPGMap<Int64, PCoTask>.Create;
+  GCoTasks.Sorted := True;
+  GCoTaskLock := TCriticalSection.Create;  
   GHTTPPool := TList.Create;
   GHTTPPoolLock := TCriticalSection.Create;
   GMetrics := TStringList.Create;
