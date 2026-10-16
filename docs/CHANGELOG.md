@@ -260,6 +260,24 @@ grep -n "Async File I/O" tutorial.md | head -3
 ## [Unreleased]
 ### Added
 
+
+**Coroutine Scheduler (D.1) — 2026-10-16**
+
+- **D.1** — Cooperative coroutine scheduler:
+  - `coSpawn(fn)` → taskID — spawn coroutine, register
+  - `coSleep(ms)` — yield + wake in ms (compiler built-in)
+  - `coWait(taskID, [timeoutMs])` → value | null
+  - `coWaitAll([timeoutMs])` — wait all pending
+  - `coCount()` — active count
+  - `coCancel(taskID)` — force-kill
+  - Per-task TVM instance, timer-based wake, main-thread scheduler
+  - Interleaving otomatis — cooperative multitasking
+  - Integration: event loop `TickOnce` drive scheduler too
+  - Test: 2 tasks dengan sleep 300ms/200ms, verify interleaving
+  - Critical fix: `opcReturn` root frame harus `Break` (bukan `Exit`)
+    untuk set `FState := vmDead` + preserve return value
+
+
 **HTTP + WS Polish (2026-10-15)**
 
 - **A.1b** — Chunked transfer decoder untuk HTTP client:

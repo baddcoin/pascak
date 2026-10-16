@@ -1419,6 +1419,315 @@ begin
   // SIGTERM → handler fire → sys.exit → onShutdown fire → DB closed
 end.
 ```
+## Coroutine Scheduler
+
+Cooperative coroutine scheduler — task interleaving dengan timer-based wake.
+
+**Konsep**: spawn N coroutine, `coSleep(ms)` yield, scheduler resume otomatis setelah `ms`.
+
+### `coSpawn(fn) → taskID`
+
+Spawn coroutine, register ke scheduler.
+
+```pascal
+var tid := coSpawn(lambda : begin
+  println("start");
+  coSleep(1000);
+  println("1 detik kemudian");
+  coSleep(500);
+  println("500ms lagi");
+  return 42;
+end);
+```
+
+**Return**: `taskID` (integer ≥ 1) atau `-1` kalau argumen invalid.
+
+**Behavior**:
+- Coroutine **tidak** langsung jalan — scheduler jalan setelah `coWait` / `coWaitAll` / event loop tick
+- Task state disimpan di global map (thread-safe)
+- Return value dari coroutine di-capture, di-return oleh `coWait`
+
+### `coSleep(ms)`
+
+Yield dari coroutine, minta scheduler resume setelah `ms` milidetik.
+
+**Compiler built-in** — bukan fungsi runtime biasa. Emit `{"__co_sleep": ms} + opcYield`.
+
+```pascal
+function myTask() begin
+  println("phase 1");
+  coSleep(2000);        // yield, scheduler resume dalam 2s
+  println("phase 2");
+end;
+```
+
+**Batasan**:
+- Harus dipanggil di dalam coroutine (spawn via `coSpawn`)
+- Kalau dipanggil di top-level script → script exit early (yield tidak di-handle)
+
+### `coWait(taskID, [timeoutMs]) → value | null`
+
+Blocking wait sampai coroutine selesai. **Drive scheduler** selama menunggu.
+
+```pascal
+var tid := coSpawn(myTask);
+var result := coWait(tid, 5000);   // timeout 5s
+
+if result == null then
+  println("timeout atau error")
+else
+  println("hasil: ", result);
+```
+
+**Parameter**:
+- `taskID` — return dari `coSpawn`
+- `timeoutMs` — opsional, 0 atau omit = wait forever
+
+**Return**:
+- **value** — coroutine selesai, return value dari `return`
+- **null** — timeout, error, atau taskID invalid
+
+**Auto-cleanup**: task di-free setelah `coWait` return.
+
+### `coWaitAll([timeoutMs])`
+
+Blocking wait sampai **semua** coroutine selesai.
+
+```pascal
+coSpawn(task1);
+coSpawn(task2);
+coSpawn(task3);
+
+coWaitAll(30000);   // tunggu semua, max 30s
+println("semua selesai");
+```
+
+**Behavior**: driver scheduler selama menunggu. Task yang error tidak block task lain.
+
+### `coCount() → int`
+
+Jumlah coroutine aktif (state: pending, running, atau sleeping).
+
+```pascal
+coSpawn(t1);
+coSpawn(t2);
+println("active: ", coCount());   // 2
+
+coWaitAll();
+println("active: ", coCount());   // 0
+```
+
+### `coCancel(taskID) → bool`
+
+Force-kill coroutine. Free VM instance + hapus dari registry.
+
+```pascal
+var tid := coSpawn(longRunningTask);
+coSleep(100);   // kasih waktu start
+var ok := coCancel(tid);
+println("cancel: ", ok);   // true
+```
+
+**Return**: `True` kalau berhasil, `False` kalau taskID invalid / sudah done.
+
+**Behavior**:
+- VM di-free tanpa eksekusi cleanup (defer di dalam coroutine **tidak** jalan)
+- Untuk graceful shutdown, pakai flag internal + cek di dalam coroutine
+
+---
+
+### Contoh — Parallel Timer
+
+3 timer berjalan paralel dengan interval berbeda:
+
+```pascal
+function timer1() begin
+  var i := 0;
+  while i < 5 do begin
+    println("[T1] tick ", i);
+    coSleep(1000);
+    i := i + 1;
+  end;
+end;
+
+function timer2() begin
+  var i := 0;
+  while i < 10 do begin
+    println("[T2] tick ", i);
+    coSleep(500);
+    i := i + 1;
+  end;
+end;
+
+begin
+  coSpawn(timer1);
+  coSpawn(timer2);
+  coWaitAll();
+end.
+```
+
+**Output** (interleaved):
+```
+[T1] tick 0
+[T2] tick 0
+[T2] tick 1
+[T1] tick 1
+[T2] tick 2
+[T2] tick 3
+[T1] tick 2
+...
+```
+
+### Contoh — Fetch Parallel + Collect
+
+Fetch 3 URL paralel, tunggu semua:
+
+```pascal
+var RESULTS := {};
+
+function fetchAndStore(name, url) begin
+  println("fetching ", name);
+  var r := http.get(url);
+  lock begin
+    RESULTS[name] = r.status;
+  end;
+  return r.status;
+end;
+
+begin
+  coSpawn(lambda : fetchAndStore("gh", "https://api.github.com/"));
+  coSpawn(lambda : fetchAndStore("hn", "https://hacker-news.firebaseio.com/"));
+  coSpawn(lambda : fetchAndStore("httpbin", "https://httpbin.org/get"));
+
+  coWaitAll(30000);
+
+  for key in RESULTS.keys() do
+    println(key, ": ", RESULTS[key]);
+end.
+```
+
+**Catatan**: HTTP sudah async via worker pool. Coroutine di sini untuk orchestration kalau ada blocking calls.
+
+### Contoh — Timeout Pattern
+
+```pascal
+function slowTask() begin
+  coSleep(10000);
+  return "done";
+end;
+
+begin
+  var tid := coSpawn(slowTask);
+  var result := coWait(tid, 3000);
+
+  if result == null then begin
+    println("timeout, cancel task");
+    coCancel(tid);
+  end else
+    println("ok: ", result);
+end.
+```
+
+### Kombinasi dengan Event Loop
+
+Event loop tick (`TickOnce`) juga drive scheduler. Jadi kalau ada timer aktif:
+
+```pascal
+var tid := coSpawn(myTask);
+
+setTimeout(lambda : println("timer fired"), 500);
+coWait(tid, 5000);   // coroutine + timer sama-sama progress
+```
+
+**Kapan pakai coroutine vs timer**:
+
+| Skenario | Pakai |
+|---|---|
+| Polling periodic | `setInterval` |
+| Sequential delay + kerja | **`coSpawn` + `coSleep`** |
+| Parallel tasks + wait | **`coSpawn` + `coWaitAll`** |
+| Chain async ops (CPS) | **`coSpawn` + `coSleep`** |
+| One-shot delayed action | `setTimeout` |
+
+### Best Practices
+
+**✅ Gunakan coroutine untuk orchestration**:
+```pascal
+function loadUserData(userId) begin
+  coSleep(100);   // simulated fetch delay
+  return {"id": userId, "name": "Alice"};
+end;
+
+function loadSettings(userId) begin
+  coSleep(150);
+  return {"theme": "dark"};
+end;
+
+begin
+  var u := coSpawn(lambda : loadUserData(42));
+  var s := coSpawn(lambda : loadSettings(42));
+
+  var user := coWait(u, 5000);
+  var settings := coWait(s, 5000);
+
+  println("loaded: ", user["name"], " + ", settings["theme"]);
+end.
+```
+
+**❌ Jangan pakai `coSleep` di luar coroutine**:
+```pascal
+// ❌ SALAH — top-level
+begin
+  coSleep(1000);   // yield di root → script exit
+  println("never");
+end.
+```
+
+**✅ Shared state antar coroutine** — pakai `lock`:
+```pascal
+var COUNTER := 0;
+
+function incrementer() begin
+  var i := 0;
+  while i < 100 do begin
+    lock begin
+      COUNTER := COUNTER + 1;
+    end;
+    coSleep(10);
+    i := i + 1;
+  end;
+end;
+
+begin
+  coSpawn(incrementer);
+  coSpawn(incrementer);
+  coWaitAll();
+  println("counter: ", COUNTER);   // 200
+end.
+```
+
+### Limitations (v1)
+
+| Fitur | Status |
+|---|---|
+| Cooperative scheduling | ✅ |
+| Timer-based sleep | ✅ |
+| Return value capture | ✅ |
+| Parallel tasks | ✅ |
+| Timeout pada `coWait` | ✅ |
+| Cancel | ✅ |
+| Priority scheduling | ❌ (backlog) |
+| `coJoin([taskIDs])` — wait subset | ❌ (backlog) |
+| Callback saat task done | ❌ (backlog) |
+| True preemption | ❌ (cooperative only) |
+| Cross-thread resume | ❌ (main thread only) |
+
+**Catatan**:
+- Coroutine adalah **cooperative** — task hanya yield di `coSleep`, bukan preempt
+- Tidak ada paralelisme CPU — single-threaded scheduler
+- Untuk CPU-bound parallelism, pakai `thread()` atau `poolRun()`
+
+---
 
 ---
 
@@ -3603,7 +3912,7 @@ end.
 Lihat juga: examples/fs_async_demo.pas untuk demo lengkap.
 
 ---
-
+## Coroutine Scheduler
 ```
 
 ## Parser Tips
