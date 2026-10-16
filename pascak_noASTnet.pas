@@ -1878,6 +1878,12 @@ type
     ReconnectMinMs: Integer;
     ReconnectMaxMs: Integer;
     ReconnectAttempts: Integer;
+    Subprotocols: TStringList;
+    NegotiatedProtocol: string;
+
+    CompressionEnabled: Boolean;
+    CompressionThreshold: Integer;
+    CompressionNegotiated: Boolean;
 
     constructor Create(const AID: string);
     destructor Destroy; override;
@@ -2010,7 +2016,6 @@ type
     TLSConn: TTLSConnection; TLSContextRef: TTLSContext): Boolean; forward;
   procedure LogWriteInternal(ALevel: Integer; const AMsg: string); forward;
   function GenerateRequestID: string; forward;
-
 
 { ====================================================================
   IMPLEMENTASI
@@ -26663,6 +26668,42 @@ begin
       Byte(Payload[i]) xor MaskKey[(i - 1) mod 4]);
 end;
 
+function BuildWSClientFrameCompressed(Opcode: TWSOpcode;
+  const Payload: RawByteString; Fin: Boolean;
+  Compress: Boolean; Threshold: Integer): RawByteString;
+var
+  WirePayload: RawByteString;
+  UseRSV1: Boolean;
+  Compressed: RawByteString;
+  Base: RawByteString;
+begin
+  UseRSV1 := False;
+  WirePayload := Payload;
+
+  if Compress and (Length(Payload) >= Threshold) and (Length(Payload) > 0) then
+  begin
+    try
+      Compressed := DeflateRaw(Payload);
+      if Length(Compressed) < Length(Payload) then
+      begin
+        WirePayload := Compressed;
+        UseRSV1 := True;
+      end;
+    except
+      UseRSV1 := False;
+      WirePayload := Payload;
+    end;
+  end;
+
+  Base := BuildWSClientFrame(Opcode, WirePayload, Fin);
+
+  // Set RSV1 bit if compressed
+  if UseRSV1 and (Length(Base) > 0) then
+    Base[1] := Char(Byte(Base[1]) or $40);
+
+  Result := Base;
+end;
+
 function BuildWSClientHandle(C: TWSClientConn): TValue;
 var D: TDictValue;
 begin
@@ -26703,11 +26744,14 @@ end;
 
 function BuildWSClientHandshake(const Host, Path: string;
   Port: Integer; IsTLS: Boolean;
+  OfferedProtocols: TStringList;
+  CompressionEnabled: Boolean;
   out ClientKey: string): RawByteString;
 var
   RandBytes: RawByteString;
   KeyB64: string;
-  HostHdr: string;
+  HostHdr, ProtoHdr, ExtHdr: string;
+  i: Integer;
 begin
   RandBytes := SecureRandomBytes(16);
   KeyB64 := Base64Encode(RandBytes);
@@ -26718,6 +26762,24 @@ begin
   else
     HostHdr := Host + ':' + IntToStr(Port);
 
+  // C.3 — Build subprotocols header
+  ProtoHdr := '';
+  if Assigned(OfferedProtocols) and (OfferedProtocols.Count > 0) then
+  begin
+    ProtoHdr := 'Sec-WebSocket-Protocol: ';
+    for i := 0 to OfferedProtocols.Count - 1 do
+    begin
+      if i > 0 then ProtoHdr := ProtoHdr + ', ';
+      ProtoHdr := ProtoHdr + OfferedProtocols[i];
+    end;
+    ProtoHdr := ProtoHdr + #13#10;
+  end;
+
+  // C.4 — permessage-deflate offer
+  ExtHdr := '';
+  if CompressionEnabled then
+    ExtHdr := 'Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits' + #13#10;
+
   Result := RawByteString(
     'GET ' + Path + ' HTTP/1.1' + #13#10 +
     'Host: ' + HostHdr + #13#10 +
@@ -26725,6 +26787,8 @@ begin
     'Connection: Upgrade' + #13#10 +
     'Sec-WebSocket-Key: ' + KeyB64 + #13#10 +
     'Sec-WebSocket-Version: 13' + #13#10 +
+    ProtoHdr +
+    ExtHdr +
     #13#10);
 end;//end Bundle C — WebSocket Client helpers
 
@@ -26907,7 +26971,7 @@ var
   Conn: TWSClientConn;
   Thread: TWSClientThread;
   IsTLS: Boolean;
-  V: TValue;
+  V: TValue;i: integer;
 begin
   if (Args.Count < 1) or (Args.Count > 2) or
      (TValue(Args[0]).DataType <> dtString) then
@@ -27008,6 +27072,42 @@ begin
         V.Free;
       end;
   
+      // C.3 — Subprotocols
+      V := Config.DictVal.GetValueClone('subprotocols');
+      if Assigned(V) and (V.DataType = dtArray) then
+      begin
+        V.ArrayVal.FLock.Acquire;
+        try
+          for i := 0 to V.ArrayVal.Count - 1 do
+          begin
+            if Assigned(V.ArrayVal[i]) and
+               (V.ArrayVal[i].DataType = dtString) and
+               (Trim(V.ArrayVal[i].StrVal) <> '') then
+              Conn.Subprotocols.Add(Trim(V.ArrayVal[i].StrVal));
+          end;
+        finally
+          V.ArrayVal.FLock.Release;
+        end;
+      end;
+      if Assigned(V) then V.Free;
+      
+      // C.4 — Compression
+      V := Config.DictVal.GetValueClone('compression');
+      if Assigned(V) then
+      begin
+        if V.DataType = dtString then
+          Conn.CompressionEnabled := LowerCase(V.StrVal) = 'on';
+        V.Free;
+      end;
+      
+      V := Config.DictVal.GetValueClone('compressionThreshold');
+      if Assigned(V) then
+      begin
+        if V.DataType = dtNumeric then
+          Conn.CompressionThreshold := Trunc(V.NumVal);
+        V.Free;
+      end;
+
       // C.2 — Auto-reconnect
       V := Config.DictVal.GetValueClone('autoReconnect');
       if Assigned(V) then
@@ -30287,6 +30387,8 @@ begin
         Result := TValue.CreateBool(ClientConn.State = wscsOpen)
       else if MethodName = 'attempts' then
         Result := TValue.CreateNum(ClientConn.ReconnectAttempts)
+      else if MethodName = 'protocol' then
+        Result := TValue.CreateStr(ClientConn.NegotiatedProtocol)
       else if MethodName = 'id' then
         Result := TValue.CreateStr(ClientConn.ID)      
       else if MethodName = 'state' then
@@ -30316,6 +30418,7 @@ begin
     Result := TValue.CreateBool(False);
     Exit;
   end;
+  
   try
     if MethodName = 'send' then
     begin
@@ -30334,6 +30437,10 @@ begin
       Payload := RawByteString(Args[0].StrVal);
       Result := TValue.CreateBool(WSSendBinaryFrame(ServerConn, Payload));
     end
+    
+    
+    
+    
     else if MethodName = 'close' then
     begin
       Code := WS_CLOSE_NORMAL;
@@ -30398,7 +30505,8 @@ begin
           // Only route WS-specific methods; fall through for dict methods
           if (MethodName = 'send') or (MethodName = 'sendBytes') or
              (MethodName = 'close') or (MethodName = 'isOpen') or
-             (MethodName = 'attempts') or (MethodName = 'state') then          
+             (MethodName = 'attempts') or (MethodName = 'protocol') or
+             (MethodName = 'state') then          
           begin
             WSIdStr := TargetObj.DictVal.GetValueClone('__ws_id');
             try
@@ -37972,6 +38080,13 @@ begin
   ReconnectMinMs := 1000;
   ReconnectMaxMs := 30000;
   ReconnectAttempts := 0;
+  
+  Subprotocols := TStringList.Create;
+  NegotiatedProtocol := '';
+  
+  CompressionEnabled := False;
+  CompressionThreshold := 128;
+  CompressionNegotiated := False;
 end;  
 
 destructor TWSClientConn.Destroy;
@@ -37994,6 +38109,7 @@ begin
   end;
   if Assigned(Parser) then Parser.Free;
   if Assigned(SendLock) then SendLock.Free;
+  if Assigned(Subprotocols) then Subprotocols.Free;
   if Assigned(OnOpen) then OnOpen.Free;
   if Assigned(OnMessage) then OnMessage.Free;
   if Assigned(OnClose) then OnClose.Free;
@@ -38130,7 +38246,9 @@ begin
           if FConn.State <> wscsClosed then
           begin
             Handshake := BuildWSClientHandshake(FConn.Host, FConn.Path,
-                          FConn.Port, FConn.IsTLS, ClientKey);
+                          FConn.Port, FConn.IsTLS, FConn.Subprotocols,
+                          FConn.CompressionEnabled, ClientKey);            
+            
             if not WSClientSendRaw(FConn, Handshake) then
             begin
               FConn.LastError := 'send handshake gagal';
@@ -38186,14 +38304,37 @@ begin
                   begin
                     ExpectedAccept := ComputeWSAccept(ClientKey);
                     AcceptVal := '';
+                    FConn.NegotiatedProtocol := '';
+                    FConn.CompressionNegotiated := False;
                     for i := 1 to High(HdrLines) do
                     begin
                       HdrLine := HdrLines[i];
                       if (Length(HdrLine) >= 21) and
                          SameText(Copy(HdrLine, 1, 21), 'Sec-WebSocket-Accept:') then
-                        AcceptVal := Trim(Copy(HdrLine, 22, Length(HdrLine)));
+                        AcceptVal := Trim(Copy(HdrLine, 22, Length(HdrLine)))
+                      else if (Length(HdrLine) >= 23) and
+                              SameText(Copy(HdrLine, 1, 23), 'Sec-WebSocket-Protocol:') then
+                        FConn.NegotiatedProtocol := Trim(Copy(HdrLine, 24, Length(HdrLine)))
+                      else if (Length(HdrLine) >= 25) and
+                              SameText(Copy(HdrLine, 1, 25), 'Sec-WebSocket-Extensions:') then
+                      begin
+                        if Pos('permessage-deflate', LowerCase(HdrLine)) > 0 then
+                          FConn.CompressionNegotiated := True;
+                      end;
                     end;
-
+                    
+                    // C.3 — Verify negotiated protocol is one of offered
+                    if FConn.NegotiatedProtocol <> '' then
+                    begin
+                      if FConn.Subprotocols.IndexOf(FConn.NegotiatedProtocol) < 0 then
+                      begin
+                        FConn.LastError := 'server pilih subprotocol yang tidak di-offer: ' +
+                                           FConn.NegotiatedProtocol;
+                        FConn.State := wscsClosed;
+                        Break;
+                      end;
+                    end;
+                    
                     if AcceptVal <> ExpectedAccept then
                     begin
                       FConn.LastError := 'handshake accept mismatch';
@@ -38201,10 +38342,14 @@ begin
                     end
                     else
                     begin
+                      // C.4 — Enable RSV1 if compression negotiated
+                      if FConn.CompressionNegotiated then
+                        FConn.Parser.AllowRSV1 := True;
+                      
                       if Length(BufAccum) > HdrEnd then
                         FConn.Parser.Append(Copy(BufAccum, HdrEnd + 1,
                           Length(BufAccum) - HdrEnd));
-
+                      
                       FConn.State := wscsOpen;
 
                       // ─── onOpen ───
@@ -38235,8 +38380,21 @@ begin
                                 begin
                                   if Assigned(FConn.OnMessage) then
                                   begin
+                                    // C.4 — Decompress if RSV1 + negotiated
+                                    if Frame.RSV1 and FConn.CompressionNegotiated then
+                                    begin
+                                      try
+                                        MsgVal := TValue.CreateStr(string(
+                                          InflateRaw(Frame.Payload + #0#0#$FF#$FF)));
+                                      except
+                                        // Fail: treat as raw
+                                        MsgVal := TValue.CreateStr(string(Frame.Payload));
+                                      end;
+                                    end
+                                    else
+                                      MsgVal := TValue.CreateStr(string(Frame.Payload));
+                            
                                     ConnHandle := BuildWSClientHandle(FConn);
-                                    MsgVal := TValue.CreateStr(string(Frame.Payload));
                                     try
                                       CallWSCallback(FConn.OnMessage, [ConnHandle, MsgVal]);
                                     finally
@@ -38252,6 +38410,7 @@ begin
                                   FragBuf := Frame.Payload;
                                 end;
                               end;
+                                                            
                             wsContinuation:
                               begin
                                 if not FragActive then
