@@ -35366,6 +35366,162 @@ begin
   Result := TValue.CreateNum(Count);
 end;
 
+function Native_CoJoin(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  TIDsArr: TValue;
+  ResultsArr: TValueList;
+  TimeoutMs: Integer;
+  i: Integer;
+  TID: Int64;
+  StartTick: QWord;
+  AllDone: Boolean;
+  T: PCoTask;
+  Snapshot: array of Int64;
+  SnapshotCount: Integer;
+begin
+  if (Args.Count < 1) or (Args.Count > 2) or
+     (TValue(Args[0]).DataType <> dtArray) then
+  begin
+    errMSG.callerror(139, 'coJoin([taskIDs], [timeoutMs])',
+                     errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateNull);
+  end;
+
+  TIDsArr := TValue(Args[0]);
+  TimeoutMs := 0;
+  if Args.Count = 2 then
+    if TValue(Args[1]).DataType = dtNumeric then
+      TimeoutMs := Trunc(TValue(Args[1]).NumVal);
+
+  // Snapshot TIDs once
+  TIDsArr.ArrayVal.FLock.Acquire;
+  try
+    SnapshotCount := TIDsArr.ArrayVal.Count;
+    SetLength(Snapshot, SnapshotCount);
+    for i := 0 to SnapshotCount - 1 do
+      if Assigned(TIDsArr.ArrayVal[i]) and
+         (TIDsArr.ArrayVal[i].DataType = dtNumeric) then
+        Snapshot[i] := Trunc(TIDsArr.ArrayVal[i].NumVal)
+      else
+        Snapshot[i] := -1;
+  finally
+    TIDsArr.ArrayVal.FLock.Release;
+  end;
+
+  StartTick := GetTickCount64;
+
+  repeat
+    TickCoTasks;
+
+    AllDone := True;
+    for i := 0 to SnapshotCount - 1 do
+    begin
+      if Snapshot[i] < 0 then Continue;
+      T := CoTaskFind(Snapshot[i]);
+      if Assigned(T) and ((T^.State = 0) or (T^.State = 1) or (T^.State = 2)) then
+      begin
+        AllDone := False;
+        Break;
+      end;
+    end;
+
+    if AllDone then Break;
+    if (TimeoutMs > 0) and
+       ((GetTickCount64 - StartTick) > QWord(TimeoutMs)) then
+      Break;
+    Sleep(10);
+  until False;
+
+  ResultsArr := TValueList.Create(True);
+  try
+    for i := 0 to SnapshotCount - 1 do
+    begin
+      if Snapshot[i] < 0 then
+      begin
+        ResultsArr.Add(TValue.CreateNull);
+        Continue;
+      end;
+      T := CoTaskFind(Snapshot[i]);
+      if Assigned(T) and (T^.State = 3) then
+      begin
+        if Assigned(T^.FinalValue) then
+          ResultsArr.Add(T^.FinalValue.Clone)
+        else
+          ResultsArr.Add(TValue.CreateNull);
+        CoTaskUnregister(Snapshot[i]);
+        CoTaskFree(T);
+      end
+      else
+        ResultsArr.Add(TValue.CreateNull);
+    end;
+    Result := TValue.CreateArray(ResultsArr);
+  except
+    ResultsArr.Free;
+    raise;
+  end;
+end;
+
+function Native_CoStatus(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  TID: Int64;
+  T: PCoTask;
+  S: string;
+begin
+  if (Args.Count <> 1) or (TValue(Args[0]).DataType <> dtNumeric) then
+  begin
+    errMSG.callerror(139, 'coStatus(taskID)', errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateStr('unknown'));
+  end;
+  TID := Trunc(TValue(Args[0]).NumVal);
+  T := CoTaskFind(TID);
+  if not Assigned(T) then Exit(TValue.CreateStr('unknown'));
+  case T^.State of
+    0: S := 'pending';
+    1: S := 'running';
+    2: S := 'sleeping';
+    3: S := 'done';
+    4: S := 'error';
+  else
+    S := 'unknown';
+  end;
+  Result := TValue.CreateStr(S);
+end;
+
+function Native_CoResult(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  TID: Int64;
+  T: PCoTask;
+begin
+  if (Args.Count <> 1) or (TValue(Args[0]).DataType <> dtNumeric) then
+  begin
+    errMSG.callerror(139, 'coResult(taskID)', errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateNull);
+  end;
+  TID := Trunc(TValue(Args[0]).NumVal);
+  T := CoTaskFind(TID);
+  if not Assigned(T) then Exit(TValue.CreateNull);
+
+  // Not done yet — return null, keep task
+  if (T^.State = 0) or (T^.State = 1) or (T^.State = 2) then
+    Exit(TValue.CreateNull);
+
+  // Error — clean up, return null
+  if T^.State = 4 then
+  begin
+    CoTaskUnregister(TID);
+    CoTaskFree(T);
+    Exit(TValue.CreateNull);
+  end;
+
+  // Done — clone result + auto-free
+  if Assigned(T^.FinalValue) then
+    Result := T^.FinalValue.Clone
+  else
+    Result := TValue.CreateNull;
+  CoTaskUnregister(TID);
+  CoTaskFree(T);
+end;
+
 function Native_CoCancel(Args: TObjectList; CallEnv: TSymbolTable): TValue;
 var
   TID: Int64;
@@ -36325,6 +36481,10 @@ begin
   GEnvv.DefineVar('coWaitAll',  TValue.CreateNative(@Native_CoWaitAll), true);
   GEnvv.DefineVar('coCount',    TValue.CreateNative(@Native_CoCount), true);
   GEnvv.DefineVar('coCancel',   TValue.CreateNative(@Native_CoCancel), true);  
+  GEnvv.DefineVar('coJoin',     TValue.CreateNative(@Native_CoJoin), true);
+  GEnvv.DefineVar('coStatus',   TValue.CreateNative(@Native_CoStatus), true);
+  GEnvv.DefineVar('coResult',   TValue.CreateNative(@Native_CoResult), true);
+  
   GEnvv.DefineVar('sqliteConnect', TValue.CreateNative(@Native_SQLiteConnect),true);
   GEnvv.DefineVar('sqliteExec', TValue.CreateNative(@Native_SQLiteExec),true);
   GEnvv.DefineVar('sqliteQuery', TValue.CreateNative(@Native_SQLiteQuery),true);
