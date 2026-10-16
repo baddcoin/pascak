@@ -25,6 +25,56 @@ Versi mengikuti [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+**Coroutine Advanced + Closure Fix — 2026-10-16**
+
+### Added
+- **D.1b** — Advanced coroutine helpers:
+  - `coJoin([taskIDs], [timeoutMs])` → array of results — wait subset
+  - `coStatus(taskID)` → "pending\|running\|sleeping\|done\|error"
+  - `coResult(taskID)` → value \| null — auto-free after read
+  Auto-free semantics documented. Result capture per-task.
+
+- **D.1c** — Coroutine callback + priority:
+  - `coThen(taskID, fn)` → bool — register callback fired on done
+  - `coSpawn(fn, [priority])` — optional priority (higher = runs first)
+  - `TCoTask.Callback` + `TCoTask.Priority` fields
+  - Callback fires in `TickCoTasks` when VM state = vmDead
+  - Auto-free task after callback (no `coWait` needed)
+  - Priority-sorted scheduling via insertion sort (small N)
+  - Test: `test_co_adv2.pas` (9 assertions)
+  - Critical fix: `TickCoTasks` OOB (`ReadyIDs[j]` after inner loop
+    exit) → split into explicit 3-phase (Collect/Sort/Process)
+  - Critical fix: UAF saat callback panggil `coCancel(ownID)` →
+    snapshot + unregister + free task SEBELUM fire callback
+  - Fix: callback argument leak (`FinalValue.Clone` tidak di-free)
+  - Fix: negative `SleepMs` guard (QWord(-1) = ~49 hari)
+
+### Fixed
+- **Compiler** — Closure capture untuk function params:
+  - **Root cause**: parameter dialokasikan sebagai stack slot
+    (`opcGetLocal`), tapi nested lambda capture env (`opcGetGlobal`
+    walking parent chain). Saat outer frame return, slot stack
+    recycle → captured param jadi dangling/null.
+  - **Symptom**: factory pattern fails:
+    ```pascal
+    function makeTask(n) begin
+      return lambda : n;
+    end;
+    var t := makeTask(42);
+    println(t());   // was: null or AV
+    ```
+  - **Fix**: setelah `AddLocal` per param, emit
+    `opcGetLocal i` + `opcDefineOrReplaceGlobal <paramName>, 0`.
+    Param sekarang ada di BOTH stack slot (fast path) dan env
+    (survive frame teardown via closure chain).
+  - **Trade-off**: +2 instruksi per param per function — negligible.
+  - **Verified**: diag_a (direct param) → 42; diag_e (param in expr)
+    → 42; diag_b/c/d (unchanged) → 42/42/99; full regression 29/29
+    PASS.
+  - **Low risk**: idempotent (DefineOrReplace), slot index order
+    unchanged, direct param access via `opcGetLocal` still works.
+
+
 ## [0.3.0] — 2026-10-10
 
 **Fase 1 — Hardening**: context isolation, async I/O, production hardening.
