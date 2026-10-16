@@ -30358,7 +30358,10 @@ begin
         else
           Payload := RawByteString(TValueToString(Args[0], False));
         Result := TValue.CreateBool(
-          WSClientSendRaw(ClientConn, BuildWSClientFrame(wsText, Payload, True)));
+          WSClientSendRaw(ClientConn,
+            BuildWSClientFrameCompressed(wsText, Payload, True,
+              ClientConn.CompressionNegotiated,
+              ClientConn.CompressionThreshold)));
       end
       else if MethodName = 'sendBytes' then
       begin
@@ -30366,8 +30369,12 @@ begin
           Exit(TValue.CreateBool(False));
         Payload := RawByteString(Args[0].StrVal);
         Result := TValue.CreateBool(
-          WSClientSendRaw(ClientConn, BuildWSClientFrame(wsBinary, Payload, True)));
+          WSClientSendRaw(ClientConn,
+            BuildWSClientFrameCompressed(wsBinary, Payload, True,
+              ClientConn.CompressionNegotiated,
+              ClientConn.CompressionThreshold)));
       end
+      
       else if MethodName = 'close' then
       begin
         ClientConn.AutoReconnect := False;   // ← disable first
