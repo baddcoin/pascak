@@ -219,6 +219,7 @@ begin
   // ── Kategori 1: Core FFI ──
   println("[ Core FFI ]");
   runScriptTest("test_phase_f1.pas");
+  runScriptTest("test_closure_param.pas");
   runScriptTest("test_phase_f3a3.pas");
   runScriptTest("test_phase_f3a4.pas");
   runScriptTest("test_qshort.pas");
