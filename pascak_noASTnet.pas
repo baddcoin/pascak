@@ -14590,6 +14590,16 @@ begin
               VMFunc.Params[i].Name := TFunctionNode(Node).Params[i].Name;
               SubComp.AddLocal(VMFunc.Params[i].Name);
             end;
+            // FIX (closure param capture): copy each param from stack slot
+            // to env. Nested lambdas reference captured vars via
+            // opcGetGlobal (walks env chain), so param must exist in env
+            // to survive outer frame teardown.
+            for i := 0 to High(TFunctionNode(Node).Params) do
+            begin
+              SubComp.FChunk.AddInstruction(opcGetLocal, i);
+              SubComp.FChunk.AddInstruction(opcDefineOrReplaceGlobal,
+                SubComp.FChunk.AddVarName(TFunctionNode(Node).Params[i].Name), 0);
+            end;
           
             SubComp.Compile(TFunctionNode(Node).Body, True);
             
