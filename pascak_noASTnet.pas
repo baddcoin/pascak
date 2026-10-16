@@ -326,10 +326,12 @@ type
   TCoTask = record
     TaskID: Int64;
     VM: Pointer;
-    State: Integer;         // 0=pending, 1=running, 2=sleeping, 3=done, 4=error
+    State: Integer;
     WakeAt: QWord;
     FinalValue: TValue;
     ErrorMsg: string;
+    Callback: TValue;      // D.1c: fire on done
+    Priority: Integer;     // D.1c: higher = runs first
   end;
   PHTTPPooledConn = ^THTTPPooledConn;
   THTTPPooledConn = record
@@ -35058,6 +35060,11 @@ begin
     T^.FinalValue.Free;
     T^.FinalValue := nil;
   end;
+  if Assigned(T^.Callback) then
+  begin
+    T^.Callback.Free;
+    T^.Callback := nil;
+  end;
   Dispose(T);
 end;
 
@@ -35073,19 +35080,26 @@ end;
 procedure TickCoTasks;
 var
   ReadyIDs: array of Int64;
+  ReadyPriorities: array of Integer;
+  TmpID: Int64;
+  TmpP: Integer;
   i, j: Integer;
   T: PCoTask;
   VM: TVM;
   Res, SleepVal: TValue;
   NowTick: QWord;
   SleepMs: Integer;
-  WasRunning: Boolean;
+  SavedCallback, SavedFinal, CbArg: TValue;
 begin
   if not Assigned(GCoTasks) then Exit;
 
-  // Collect ready tasks
+  // ═══════════════════════════════════════════════════════════════
+  //  Phase 1: Collect ready tasks (state=0 pending / state=2 sleeping
+  //           dengan WakeAt <= now)
+  // ═══════════════════════════════════════════════════════════════
   NowTick := GetTickCount64;
   SetLength(ReadyIDs, 0);
+  SetLength(ReadyPriorities, 0);
 
   GCoTaskLock.Acquire;
   try
@@ -35097,9 +35111,11 @@ begin
       begin
         if NowTick >= T^.WakeAt then
         begin
-          T^.State := 1;
+          T^.State := 1;   // transition → running
           SetLength(ReadyIDs, Length(ReadyIDs) + 1);
+          SetLength(ReadyPriorities, Length(ReadyPriorities) + 1);
           ReadyIDs[High(ReadyIDs)] := T^.TaskID;
+          ReadyPriorities[High(ReadyPriorities)] := T^.Priority;
         end;
       end;
     end;
@@ -35107,11 +35123,35 @@ begin
     GCoTaskLock.Release;
   end;
 
-  // Resume each outside lock
-  for j := 0 to High(ReadyIDs) do
+  if Length(ReadyIDs) = 0 then Exit;
+
+  // ═══════════════════════════════════════════════════════════════
+  //  Phase 2: Sort by priority descending (higher priority first)
+  // ═══════════════════════════════════════════════════════════════
+  for i := 0 to High(ReadyIDs) - 1 do
   begin
-    T := CoTaskFind(ReadyIDs[j]);
-    if not Assigned(T) then Continue;
+    for j := i + 1 to High(ReadyIDs) do
+    begin
+      if ReadyPriorities[j] > ReadyPriorities[i] then
+      begin
+        TmpID := ReadyIDs[i];
+        ReadyIDs[i] := ReadyIDs[j];
+        ReadyIDs[j] := TmpID;
+
+        TmpP := ReadyPriorities[i];
+        ReadyPriorities[i] := ReadyPriorities[j];
+        ReadyPriorities[j] := TmpP;
+      end;
+    end;
+  end;
+
+  // ═══════════════════════════════════════════════════════════════
+  //  Phase 3: Process each ready task (di priority order)
+  // ═══════════════════════════════════════════════════════════════
+  for i := 0 to High(ReadyIDs) do
+  begin
+    T := CoTaskFind(ReadyIDs[i]);
+    if not Assigned(T) then Continue;   // mungkin sudah di-cancel
 
     VM := TVM(T^.VM);
     if not Assigned(VM) then
@@ -35121,7 +35161,6 @@ begin
       Continue;
     end;
 
-    WasRunning := (VM.FState = vmReady) or (VM.FState = vmYielded);
     Res := nil;
     try
       if VM.FState = vmReady then
@@ -35142,7 +35181,7 @@ begin
       end;
     end;
 
-    // Interpret result based on VM state
+    // ─── Case A: task SELESAI (VM dead) ───
     if VM.FState = vmDead then
     begin
       T^.State := 3;
@@ -35150,10 +35189,42 @@ begin
         T^.FinalValue := Res
       else
         T^.FinalValue := TValue.CreateNull;
+
+      // Fire callback (jika ada). Auto-free task setelah callback.
+      if Assigned(T^.Callback) and (T^.Callback.DataType = dtFunction) then
+      begin
+        // ✅ FIX #2: Snapshot + unregister + free task SEBELUM fire
+        // callback. Ini mencegah UAF kalau callback memanggil coCancel().
+        SavedCallback := T^.Callback;  T^.Callback := nil;
+        SavedFinal := T^.FinalValue;   T^.FinalValue := nil;
+
+        CoTaskUnregister(ReadyIDs[i]);
+        CoTaskFree(T);
+        T := nil;
+
+        // ✅ FIX #3: free CbArg setelah CallWSCallback (pola konsisten
+        // dengan WSDispatchMessage / TNativeEventEmitter).
+        try
+          CbArg := SavedFinal.Clone;
+          try
+            CallWSCallback(SavedCallback, [CbArg]);
+          finally
+            CbArg.Free;
+          end;
+        except
+          on E: Exception do
+            PushThreadError('coThen callback: ' + E.Message);
+        end;
+
+        SavedCallback.Free;
+        SavedFinal.Free;
+      end;
+      // else: no callback — task stays in registry; caller must
+      // coWait/coResult untuk cleanup (perilaku D.1b).
       Continue;
     end;
 
-    // vmYielded — check for co_sleep marker
+    // ─── Case B: coSleep yield ───
     if Assigned(Res) and (Res.DataType = dtDict) and
        Res.DictVal.HasKey('__co_sleep') then
     begin
@@ -35163,12 +35234,16 @@ begin
         SleepMs := Trunc(SleepVal.NumVal);
       if Assigned(SleepVal) then SleepVal.Free;
       Res.Free;
+
+      // ✅ FIX #3: guard negatif — QWord(-1) = ~49 hari
+      if SleepMs < 0 then SleepMs := 0;
+
       T^.State := 2;
       T^.WakeAt := GetTickCount64 + QWord(SleepMs);
     end
     else
     begin
-      // Generic yield — treat as pending, resume next tick
+      // ─── Case C: generic yield — resume next tick ───
       if Assigned(Res) then Res.Free;
       T^.State := 0;
       T^.WakeAt := GetTickCount64 + 10;
@@ -35182,13 +35257,20 @@ var
   CoVM: TVM;
   T: PCoTask;
   TID: Int64;
+  Priority: Integer;
 begin
-  if (Args.Count <> 1) or (TValue(Args[0]).DataType <> dtFunction) then
+  if (Args.Count < 1) or (Args.Count > 2) or
+     (TValue(Args[0]).DataType <> dtFunction) then
   begin
-    errMSG.callerror(140, 'coSpawn(fn) butuh 1 argumen fungsi',
+    errMSG.callerror(140, 'coSpawn(fn, [priority])',
                      errMSG.xrow, errMSG.xcol);
     Exit(TValue.CreateNum(-1));
   end;
+
+  Priority := 0;
+  if Args.Count = 2 then
+    if TValue(Args[1]).DataType = dtNumeric then
+      Priority := Trunc(TValue(Args[1]).NumVal);
 
   TargetFunc := TValue(Args[0]);
   if not Assigned(TargetFunc.FuncVal) then
@@ -35227,6 +35309,8 @@ begin
   T^.WakeAt := GetTickCount64;
   T^.FinalValue := nil;
   T^.ErrorMsg := '';
+  T^.Callback := nil;
+  T^.Priority := Priority;
 
   GCoTaskLock.Acquire;
   try
@@ -35364,6 +35448,58 @@ begin
     end;
   end;
   Result := TValue.CreateNum(Count);
+end;
+
+function Native_CoThen(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  TID: Int64;
+  T: PCoTask;
+  Cb: TValue;
+begin
+  if (Args.Count <> 2) or (TValue(Args[0]).DataType <> dtNumeric) or
+     (TValue(Args[1]).DataType <> dtFunction) then
+  begin
+    errMSG.callerror(140, 'coThen(taskID, fn)', errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateBool(False));
+  end;
+
+  TID := Trunc(TValue(Args[0]).NumVal);
+  Cb := TValue(Args[1]);
+
+  T := CoTaskFind(TID);
+  if not Assigned(T) then Exit(TValue.CreateBool(False));
+
+  // Task sudah done — fire callback immediately
+  if T^.State = 3 then
+  begin
+    try
+      if Assigned(T^.FinalValue) then
+        CallWSCallback(Cb, [T^.FinalValue.Clone])
+      else
+        CallWSCallback(Cb, [TValue.CreateNull]);
+    except
+      on E: Exception do
+        PushThreadError('coThen immediate: ' + E.Message);
+    end;
+    CoTaskUnregister(TID);
+    CoTaskFree(T);
+    Exit(TValue.CreateBool(True));
+  end;
+
+  // Error — cleanup, return false
+  if T^.State = 4 then
+  begin
+    CoTaskUnregister(TID);
+    CoTaskFree(T);
+    Exit(TValue.CreateBool(False));
+  end;
+
+  // Replace existing callback if any
+  if Assigned(T^.Callback) then
+    T^.Callback.Free;
+  T^.Callback := Cb.Clone;
+
+  Result := TValue.CreateBool(True);
 end;
 
 function Native_CoJoin(Args: TObjectList; CallEnv: TSymbolTable): TValue;
@@ -36482,6 +36618,7 @@ begin
   GEnvv.DefineVar('coCount',    TValue.CreateNative(@Native_CoCount), true);
   GEnvv.DefineVar('coCancel',   TValue.CreateNative(@Native_CoCancel), true);  
   GEnvv.DefineVar('coJoin',     TValue.CreateNative(@Native_CoJoin), true);
+  GEnvv.DefineVar('coThen',     TValue.CreateNative(@Native_CoThen), true);
   GEnvv.DefineVar('coStatus',   TValue.CreateNative(@Native_CoStatus), true);
   GEnvv.DefineVar('coResult',   TValue.CreateNative(@Native_CoResult), true);
   
