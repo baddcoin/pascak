@@ -18411,7 +18411,7 @@ begin
             ThrownVal := nil;
           end;
           
-          if not (TThread.CurrentThread is TScriptThread) then
+          if TThread.CurrentThread = nil then
           begin
             IOLock.Acquire;
             try
