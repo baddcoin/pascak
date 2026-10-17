@@ -2138,6 +2138,36 @@ end);
 
 **Batasan**: max 8 concurrent request (worker pool size). Request ke-9 antri.
 
+### http.get2(url [, headers] [, body]) -> dict
+
+HTTP/2 request via TLS ALPN. Requires server support for h2.
+
+Example:
+
+    var r := http.get2("https://httpbin.org/get");
+    println(r["status"]);    // 200
+    println(r["version"]);   // "h2"
+
+Return dict: status (int), version (string "h2"), headers (dict), body (string).
+
+Requirements: https only, server must negotiate h2 via ALPN.
+
+Error handling: server without h2 raises; TLS failure raises; timeout raises.
+
+Scope v1: single-stream, GET primary, no pooling.
+
+http.get2 vs http.get:
+- Server h2-only          -> http.get2
+- Sequential same host    -> http.get (pooling faster)
+- Verify h2 version       -> http.get2
+- Need h1 fallback        -> http.get
+
+Note: http.get (h1) with pooling is faster for sequential requests.
+http.get2 (v1) opens new connection per request. Main use: h2-only
+server compat + version verification. Multiplexing + pooling planned v2.
+
+---
+
 ### Connection Pooling (Fase A.1)
 
 HTTP client otomatis reuse TCP + TLS connection ke host yang sama.

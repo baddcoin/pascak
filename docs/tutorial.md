@@ -2784,6 +2784,42 @@ end.
 4. **Cleanup** timer di script akhir supaya tidak fire setelah selesai
 
 ---
+## Bonus — HTTP/2 Client
+
+Pascak juga mendukung HTTP/2 client via ALPN negotiation (RFC 7301).
+Ini bukan pengganti http.get untuk semua kasus. Berguna saat server
+hanya mendukung h2 (jarang) atau untuk verifikasi endpoint h2.
+
+Contoh:
+
+    begin
+      var r := http.get2("https://httpbin.org/get");
+      println("status: ", r["status"]);      // 200
+      println("version: ", r["version"]);    // "h2"
+      println("body len: ", len(r["body"]));
+    end.
+
+Kapan pakai http.get2:
+
+- Server hanya dukung h2         -> http.get2
+- Sequential requests ke host sama -> http.get (pooling)
+- Verifikasi versi h2             -> http.get2
+- Server tidak support h2         -> http.get
+
+Batasan v1:
+
+- Single-stream: satu request per connection, tidak ada multiplexing
+- HTTPS-only: h2c cleartext tidak diimplementasi
+- No pooling: koneksi baru per request (lebih lambat dari http.get
+  untuk sequential)
+- No h1 fallback: kalau server tidak negotiate h2, error raised
+
+Yang akan datang (v2): multiplexing, connection pooling, h2c.
+
+Untuk detail lengkap: lihat pascak_api.md, bagian http.get2.
+
+---
+
 ## Latihan Lanjutan
 
 Setelah tutorial ini, coba bangun:

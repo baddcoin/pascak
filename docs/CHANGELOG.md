@@ -311,6 +311,38 @@ grep -n "Async File I/O" tutorial.md | head -3
 ### Added
 
 
+**HTTP/2 Client (D.2) — 2026-10-17**
+
+### Added
+- **D.2.1** — Frame layer (`pascak_h2.pas`, 489 lines): 10 frame types,
+  incremental parser. 19/19 unit test assertions.
+- **D.2.2** — HPACK Huffman decoder (`pascak_h2_huffman.pas`, 181 lines):
+  257-entry code table (RFC 7541 App. B), bit-level tree walk. 3/3 RFC tests.
+- **D.2.3** — HPACK decoder (`pascak_h2_hpack.pas`, ~409 lines): 61-entry
+  static table, dynamic table with FIFO eviction, 5 header field patterns.
+  27/27 RFC test vectors.
+- **D.2.4** — HPACK encoder (`pascak_h2_hpack.pas`, +120 lines): 3-tier
+  strategy (exact → name-only → literal). 17/17 round-trip assertions.
+- **D.2.5** — TLS ALPN extension (`pascak_tls.pas`, +135 lines):
+  `TLSConnectALPN(...)`, SSL_set_alpn_protos binding. Verified 'h2'
+  negotiation vs httpbin.org (Cloudflare).
+- **D.2.6** — TH2Connection state machine (`pascak_h2_conn.pas`, 377 lines):
+  preface + SETTINGS + single-stream HEADERS + DATA + frame dispatch.
+  6/6 assertions verified e2e.
+- **D.2.7** — Engine integration (`pascak_noASTnet.pas`, +179 lines):
+  `http.get2(url, [headers], [body])` native. Full TLS+ALPN+H2 handshake
+  + HPACK round-trip. Returns {status, version: 'h2', headers, body}.
+
+### Verified
+- `http.get2('https://httpbin.org/get')` → 200 OK, ~200 bytes JSON
+- 30/30 regression PASS, 0 build warning
+- Total: ~1,890 lines pure Pascal, 72+ test assertions
+
+### Not in scope (v1)
+- Multiplexing, h2 connection pooling, server push, h2c cleartext.
+
+---
+
 **Coroutine Scheduler (D.1) — 2026-10-16**
 
 - **D.1** — Cooperative coroutine scheduler:

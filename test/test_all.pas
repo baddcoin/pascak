@@ -297,6 +297,7 @@ begin
   println("[ File I/O ]");
   runScriptTest("test_fs_async.pas");
   runScriptTest("test_engine_leak.pas");
+  runScriptTestEx("test_http2.pas", true);
   println();
 
 
