@@ -23,6 +23,9 @@ uses
   pascak_fs,
   pascak_time,
   pascak_tls,
+  pascak_h2,
+  pascak_h2_hpack,
+  pascak_h2_conn,
   pascak_websocket,
   paszlib,
   pascak_wsevloop,
@@ -28241,6 +28244,180 @@ begin
 end;
 
 // Main-thread: enqueue task ke worker pool
+function Native_HTTP_Get2(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  URL, Host, Path, BodyStr, Rest: string;
+  ExtraHeaders: THPACKHeaderArray;
+  Port, Sock, ColonPos, SlashPos, SchemeEnd: Integer;
+  Keys: TStringArray;
+  i: Integer;
+  HV: TValue;
+  Ctx: TTLSContext;
+  TLSConn: TTLSConnection;
+  Negotiated: string;
+  H2: TH2Connection;
+  Resp: TH2Response;
+  ResultDict, HeadersDict: TDictValue;
+begin
+  if (Args.Count < 1) or (Args.Count > 3) or
+     (TValue(Args[0]).DataType <> dtString) then
+  begin
+    errMSG.callerror(139, 'http.get2(url, [headers], [body])',
+                     errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateNull);
+  end;
+
+  URL := TValue(Args[0]).StrVal;
+  BodyStr := '';
+  SetLength(ExtraHeaders, 0);
+
+  if Args.Count >= 2 then
+    if TValue(Args[1]).DataType = dtDict then
+    begin
+      Keys := TValue(Args[1]).DictVal.GetKeys;
+      SetLength(ExtraHeaders, Length(Keys));
+      for i := 0 to High(Keys) do
+      begin
+        ExtraHeaders[i].Name := LowerCase(Keys[i]);
+        HV := TValue(Args[1]).DictVal.GetValueClone(Keys[i]);
+        if Assigned(HV) then
+        begin
+          try
+            if HV.DataType = dtString then
+              ExtraHeaders[i].Value := HV.StrVal
+            else
+              ExtraHeaders[i].Value := TValueToString(HV, False);
+          finally
+            HV.Free;
+          end;
+        end
+        else
+          ExtraHeaders[i].Value := '';
+      end;
+    end;
+
+  if Args.Count >= 3 then
+    if TValue(Args[2]).DataType = dtString then
+      BodyStr := TValue(Args[2]).StrVal;
+
+  if Copy(LowerCase(URL), 1, 8) <> 'https://' then
+  begin
+    errMSG.callerror(139, 'http.get2: hanya https:// supported untuk h2',
+                     errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateNull);
+  end;
+
+  SchemeEnd := Pos('://', URL);
+  Rest := Copy(URL, SchemeEnd + 3, Length(URL));
+  SlashPos := Pos('/', Rest);
+  if SlashPos = 0 then
+  begin
+    Host := Rest;
+    Path := '/';
+  end
+  else
+  begin
+    Host := Copy(Rest, 1, SlashPos - 1);
+    Path := Copy(Rest, SlashPos, Length(Rest));
+  end;
+
+  Port := 443;
+  ColonPos := Pos(':', Host);
+  if ColonPos > 0 then
+  begin
+    Port := StrToIntDef(Copy(Host, ColonPos + 1, Length(Host)), 443);
+    Host := Copy(Host, 1, ColonPos - 1);
+  end;
+
+  if not NetConnect(Host, Port, 10000, Sock) then
+  begin
+    errMSG.callerror(145, 'http.get2: connect gagal - ' + NetLastError,
+                     errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateNull);
+  end;
+
+  if not TLSInit then
+  begin
+    NetClose(Sock);
+    errMSG.callerror(144, 'http.get2: TLS tidak tersedia',
+                     errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateNull);
+  end;
+
+  Ctx := nil;
+  TLSConn := nil;
+  H2 := nil;
+  try
+    Ctx := TTLSContext.Create(True);
+    if not TLSConnectALPN(Ctx, Sock, Host, ['h2'], TLSConn, Negotiated) then
+    begin
+      errMSG.callerror(144,
+        'http.get2: TLS handshake gagal - ' + TLSConn.LastError,
+        errMSG.xrow, errMSG.xcol);
+      Exit(TValue.CreateNull);
+    end;
+
+    if Negotiated <> 'h2' then
+    begin
+      errMSG.callerror(144,
+        'http.get2: server tidak support h2 (negotiated: ' + Negotiated + ')',
+        errMSG.xrow, errMSG.xcol);
+      Exit(TValue.CreateNull);
+    end;
+
+    H2 := TH2Connection.Create(TLSConn, Host);
+    if not H2.Open(10000) then
+    begin
+      errMSG.callerror(144, 'http.get2: H2 handshake gagal',
+                       errMSG.xrow, errMSG.xcol);
+      Exit(TValue.CreateNull);
+    end;
+
+    Resp := H2.Request('GET', Path, ExtraHeaders, BodyStr, 30000);
+
+    if Resp.HasError then
+    begin
+      errMSG.callerror(144, 'http.get2: request gagal - ' + Resp.Error,
+                       errMSG.xrow, errMSG.xcol);
+      Exit(TValue.CreateNull);
+    end;
+
+    ResultDict := TDictValue.Create;
+    try
+      ResultDict.SetValue('status', TValue.CreateNum(Resp.Status));
+      HeadersDict := TDictValue.Create;
+      try
+        for i := 0 to High(Resp.Headers) do
+          HeadersDict.SetValue(Resp.Headers[i].Name,
+            TValue.CreateStr(Resp.Headers[i].Value));
+        ResultDict.SetValue('headers', TValue.CreateDict(HeadersDict));
+      except
+        HeadersDict.Free;
+        raise;
+      end;
+      ResultDict.SetValue('body', TValue.CreateStr(string(Resp.Body)));
+      ResultDict.SetValue('version', TValue.CreateStr('h2'));
+      Result := TValue.CreateDict(ResultDict);
+    except
+      ResultDict.Free;
+      raise;
+    end;
+  finally
+    if Assigned(H2) then
+    begin
+      try H2.Close; except end;
+      H2.Free;
+    end;
+    if Assigned(TLSConn) then
+    begin
+      try TLSClose(TLSConn); except end;
+      TLSConn.Free;
+    end;
+    if Assigned(Ctx) then Ctx.Free;
+    NetClose(Sock);
+  end;
+end;
+
 function Native_HTTP_GetAsync(Args: TObjectList; CallEnv: TSymbolTable): TValue;
 var
   Url: string;
@@ -36378,6 +36555,7 @@ begin
   HTTPDef.Methods.Add('stop', TVMFunction.Create);
   HTTPDef.Methods.Add('request', TVMFunction.Create);
   HTTPDef.Methods.Add('get', TVMFunction.Create);
+  HTTPDef.Methods.Add('get2', TVMFunction.Create);
   HTTPDef.Methods.Add('post', TVMFunction.Create);
   HTTPDef.Methods.Add('getAsync', TVMFunction.Create);
   HTTPDef.Methods.Add('serveTLS', TVMFunction.Create);
@@ -36396,6 +36574,7 @@ begin
   HTTPInst.Members.DefineVar('request', TValue.CreateNative(@Native_HTTP_Request));
   HTTPInst.Members.DefineVar('traceRequests', TValue.CreateNative(@Native_HTTP_TraceRequests));
   HTTPInst.Members.DefineVar('get', TValue.CreateNative(@Native_HTTP_Get));
+  HTTPInst.Members.DefineVar('get2', TValue.CreateNative(@Native_HTTP_Get2));
   HTTPInst.Members.DefineVar('post', TValue.CreateNative(@Native_HTTP_Post));
   HTTPInst.Members.DefineVar('getAsync',TValue.CreateNative(@Native_HTTP_GetAsync));
   HTTPInst.Members.DefineVar('serveTLS',TValue.CreateNative(@Native_HTTP_ServeTLS));
