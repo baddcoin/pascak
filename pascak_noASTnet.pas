@@ -556,6 +556,7 @@ type
     Used: Boolean;
     IsParam: Boolean;
     IsConst: Boolean;
+    IsFunction: Boolean;
   end;
 
   TLinter = class
@@ -571,7 +572,7 @@ type
     procedure PushScope;
     procedure PopScope;
     procedure DeclareVar(const Name: string; Line, Col: Integer;
-      IsParam, IsConst: Boolean);
+      IsParam, IsConst: Boolean; AIsFunction: Boolean = False);
     procedure MarkUsed(const Name: string);
     function FindVar(const Name: string): TLintVar;
 
@@ -34633,7 +34634,10 @@ begin
   begin
     V := TLintVar(Scope[i]);
     if (not V.Used) and (not V.IsParam) and (not V.IsConst) then
-      AddWarn(V.Line, V.Col, 'W001', 'unused variable ''' + V.Name + '''');
+      if V.IsFunction then
+        AddWarn(V.Line, V.Col, 'W003', 'unused function ''' + V.Name + '''')
+      else
+        AddWarn(V.Line, V.Col, 'W001', 'unused variable ''' + V.Name + '''');
     V.Free;
   end;
   Scope.Free;
@@ -34641,7 +34645,7 @@ begin
 end;
 
 procedure TLinter.DeclareVar(const Name: string; Line, Col: Integer;
-  IsParam, IsConst: Boolean);
+  IsParam, IsConst: Boolean; AIsFunction: Boolean = False);
 var
   Scope: TList;
   V, Existing: TLintVar;
@@ -34669,6 +34673,7 @@ begin
   V.Used := False;
   V.IsParam := IsParam;
   V.IsConst := IsConst;
+  V.IsFunction := AIsFunction;
   Scope.Add(V);
 end;
 
@@ -34776,7 +34781,7 @@ begin
       PopScope;
     end;
     if Fn.Name <> '' then
-      DeclareVar(Fn.Name, Node.Line, Node.Col, False, False);
+      DeclareVar(Fn.Name, Node.Line, Node.Col, False, False, True);
   end
   else if Node is TClassDeclNode then
   begin
@@ -35087,6 +35092,10 @@ var
   LastCh: Char;
   LastW: string;
 begin
+  // Comment lines are "complete" — no continuation on next line
+  if (Length(L) >= 2) and (L[1] = '/') and (L[2] = '/') then
+    Exit(True);
+
   if L = '' then Exit(True);
   LastCh := L[Length(L)];
   if LastCh = ';' then Exit(True);
@@ -35098,6 +35107,139 @@ begin
      (LastW = 'except') or (LastW = 'finally') then
     Exit(True);
   Result := False;
+end;
+
+function NormalizeOperatorSpacing(const L: string): string;
+var
+  i, Len: Integer;
+  C, PrevC: Char;
+  InStr: Boolean;
+  Quote: Char;
+  InLine, InBlk: Boolean;
+  OpSet: set of Char;
+
+  function LastNonSpace(FromPos: Integer): Char;
+  var k: Integer;
+  begin
+    k := FromPos - 1;
+    while (k >= 1) and (L[k] = ' ') do Dec(k);
+    if k >= 1 then Result := L[k] else Result := #0;
+  end;
+
+  function IsCompoundAt(Idx: Integer): Boolean;
+  var a, b: Char;
+  begin
+    Result := False;
+    if (Idx < 1) or (Idx >= Len) then Exit;
+    a := L[Idx]; b := L[Idx + 1];
+    Result := ((a = ':') and (b = '=')) or
+              ((a = '<') and ((b = '=') or (b = '>'))) or
+              ((a = '>') and (b = '=')) or
+              ((a = '=') and (b = '=')) or
+              ((a = '!') and (b = '=')) or
+              ((a = '+') and (b = '=')) or
+              ((a = '-') and (b = '=')) or
+              ((a = '*') and (b = '=')) or
+              ((a = '/') and (b = '=')) or
+              ((a = '%') and (b = '='));
+  end;
+
+  procedure StripTrailingSpaces;
+  begin
+    while (Length(Result) > 0) and (Result[Length(Result)] = ' ') do
+      SetLength(Result, Length(Result) - 1);
+  end;
+
+begin
+  Result := '';
+  Len := Length(L);
+  if Len = 0 then Exit;
+  OpSet := ['+', '-', '*', '/', '%', '<', '>', '=', '!'];
+  InStr := False; Quote := #0;
+  InLine := False; InBlk := False;
+
+  i := 1;
+  while i <= Len do
+  begin
+    C := L[i];
+
+    if InStr then
+    begin
+      Result := Result + C;
+      if (C = Quote) and ((i = 1) or (L[i - 1] <> '\')) then
+        InStr := False;
+      Inc(i); Continue;
+    end;
+
+    if InLine then
+    begin
+      Result := Result + C;
+      Inc(i); Continue;
+    end;
+
+    if InBlk then
+    begin
+      Result := Result + C;
+      if (C = '*') and (i < Len) and (L[i + 1] = '/') then
+      begin
+        Result := Result + '/'; Inc(i, 2); InBlk := False; Continue;
+      end;
+      Inc(i); Continue;
+    end;
+
+    if (C = '"') or (C = #39) then
+    begin
+      InStr := True; Quote := C;
+      Result := Result + C; Inc(i); Continue;
+    end;
+
+    if (C = '/') and (i < Len) and (L[i + 1] = '/') then
+    begin
+      InLine := True;
+      Result := Result + '//'; Inc(i, 2); Continue;
+    end;
+
+    if (C = '/') and (i < Len) and (L[i + 1] = '*') then
+    begin
+      InBlk := True;
+      Result := Result + '/*'; Inc(i, 2); Continue;
+    end;
+
+    if IsCompoundAt(i) then
+    begin
+      StripTrailingSpaces;
+      if Length(Result) > 0 then Result := Result + ' ';
+      Result := Result + C + L[i + 1];
+      Inc(i, 2);
+      while (i <= Len) and (L[i] = ' ') do Inc(i);
+      if i <= Len then Result := Result + ' ';
+      Continue;
+    end;
+
+    if C in OpSet then
+    begin
+      if C in ['+', '-'] then
+      begin
+        PrevC := LastNonSpace(i);
+        if (PrevC = #0) or (PrevC in ['(', '[', '{', ',', ';', ':',
+             '=', '<', '>', '!', '+', '-', '*', '/', '%']) then
+        begin
+          Result := Result + C; Inc(i); Continue;
+        end;
+      end;
+
+      StripTrailingSpaces;
+      if Length(Result) > 0 then Result := Result + ' ';
+      Result := Result + C;
+      Inc(i);
+      while (i <= Len) and (L[i] = ' ') do Inc(i);
+      if i <= Len then Result := Result + ' ';
+      Continue;
+    end;
+
+    Result := Result + C;
+    Inc(i);
+  end;
 end;
 
 function FormatPascakSource(const Source: string): string;
@@ -35165,6 +35307,7 @@ begin
       end;
       PrevBlank := False;
 
+      Trimmed := NormalizeOperatorSpacing(Trimmed);
       LowerTrimmed := LowerCase(Trimmed);
       FirstWord := FmtExtractFirstWord(Trimmed);
       LastWord := FmtExtractLastWord(Trimmed);
