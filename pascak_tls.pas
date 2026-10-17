@@ -112,6 +112,11 @@ type
   function TLSConnect(Ctx: TTLSContext; SockFd: Integer;
     const ServerName: string;
     out Conn: TTLSConnection): Boolean;
+
+  // ALPN variant -- offer protocol list (e.g. ['h2', 'http/1.1'])
+  function TLSConnectALPN(Ctx: TTLSContext; SockFd: Integer;
+    const ServerName: string; const Protocols: array of string;
+    out Conn: TTLSConnection; out Negotiated: string): Boolean;
   
   // Kirim data terenkripsi. Return byte terkirim, atau -1 error.
   function TLSSend(Conn: TTLSConnection; const Data: RawByteString): Integer;
@@ -169,6 +174,8 @@ type
   TERR_error_string_n = procedure(e: Cardinal; buf: PAnsiChar; len: NativeUInt); cdecl;
   
   TSSL_set1_host = function(ssl: Pointer; hostname: PAnsiChar): Integer; cdecl;
+  TSSL_set_alpn_protos = function(ssl: Pointer; protos: PByte; protos_len: Cardinal): Integer; cdecl;
+  TSSL_get0_alpn_selected = procedure(ssl: Pointer; out data: PByte; out len: Cardinal); cdecl;
   
   TSSL_CTX_use_certificate_chain_file = function(ctx: Pointer; filepath: PAnsiChar): Integer; cdecl;
   TSSL_CTX_use_PrivateKey_file = function(ctx: Pointer; filepath: PAnsiChar; t: Integer): Integer; cdecl;
@@ -215,6 +222,8 @@ var
   fp_OpenSSL_version: TOpenSSL_version;
 
   fp_SSL_set1_host: TSSL_set1_host;
+  fp_SSL_set_alpn_protos: TSSL_set_alpn_protos = nil;
+  fp_SSL_get0_alpn_selected: TSSL_get0_alpn_selected = nil;
   fp_SSL_ctrl: TSSL_ctrl;
   fp_SSL_CTX_load_verify_locations: TSSL_CTX_load_verify_locations = nil;
   fp_OPENSSL_init_ssl: TOPENSSL_init_ssl;
@@ -326,6 +335,8 @@ begin
 
     // ─── ✅ T-2a: binding baru ───
     Pointer(fp_SSL_set1_host) := LoadSymbol(GLibSSL, 'SSL_set1_host');
+    Pointer(fp_SSL_set_alpn_protos) := LoadSymbol(GLibSSL, 'SSL_set_alpn_protos');
+    Pointer(fp_SSL_get0_alpn_selected) := LoadSymbol(GLibSSL, 'SSL_get0_alpn_selected');
     Pointer(fp_SSL_ctrl) := LoadSymbol(GLibSSL, 'SSL_ctrl');   // ← tambah
     Pointer(fp_SSL_CTX_load_verify_locations) := LoadSymbol(GLibSSL, 'SSL_CTX_load_verify_locations');
     Pointer(fp_OPENSSL_init_ssl) := LoadSymbol(GLibSSL, 'OPENSSL_init_ssl');
@@ -1118,6 +1129,130 @@ begin
   // Handshake belum dijalankan — caller harus drive via
   // TLSNonBlockingHandshake berulang.
   Conn.HandshakeDone := False;
+  Result := True;
+end;
+
+{ ================================================================
+  ALPN (Application-Layer Protocol Negotiation, RFC 7301)
+  ================================================================ }
+
+function BuildALPNWireFormat(const Protocols: array of string): RawByteString;
+var
+  i: Integer;
+  P: RawByteString;
+begin
+  Result := '';
+  for i := 0 to High(Protocols) do
+  begin
+    P := RawByteString(Protocols[i]);
+    if (Length(P) < 1) or (Length(P) > 255) then
+      raise ETLSException.CreateFmt(
+        'ALPN: protocol length must be 1..255, got %d',
+        [Length(P)]);
+    Result := Result + Char(Byte(Length(P))) + P;
+  end;
+end;
+
+function TLSConnectALPN(Ctx: TTLSContext; SockFd: Integer;
+  const ServerName: string; const Protocols: array of string;
+  out Conn: TTLSConnection; out Negotiated: string): Boolean;
+var
+  R, VerifyResult: Integer;
+  SNI: AnsiString;
+  Wire: RawByteString;
+  DataPtr: PByte;
+  DataLen: Cardinal;
+begin
+  Result := False;
+  Negotiated := '';
+
+  Conn := TTLSConnection.Create(Ctx, SockFd);
+
+  if not Assigned(Ctx) or (Ctx.CtxPtr = nil) then
+  begin
+    Conn.LastError := 'TLS context invalid';
+    Exit;
+  end;
+
+  if (Length(Protocols) > 0) and not Assigned(fp_SSL_set_alpn_protos) then
+  begin
+    Conn.LastError := 'ALPN: SSL_set_alpn_protos tidak ter-bind';
+    Exit;
+  end;
+
+  Conn.SSLPtr := fp_SSL_new(Ctx.CtxPtr);
+  if Conn.SSLPtr = nil then
+  begin
+    Conn.LastError := 'SSL_new failed: ' + TLSLastError;
+    Exit;
+  end;
+
+  if fp_SSL_set_fd(Conn.SSLPtr, SockFd) <> 1 then
+  begin
+    Conn.LastError := 'SSL_set_fd failed';
+    Exit;
+  end;
+
+  if Length(Protocols) > 0 then
+  begin
+    Wire := BuildALPNWireFormat(Protocols);
+    if fp_SSL_set_alpn_protos(Conn.SSLPtr, @Wire[1], Cardinal(Length(Wire))) <> 0 then
+    begin
+      Conn.LastError := 'ALPN: SSL_set_alpn_protos failed';
+      Exit;
+    end;
+  end;
+
+  if ServerName <> '' then
+  begin
+    SNI := AnsiString(ServerName);
+    if Assigned(fp_SSL_set_tlsext_host_name) then
+      fp_SSL_set_tlsext_host_name(Conn.SSLPtr, PAnsiChar(SNI))
+    else if Assigned(fp_SSL_ctrl) then
+      fp_SSL_ctrl(Conn.SSLPtr, 55, 0, PAnsiChar(SNI));
+  end;
+
+  if Ctx.VerifyPeer and (ServerName <> '') and Assigned(fp_SSL_set1_host) then
+  begin
+    SNI := AnsiString(ServerName);
+    if fp_SSL_set1_host(Conn.SSLPtr, PAnsiChar(SNI)) <> 1 then
+    begin
+      Conn.LastError := 'SSL_set1_host failed untuk ' + ServerName;
+      Exit;
+    end;
+  end;
+
+  R := fp_SSL_connect(Conn.SSLPtr);
+  if R <> 1 then
+  begin
+    Conn.LastError := 'SSL_connect failed (ret=' + IntToStr(R) + '): ' + TLSLastError;
+    Exit;
+  end;
+
+  if Ctx.VerifyPeer and (ServerName <> '') and Assigned(fp_SSL_get_verify_result) then
+  begin
+    VerifyResult := fp_SSL_get_verify_result(Conn.SSLPtr);
+    if VerifyResult <> 0 then
+    begin
+      Conn.LastError := Format('Certificate verify failed (code=%d, %s)',
+                               [VerifyResult, TLSVerifyErrorString(VerifyResult)]);
+      Exit;
+    end;
+  end;
+
+  if Assigned(fp_SSL_get0_alpn_selected) then
+  begin
+    DataPtr := nil;
+    DataLen := 0;
+    fp_SSL_get0_alpn_selected(Conn.SSLPtr, DataPtr, DataLen);
+    if (DataPtr <> nil) and (DataLen > 0) then
+    begin
+      SetLength(Negotiated, DataLen);
+      Move(DataPtr^, Negotiated[1], DataLen);
+    end;
+  end;
+
+  Conn.HandshakeDone := True;
   Result := True;
 end;
 
