@@ -36,6 +36,19 @@ type
     property CurrentSize: Integer read FDynamicSize;
   end;
 
+  THPACKEncoder = class
+  public
+    function Encode(const Headers: THPACKHeaderArray): RawByteString;
+  end;
+
+function H2HPACKEncodeInteger(Value: Cardinal; PrefixBits: Byte;
+  PatternBits: Byte): RawByteString;
+
+function H2HPACKEncodeString(const S: RawByteString): RawByteString;
+
+function H2HPACKStaticExactMatch(const Name, Value: string): Integer;
+function H2HPACKStaticNameMatch(const Name: string): Integer;
+
 function H2HPACKDecodeInteger(const Data: RawByteString;
   var Offset: Integer; PrefixBits: Byte; out Value: Cardinal): Boolean;
 
@@ -405,5 +418,112 @@ begin
   end;
 end;
 
+
+{ ═══════════════════════════════════════════════════════════════
+  HPACK Encoder (Step 1.3c)
+  ═══════════════════════════════════════════════════════════════ }
+
+function H2HPACKEncodeInteger(Value: Cardinal; PrefixBits: Byte;
+  PatternBits: Byte): RawByteString;
+var
+  Mask: Byte;
+  V: Cardinal;
+  Cont: Byte;
+begin
+  if PrefixBits = 8 then
+    Mask := $FF
+  else
+    Mask := Byte((1 shl PrefixBits) - 1);
+
+  SetLength(Result, 0);
+  if Value < Cardinal(Mask) then
+  begin
+    SetLength(Result, 1);
+    Result[1] := Char(PatternBits or Byte(Value));
+    Exit;
+  end;
+
+  SetLength(Result, 1);
+  Result[1] := Char(PatternBits or Mask);
+  V := Value - Mask;
+  while V >= 128 do
+  begin
+    Cont := Byte((V and $7F) or $80);
+    SetLength(Result, Length(Result) + 1);
+    Result[Length(Result)] := Char(Cont);
+    V := V shr 7;
+  end;
+  SetLength(Result, Length(Result) + 1);
+  Result[Length(Result)] := Char(Byte(V));
+end;
+
+function H2HPACKEncodeString(const S: RawByteString): RawByteString;
+var
+  LenEnc: RawByteString;
+begin
+  { v1: no Huffman (bit 7 = 0), length prefix 7 bits }
+  LenEnc := H2HPACKEncodeInteger(Length(S), 7, $00);
+  Result := LenEnc + S;
+end;
+
+function H2HPACKStaticExactMatch(const Name, Value: string): Integer;
+var
+  i: Integer;
+begin
+  for i := 1 to STATIC_TABLE_SIZE do
+    if (STATIC_NAMES[i] = Name) and (STATIC_VALUES[i] = Value) then
+      Exit(i);
+  Result := 0;
+end;
+
+function H2HPACKStaticNameMatch(const Name: string): Integer;
+var
+  i: Integer;
+begin
+  for i := 1 to STATIC_TABLE_SIZE do
+    if STATIC_NAMES[i] = Name then
+      Exit(i);
+  Result := 0;
+end;
+
+{ THPACKEncoder }
+
+function THPACKEncoder.Encode(const Headers: THPACKHeaderArray): RawByteString;
+var
+  i, ExactIdx, NameIdx: Integer;
+  H: THPACKHeader;
+  Encoded: RawByteString;
+begin
+  Result := '';
+  for i := 0 to High(Headers) do
+  begin
+    H := Headers[i];
+
+    { Try exact static match (Indexed Header Field) }
+    ExactIdx := H2HPACKStaticExactMatch(H.Name, H.Value);
+    if ExactIdx > 0 then
+    begin
+      Encoded := H2HPACKEncodeInteger(Cardinal(ExactIdx), 7, $80);
+      Result := Result + Encoded;
+      Continue;
+    end;
+
+    { Try name-only static match (Literal Without Indexing, indexed name) }
+    NameIdx := H2HPACKStaticNameMatch(H.Name);
+    if NameIdx > 0 then
+    begin
+      Encoded := H2HPACKEncodeInteger(Cardinal(NameIdx), 4, $00);
+      Encoded := Encoded + H2HPACKEncodeString(RawByteString(H.Value));
+      Result := Result + Encoded;
+      Continue;
+    end;
+
+    { Full literal (name + value both literal) }
+    Encoded := H2HPACKEncodeInteger(0, 4, $00);
+    Encoded := Encoded + H2HPACKEncodeString(RawByteString(H.Name));
+    Encoded := Encoded + H2HPACKEncodeString(RawByteString(H.Value));
+    Result := Result + Encoded;
+  end;
+end;
 initialization
 end.
