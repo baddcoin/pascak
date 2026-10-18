@@ -2075,6 +2075,9 @@ var //global
   GHTTPPoolMaxPerHost: Integer = 8;
   GHTTPPoolIdleMs: Integer = 30000;
 
+  // HTTP/2 Pooling (D.2b)
+  G_H2Pool: TH2Pool = nil;
+
   // Production Ops (A.4 metrics)
   GMetrics: TStringList = nil;
   GMetricsLock: TCriticalSection = nil;
@@ -28247,7 +28250,7 @@ end;
 // Main-thread: enqueue task ke worker pool
 function Native_HTTP_Get2(Args: TObjectList; CallEnv: TSymbolTable): TValue;
 var
-  URL, Host, Path, BodyStr, Rest: string;
+  URL, Host, Path, BodyStr, Rest, PoolKey: string;
   ExtraHeaders: THPACKHeaderArray;
   Port, Sock, ColonPos, SlashPos, SchemeEnd: Integer;
   Keys: TStringArray;
@@ -28259,6 +28262,8 @@ var
   H2: TH2Connection;
   Resp: TH2Response;
   ResultDict, HeadersDict: TDictValue;
+  PoolEntry: TH2PooledEntry;
+  GotFromPool: Boolean;
 begin
   if (Args.Count < 1) or (Args.Count > 3) or
      (TValue(Args[0]).DataType <> dtString) then
@@ -28330,48 +28335,72 @@ begin
     Host := Copy(Host, 1, ColonPos - 1);
   end;
 
-  if not NetConnect(Host, Port, 10000, Sock) then
-  begin
-    errMSG.callerror(145, 'http.get2: connect gagal - ' + NetLastError,
-                     errMSG.xrow, errMSG.xcol);
-    Exit(TValue.CreateNull);
-  end;
-
-  if not TLSInit then
-  begin
-    NetClose(Sock);
-    errMSG.callerror(144, 'http.get2: TLS tidak tersedia',
-                     errMSG.xrow, errMSG.xcol);
-    Exit(TValue.CreateNull);
-  end;
-
+  PoolKey := LowerCase(Host) + ':' + IntToStr(Port);
+  Sock := -1;
   Ctx := nil;
   TLSConn := nil;
   H2 := nil;
+  PoolEntry := nil;
+  GotFromPool := False;
+
+  if Assigned(G_H2Pool) then
+  begin
+    PoolEntry := G_H2Pool.Get(PoolKey);
+    if Assigned(PoolEntry) then
+    begin
+      H2 := PoolEntry.Conn;
+      TLSConn := PoolEntry.TLSConn;
+      Sock := PoolEntry.Sock;
+      PoolEntry.Conn := nil;
+      PoolEntry.TLSConn := nil;
+      PoolEntry.Sock := -1;
+      PoolEntry.Free;
+      PoolEntry := nil;
+      GotFromPool := True;
+    end;
+  end;
+
   try
-    Ctx := TTLSContext.Create(True);
-    if not TLSConnectALPN(Ctx, Sock, Host, ['h2'], TLSConn, Negotiated) then
+    if not GotFromPool then
     begin
-      errMSG.callerror(144,
-        'http.get2: TLS handshake gagal - ' + TLSConn.LastError,
-        errMSG.xrow, errMSG.xcol);
-      Exit(TValue.CreateNull);
-    end;
+      if not NetConnect(Host, Port, 10000, Sock) then
+      begin
+        errMSG.callerror(145, 'http.get2: connect gagal - ' + NetLastError,
+                         errMSG.xrow, errMSG.xcol);
+        Exit(TValue.CreateNull);
+      end;
 
-    if Negotiated <> 'h2' then
-    begin
-      errMSG.callerror(144,
-        'http.get2: server tidak support h2 (negotiated: ' + Negotiated + ')',
-        errMSG.xrow, errMSG.xcol);
-      Exit(TValue.CreateNull);
-    end;
+      if not TLSInit then
+      begin
+        errMSG.callerror(144, 'http.get2: TLS tidak tersedia',
+                         errMSG.xrow, errMSG.xcol);
+        Exit(TValue.CreateNull);
+      end;
 
-    H2 := TH2Connection.Create(TLSConn, Host);
-    if not H2.Open(10000) then
-    begin
-      errMSG.callerror(144, 'http.get2: H2 handshake gagal',
-                       errMSG.xrow, errMSG.xcol);
-      Exit(TValue.CreateNull);
+      Ctx := TTLSContext.Create(True);
+      if not TLSConnectALPN(Ctx, Sock, Host, ['h2'], TLSConn, Negotiated) then
+      begin
+        errMSG.callerror(144,
+          'http.get2: TLS handshake gagal - ' + TLSConn.LastError,
+          errMSG.xrow, errMSG.xcol);
+        Exit(TValue.CreateNull);
+      end;
+
+      if Negotiated <> 'h2' then
+      begin
+        errMSG.callerror(144,
+          'http.get2: server tidak support h2 (negotiated: ' + Negotiated + ')',
+          errMSG.xrow, errMSG.xcol);
+        Exit(TValue.CreateNull);
+      end;
+
+      H2 := TH2Connection.Create(TLSConn, Host);
+      if not H2.Open(10000) then
+      begin
+        errMSG.callerror(144, 'http.get2: H2 handshake gagal',
+                         errMSG.xrow, errMSG.xcol);
+        Exit(TValue.CreateNull);
+      end;
     end;
 
     Resp := H2.Request('GET', Path, ExtraHeaders, BodyStr, 30000);
@@ -28381,6 +28410,20 @@ begin
       errMSG.callerror(144, 'http.get2: request gagal - ' + Resp.Error,
                        errMSG.xrow, errMSG.xcol);
       Exit(TValue.CreateNull);
+    end;
+
+    if (not H2.Closed) and Assigned(G_H2Pool) then
+    begin
+      PoolEntry := TH2PooledEntry.Create;
+      PoolEntry.Key := PoolKey;
+      PoolEntry.Conn := H2;
+      PoolEntry.TLSConn := TLSConn;
+      PoolEntry.Sock := Sock;
+      H2 := nil;
+      TLSConn := nil;
+      Sock := -1;
+      G_H2Pool.Put(PoolEntry);
+      PoolEntry := nil;
     end;
 
     ResultDict := TDictValue.Create;
@@ -28415,8 +28458,64 @@ begin
       TLSConn.Free;
     end;
     if Assigned(Ctx) then Ctx.Free;
-    NetClose(Sock);
+    if Sock >= 0 then NetClose(Sock);
   end;
+end;
+
+
+function Native_HTTP_Get2PoolStats(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  D: TDictValue;
+begin
+  D := TDictValue.Create;
+  try
+    if Assigned(G_H2Pool) then
+    begin
+      D.SetValue('hits', TValue.CreateNum(G_H2Pool.GetHits));
+      D.SetValue('misses', TValue.CreateNum(G_H2Pool.GetMisses));
+      D.SetValue('idle', TValue.CreateNum(G_H2Pool.GetIdleCount));
+      D.SetValue('maxPerHost', TValue.CreateNum(G_H2Pool.MaxPerHost));
+      D.SetValue('idleMs', TValue.CreateNum(G_H2Pool.IdleMs));
+    end
+    else
+    begin
+      D.SetValue('hits', TValue.CreateNum(0));
+      D.SetValue('misses', TValue.CreateNum(0));
+      D.SetValue('idle', TValue.CreateNum(0));
+      D.SetValue('maxPerHost', TValue.CreateNum(0));
+      D.SetValue('idleMs', TValue.CreateNum(0));
+    end;
+    Result := TValue.CreateDict(D);
+  except
+    D.Free;
+    raise;
+  end;
+end;
+
+function Native_HTTP_Get2PoolConfig(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+begin
+  if (Args.Count < 1) or (Args.Count > 2) or
+     (TValue(Args[0]).DataType <> dtNumeric) then
+  begin
+    errMSG.callerror(139, 'http.get2PoolConfig(maxPerHost, [idleMs])',
+                     errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateBool(False));
+  end;
+
+  if Assigned(G_H2Pool) then
+  begin
+    G_H2Pool.MaxPerHost := Trunc(TValue(Args[0]).NumVal);
+    if (Args.Count = 2) and (TValue(Args[1]).DataType = dtNumeric) then
+      G_H2Pool.IdleMs := Trunc(TValue(Args[1]).NumVal);
+  end;
+  Result := TValue.CreateBool(True);
+end;
+
+function Native_HTTP_Get2PoolClear(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+begin
+  if Assigned(G_H2Pool) then
+    G_H2Pool.Clear;
+  Result := TValue.CreateBool(True);
 end;
 
 function Native_HTTP_GetAsync(Args: TObjectList; CallEnv: TSymbolTable): TValue;
@@ -36699,6 +36798,9 @@ begin
   HTTPDef.Methods.Add('request', TVMFunction.Create);
   HTTPDef.Methods.Add('get', TVMFunction.Create);
   HTTPDef.Methods.Add('get2', TVMFunction.Create);
+  HTTPDef.Methods.Add('get2PoolStats', TVMFunction.Create);
+  HTTPDef.Methods.Add('get2PoolConfig', TVMFunction.Create);
+  HTTPDef.Methods.Add('get2PoolClear', TVMFunction.Create);
   HTTPDef.Methods.Add('post', TVMFunction.Create);
   HTTPDef.Methods.Add('getAsync', TVMFunction.Create);
   HTTPDef.Methods.Add('serveTLS', TVMFunction.Create);
@@ -36718,6 +36820,9 @@ begin
   HTTPInst.Members.DefineVar('traceRequests', TValue.CreateNative(@Native_HTTP_TraceRequests));
   HTTPInst.Members.DefineVar('get', TValue.CreateNative(@Native_HTTP_Get));
   HTTPInst.Members.DefineVar('get2', TValue.CreateNative(@Native_HTTP_Get2));
+  HTTPInst.Members.DefineVar('get2PoolStats', TValue.CreateNative(@Native_HTTP_Get2PoolStats));
+  HTTPInst.Members.DefineVar('get2PoolConfig', TValue.CreateNative(@Native_HTTP_Get2PoolConfig));
+  HTTPInst.Members.DefineVar('get2PoolClear', TValue.CreateNative(@Native_HTTP_Get2PoolClear));
   HTTPInst.Members.DefineVar('post', TValue.CreateNative(@Native_HTTP_Post));
   HTTPInst.Members.DefineVar('getAsync',TValue.CreateNative(@Native_HTTP_GetAsync));
   HTTPInst.Members.DefineVar('serveTLS',TValue.CreateNative(@Native_HTTP_ServeTLS));
@@ -40638,6 +40743,7 @@ begin
   GCoTaskLock := TCriticalSection.Create;  
   GHTTPPool := TList.Create;
   GHTTPPoolLock := TCriticalSection.Create;
+  G_H2Pool := TH2Pool.Create(8, 30000);
   GMetrics := TStringList.Create;
   GMetrics.Sorted := True;
   GMetrics.Duplicates := dupIgnore;
@@ -40966,7 +41072,13 @@ begin
       end;    
       
       try
-        HTTPPoolClearAll;
+        if Assigned(G_H2Pool) then
+    begin
+      G_H2Pool.Clear;
+      G_H2Pool.Free;
+      G_H2Pool := nil;
+    end;
+    HTTPPoolClearAll;
       except
       end;
 

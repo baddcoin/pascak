@@ -8,8 +8,8 @@ unit pascak_h2_conn;
 interface
 
 uses
-  SysUtils,
-  pascak_tls, pascak_h2, pascak_h2_hpack;
+  Classes, SyncObjs, SysUtils,
+  pascak_tls, pascak_h2, pascak_h2_hpack, pascak_net;
 
 type
   EH2ConnectionError = class(Exception);
@@ -31,6 +31,7 @@ type
     FRecvBuf: RawByteString;
     FStreamWindow: Cardinal;
     FClosed: Boolean;
+    FNextStreamID: Cardinal;
 
     function SendFrame(const Frame: RawByteString): Boolean;
     function RecvRaw(TimeoutMs: Integer): Integer;
@@ -49,6 +50,40 @@ type
     property Closed: Boolean read FClosed;
   end;
 
+  TH2PooledEntry = class
+  public
+    Key: string;
+    Conn: TH2Connection;
+    TLSConn: TTLSConnection;
+    Sock: Integer;
+    LastUsed: QWord;
+    destructor Destroy; override;
+  end;
+
+  TH2Pool = class
+  private
+    FEntries: TList;
+    FLock: TCriticalSection;
+    FMaxPerHost: Integer;
+    FIdleMs: Integer;
+    FHits: Int64;
+    FMisses: Int64;
+    procedure CleanupLocked;
+    function CountForKey(const Key: string): Integer;
+  public
+    constructor Create(AMaxPerHost: Integer = 8; AIdleMs: Integer = 30000);
+    destructor Destroy; override;
+    function Get(const Key: string): TH2PooledEntry;
+    function Put(E: TH2PooledEntry): Boolean;
+    procedure Cleanup;
+    procedure Clear;
+    function GetHits: Int64;
+    function GetMisses: Int64;
+    function GetIdleCount: Integer;
+    property MaxPerHost: Integer read FMaxPerHost write FMaxPerHost;
+    property IdleMs: Integer read FIdleMs write FIdleMs;
+  end;
+
 implementation
 
 constructor TH2Connection.Create(ATLS: TTLSConnection; const AHost: string);
@@ -61,6 +96,7 @@ begin
   FRecvBuf := '';
   FStreamWindow := 1048576;
   FClosed := False;
+  FNextStreamID := 1;
 end;
 
 destructor TH2Connection.Destroy;
@@ -207,6 +243,7 @@ var
   Hdrs: THPACKHeaderArray;
   StatusCode: Integer;
   Start: QWord;
+  CurrentStreamID: Cardinal;
 
   procedure Fail(const Msg: string);
   begin
@@ -224,6 +261,9 @@ begin
   IsDone := False;
   StatusCode := 0;
 
+  CurrentStreamID := FNextStreamID;
+  Inc(FNextStreamID, 2);
+
   Total := 4 + Length(ExtraHeaders);
   SetLength(ReqHeaders, Total);
   ReqHeaders[0].Name := ':method';    ReqHeaders[0].Value := Method;
@@ -235,7 +275,7 @@ begin
 
   HeaderBlock := FEnc.Encode(ReqHeaders);
 
-  if not SendFrame(H2BuildHeaders(1, HeaderBlock, Length(Body) = 0, True)) then
+  if not SendFrame(H2BuildHeaders(CurrentStreamID, HeaderBlock, Length(Body) = 0, True)) then
   begin
     Fail('Send HEADERS failed');
     Exit;
@@ -243,7 +283,7 @@ begin
 
   if Length(Body) > 0 then
   begin
-    if not SendFrame(H2BuildData(1, Body, True)) then
+    if not SendFrame(H2BuildData(CurrentStreamID, Body, True)) then
     begin
       Fail('Send DATA failed');
       Exit;
@@ -284,7 +324,7 @@ begin
         ;
 
       H2_FRAME_HEADERS:
-        if Frame.StreamID = 1 then
+        if Frame.StreamID = CurrentStreamID then
         begin
           if not HeadersDecoded then
           begin
@@ -313,7 +353,7 @@ begin
         end;
 
       H2_FRAME_CONTINUATION:
-        if (Frame.StreamID = 1) and (not HeadersDecoded) then
+        if (Frame.StreamID = CurrentStreamID) and (not HeadersDecoded) then
         begin
           RespHeadersAccum := RespHeadersAccum + Frame.Payload;
           if (Frame.Flags and H2_FLAG_END_HEADERS) <> 0 then
@@ -336,17 +376,17 @@ begin
         end;
 
       H2_FRAME_DATA:
-        if Frame.StreamID = 1 then
+        if Frame.StreamID = CurrentStreamID then
         begin
           BodyAccum := BodyAccum + Frame.Payload;
           if Length(Frame.Payload) > 0 then
-            SendFrame(H2BuildWindowUpdate(1, Length(Frame.Payload)));
+            SendFrame(H2BuildWindowUpdate(CurrentStreamID, Length(Frame.Payload)));
           if (Frame.Flags and H2_FLAG_END_STREAM) <> 0 then
             GotEndStream := True;
         end;
 
       H2_FRAME_RST_STREAM:
-        if Frame.StreamID = 1 then
+        if Frame.StreamID = CurrentStreamID then
           Fail('Server sent RST_STREAM');
 
       H2_FRAME_GOAWAY:
@@ -372,6 +412,211 @@ begin
   end;
   FClosed := True;
 end;
+
+{ ═══════════════════════════════════════════════════════════════
+  TH2PooledEntry
+  ═══════════════════════════════════════════════════════════════ }
+
+destructor TH2PooledEntry.Destroy;
+begin
+  if Assigned(Conn) then
+  begin
+    try Conn.Close; except end;
+    try Conn.Free; except end;
+    Conn := nil;
+  end;
+  if Assigned(TLSConn) then
+  begin
+    try TLSClose(TLSConn); except end;
+    try TLSConn.Free; except end;
+    TLSConn := nil;
+  end;
+  if Sock >= 0 then
+  begin
+    try NetClose(Sock); except end;
+    Sock := -1;
+  end;
+  inherited;
+end;
+
+{ ═══════════════════════════════════════════════════════════════
+  TH2Pool
+  ═══════════════════════════════════════════════════════════════ }
+
+constructor TH2Pool.Create(AMaxPerHost: Integer; AIdleMs: Integer);
+begin
+  inherited Create;
+  FEntries := TList.Create;
+  FLock := TCriticalSection.Create;
+  FMaxPerHost := AMaxPerHost;
+  FIdleMs := AIdleMs;
+  FHits := 0;
+  FMisses := 0;
+end;
+
+destructor TH2Pool.Destroy;
+begin
+  Clear;
+  FEntries.Free;
+  FLock.Free;
+  inherited;
+end;
+
+procedure TH2Pool.CleanupLocked;
+var
+  i: Integer;
+  E: TH2PooledEntry;
+  NowTick: QWord;
+begin
+  NowTick := GetTickCount64;
+  i := FEntries.Count - 1;
+  while i >= 0 do
+  begin
+    E := TH2PooledEntry(FEntries[i]);
+    if (not Assigned(E.Conn)) or E.Conn.Closed or
+       ((NowTick - E.LastUsed) > QWord(FIdleMs)) then
+    begin
+      FEntries.Delete(i);
+      try E.Free; except end;
+    end;
+    Dec(i);
+  end;
+end;
+
+procedure TH2Pool.Cleanup;
+begin
+  FLock.Acquire;
+  try CleanupLocked;
+  finally FLock.Release;
+  end;
+end;
+
+function TH2Pool.CountForKey(const Key: string): Integer;
+var
+  i: Integer;
+begin
+  Result := 0;
+  for i := 0 to FEntries.Count - 1 do
+    if TH2PooledEntry(FEntries[i]).Key = Key then
+      Inc(Result);
+end;
+
+function TH2Pool.Get(const Key: string): TH2PooledEntry;
+var
+  i: Integer;
+  E: TH2PooledEntry;
+begin
+  Result := nil;
+  FLock.Acquire;
+  try
+    CleanupLocked;
+    for i := FEntries.Count - 1 downto 0 do
+    begin
+      E := TH2PooledEntry(FEntries[i]);
+      if E.Key = Key then
+      begin
+        Result := E;
+        FEntries.Delete(i);
+        Inc(FHits);
+        Exit;
+      end;
+    end;
+    Inc(FMisses);
+  finally FLock.Release;
+  end;
+end;
+
+function TH2Pool.Put(E: TH2PooledEntry): Boolean;
+var
+  i, SameKeyCount: Integer;
+  EvictIdx: Integer;
+  EvictTick: QWord;
+begin
+  Result := False;
+  if not Assigned(E) then Exit;
+
+  FLock.Acquire;
+  try
+    CleanupLocked;
+
+    if (not Assigned(E.Conn)) or E.Conn.Closed then
+    begin
+      try E.Free; except end;
+      Exit;
+    end;
+
+    // FIX: MaxPerHost=0 = pool disabled, reject entry
+    if FMaxPerHost <= 0 then
+    begin
+      try E.Free; except end;
+      Exit;
+    end;
+
+    SameKeyCount := CountForKey(E.Key);
+    if SameKeyCount >= FMaxPerHost then
+    begin
+      EvictIdx := -1;
+      EvictTick := High(QWord);
+      for i := 0 to FEntries.Count - 1 do
+      begin
+        if (TH2PooledEntry(FEntries[i]).Key = E.Key) and
+           (TH2PooledEntry(FEntries[i]).LastUsed < EvictTick) then
+        begin
+          EvictTick := TH2PooledEntry(FEntries[i]).LastUsed;
+          EvictIdx := i;
+        end;
+      end;
+      if EvictIdx >= 0 then
+      begin
+        try TH2PooledEntry(FEntries[EvictIdx]).Free; except end;
+        FEntries.Delete(EvictIdx);
+      end;
+    end;
+
+    E.LastUsed := GetTickCount64;
+    FEntries.Add(E);
+    Result := True;
+  finally FLock.Release;
+  end;
+end;
+
+procedure TH2Pool.Clear;
+var
+  i: Integer;
+begin
+  FLock.Acquire;
+  try
+    for i := 0 to FEntries.Count - 1 do
+      try TH2PooledEntry(FEntries[i]).Free; except end;
+    FEntries.Clear;
+  finally FLock.Release;
+  end;
+end;
+
+function TH2Pool.GetHits: Int64;
+begin
+  FLock.Acquire;
+  try Result := FHits;
+  finally FLock.Release;
+  end;
+end;
+
+function TH2Pool.GetMisses: Int64;
+begin
+  FLock.Acquire;
+  try Result := FMisses;
+  finally FLock.Release;
+  end;
+end;
+
+function TH2Pool.GetIdleCount: Integer;
+begin
+  FLock.Acquire;
+  try Result := FEntries.Count;
+  finally FLock.Release;
+  end;
+end;
+
 
 initialization
 end.
