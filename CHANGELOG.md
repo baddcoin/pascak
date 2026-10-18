@@ -9,6 +9,28 @@ Versi mengikuti [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **B.7b Session 1** — engine extraction to `pascak_engine.inc`
+  (42,386 lines). Binary identical 2,940,840 bytes. Zero behavioral
+  change verified (LSP 6/6 + full suite 30/30 PASS).
+- **B.7b Session 2** — `pascak_engine.inc` converted to proper
+  `pascak_engine.pas` unit (42,672 lines). Exposes `ExecuteEngine()`
+  and `TPascakResult` to host Pascal code via `uses pascak_engine`.
+  Binary identical 2,940,840 bytes (pre-patch). Full verification:
+  LSP 6/6, full suite 30/30 PASS.
+- **B.7b Session 2b** — persistent engine singleton fix:
+  - `ExecuteEngine()` bug fixed: 2nd+ call AV'd due to arena
+    freelist corruption when engine was freed per call.
+  - Fix: `GEmbedEngine` singleton + `GEmbedLock` critical section.
+  - `ShutdownEngine()` exposed for explicit release (also called
+    at `finalization`).
+  - Host verification: 5/5 tests PASS (numeric/string/boolean/null/
+    multi-call 10×).
+  - See `examples/embed_inproc.pas` for canonical template.
+  - Binary size 2,944,952 bytes (was 2,940,840 — added ~4KB for
+    singleton + finalization code).
+
+
 ### Planned
 - Register-based VM (tier-2 JIT)
 - Concurrent GC
