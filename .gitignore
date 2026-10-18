@@ -139,3 +139,11 @@ test/ws_echo.pas
 # ── Embed demo binary ──
 /embed_demo
 /embed_demo.o
+
+# ═══════════════════════════════════════════════════════════════
+#  VSCode extension
+# ═══════════════════════════════════════════════════════════════
+vscode/node_modules/
+vscode/*.vsix
+vscode/*.vsix.sig
+vscode/package-lock.json.bak

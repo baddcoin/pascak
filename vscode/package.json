@@ -1,12 +1,12 @@
 {
   "name": "pascak",
   "displayName": "Pascak",
-  "description": "Pascak scripting language support (syntax highlighting)",
+  "description": "Pascak scripting language support (syntax highlighting + LSP: diagnostics, hover, completion, go-to-definition)",
   "version": "0.1.0",
   "publisher": "pascak",
   "license": "MIT",
   "engines": {
-    "vscode": "^1.60.0"
+    "vscode": "^1.75.0"
   },
   "categories": [
     "Programming Languages"
@@ -37,6 +37,28 @@
         "scopeName": "source.pascak",
         "path": "./syntaxes/pascak.tmLanguage.json"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Pascak",
+      "properties": {
+        "pascak.serverPath": {
+          "type": "string",
+          "default": "pascak_noASTnet",
+          "description": "Path to the pascak_noASTnet binary (default: from PATH)"
+        },
+        "pascak.enableLSP": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable LSP features (diagnostics, completion, etc.)"
+        }
+      }
+    }
+  },
+  "main": "./extension.js",
+  "activationEvents": [
+    "onLanguage:pascak"
+  ],
+  "dependencies": {
+    "vscode-languageclient": "^9.0.0"
   }
 }
