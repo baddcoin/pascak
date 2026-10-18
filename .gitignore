@@ -147,3 +147,6 @@ vscode/node_modules/
 vscode/*.vsix
 vscode/*.vsix.sig
 vscode/package-lock.json.bak
+
+# B.7b refactor backups
+*.preb7b
