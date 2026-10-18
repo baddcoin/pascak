@@ -837,6 +837,8 @@ type
     procedure HandleDidChange(Params: TJSONObject);
     procedure HandleDidClose(Params: TJSONObject);
     procedure HandleHover(ReqId: TJSONData; Params: TJSONObject);
+    procedure HandleCompletion(ReqId: TJSONData; Params: TJSONObject);
+    procedure HandleDefinition(ReqId: TJSONData; Params: TJSONObject);
     procedure RunDiagnostics;
   public
     constructor Create;
@@ -41638,6 +41640,10 @@ begin
     HandleShutdown(ReqId)
   else if Method = 'textDocument/hover' then
     HandleHover(ReqId, Params)
+  else if Method = 'textDocument/completion' then
+    HandleCompletion(ReqId, Params)
+  else if Method = 'textDocument/definition' then
+    HandleDefinition(ReqId, Params)
   else if Method = 'textDocument/didOpen' then
     HandleDidOpen(Params)
   else if Method = 'textDocument/didChange' then
@@ -41663,6 +41669,8 @@ begin
       // textDocumentSync = 2 (Incremental)
       Caps.Add('textDocumentSync', 2);
       Caps.Add('hoverProvider', True);
+      Caps.Add('completionProvider', TJSONObject.Create(['triggerCharacters', TJSONArray.Create(['.', ':'])]));
+      Caps.Add('definitionProvider', True);
       ServerInfo := TJSONObject.Create;
       ServerInfo.Add('name', 'pascak-lsp');
       ServerInfo.Add('version', '0.1.0');
@@ -41933,6 +41941,329 @@ begin
     Result.Free;
   end;
 end;
+
+const
+  LSP_KEYWORDS: array[0..42] of string = (
+    'begin', 'end', 'var', 'const', 'function', 'class', 'record', 'new',
+    'if', 'then', 'else', 'while', 'do', 'for', 'to', 'downto', 'step',
+    'in', 'repeat', 'until', 'break', 'continue', 'return', 'try', 'catch',
+    'finally', 'true', 'false', 'null', 'nil', 'import', 'lambda', 'lock',
+    'yield', 'defer', 'case', 'of', 'throw', 'and', 'or', 'not', 'mod',
+    'self'
+  );
+
+  LSP_MODULES: array[0..11] of string = (
+    'sys', 'math', 'crypto', 'time', 'net', 'http',
+    'ws', 'fs', 'dll', 'tls', 'native', 'hardware'
+  );
+
+  LSP_BUILTINS: array[0..37] of string = (
+    'println', 'print', 'input', 'len', 'str',
+    'typeOf', 'toInteger', 'toFloat', 'toString', 'isInstance', 'isArray', 'isDict',
+    'push', 'pop', 'clear', 'sort', 'map', 'filter', 'reduce',
+    'join', 'split', 'indexOf', 'replace', 'upper', 'lower', 'trim',
+    'jsonParse', 'jsonStringify', 'jsonPath',
+    'fileRead', 'fileWrite', 'fileAppend', 'fileExists', 'fileDelete',
+    'eval', 'range', 'sleep',
+    'runtimeStats'
+  );
+
+function LspArrayContains(const Arr: array of string; const S: string): Boolean;
+var
+  I: Integer;
+begin
+  for I := 0 to High(Arr) do
+    if Arr[I] = S then Exit(True);
+  Result := False;
+end;
+
+procedure TLspServer.HandleCompletion(ReqId: TJSONData; Params: TJSONObject);
+var
+  Doc, PosObj, Result, Arr: TJSONObject;
+  ItemsArr: TJSONArray;
+  ItemObj: TJSONObject;
+  DocURI: string;
+  LineVal, CharVal, I: Integer;
+  Prefix, Kind: string;
+  Lex: TLexer;
+  Pars: TParser;
+  Root: TBlockNode;
+begin
+  if not Assigned(Params) then
+  begin
+    SendResponse(ReqId, nil);
+    Exit;
+  end;
+
+  Doc := TJSONObject(Params.Find('textDocument'));
+  PosObj := TJSONObject(Params.Find('position'));
+  DocURI := FDocumentURI;
+  if Assigned(Doc) then
+    DocURI := Doc.Get('uri', DocURI);
+  LineVal := 0; CharVal := 0;
+  if Assigned(PosObj) then
+  begin
+    LineVal := PosObj.Get('line', 0);
+    CharVal := PosObj.Get('character', 0);
+  end;
+
+  Prefix := LspExtractWordAtPos(FDocumentText, LineVal, CharVal);
+
+  ItemsArr := TJSONArray.Create;
+  try
+    // 1. Keywords
+    for I := 0 to High(LSP_KEYWORDS) do
+    begin
+      if (Prefix <> '') and
+         (Copy(LSP_KEYWORDS[I], 1, Length(Prefix)) <> Prefix) then Continue;
+      ItemObj := TJSONObject.Create;
+      ItemObj.Add('label', LSP_KEYWORDS[I]);
+      ItemObj.Add('kind', 14); // Keyword
+      ItemsArr.Add(ItemObj);
+    end;
+
+    // 2. Modules
+    for I := 0 to High(LSP_MODULES) do
+    begin
+      if (Prefix <> '') and
+         (Copy(LSP_MODULES[I], 1, Length(Prefix)) <> Prefix) then Continue;
+      ItemObj := TJSONObject.Create;
+      ItemObj.Add('label', LSP_MODULES[I]);
+      ItemObj.Add('kind', 9); // Module
+      ItemsArr.Add(ItemObj);
+    end;
+
+    // 3. Builtin functions
+    for I := 0 to High(LSP_BUILTINS) do
+    begin
+      if (Prefix <> '') and
+         (Copy(LSP_BUILTINS[I], 1, Length(Prefix)) <> Prefix) then Continue;
+      ItemObj := TJSONObject.Create;
+      ItemObj.Add('label', LSP_BUILTINS[I]);
+      ItemObj.Add('kind', 3); // Function
+      ItemsArr.Add(ItemObj);
+    end;
+
+    // 4. Local vars from current AST
+    try
+      Lex := TLexer.Create(FDocumentText);
+      Pars := TParser.Create(Lex);
+      Root := nil;
+      try
+        try
+          Root := Pars.ParseMainProgram;
+          if Assigned(Root) then
+          begin
+            // iterate top-level statements (var decl, function, class)
+            for I := 0 to TBlockNode(Root).Statements.Count - 1 do
+            begin
+              if TNode(TBlockNode(Root).Statements[I]) is TVarDeclNode then
+              begin
+                Kind := TVarDeclNode(TNode(TBlockNode(Root).Statements[I])).VarName;
+                if (Prefix = '') or (Copy(Kind, 1, Length(Prefix)) = Prefix) then
+                begin
+                  ItemObj := TJSONObject.Create;
+                  ItemObj.Add('label', Kind);
+                  ItemObj.Add('kind', 6); // Variable
+                  if TVarDeclNode(TNode(TBlockNode(Root).Statements[I])).IsConst then
+                    ItemObj.Add('detail', 'const')
+                  else
+                    ItemObj.Add('detail', 'var');
+                  ItemsArr.Add(ItemObj);
+                end;
+              end
+              else if TNode(TBlockNode(Root).Statements[I]) is TFunctionNode then
+              begin
+                Kind := TFunctionNode(TNode(TBlockNode(Root).Statements[I])).Name;
+                if (Kind = '') then Continue;
+                if (Prefix <> '') and (Copy(Kind, 1, Length(Prefix)) <> Prefix) then Continue;
+                ItemObj := TJSONObject.Create;
+                ItemObj.Add('label', Kind);
+                ItemObj.Add('kind', 3); // Function
+                ItemObj.Add('detail', 'function');
+                ItemsArr.Add(ItemObj);
+              end
+              else if TNode(TBlockNode(Root).Statements[I]) is TClassDeclNode then
+              begin
+                Kind := TClassDeclNode(TNode(TBlockNode(Root).Statements[I])).sClassName;
+                if (Prefix <> '') and (Copy(Kind, 1, Length(Prefix)) <> Prefix) then Continue;
+                ItemObj := TJSONObject.Create;
+                ItemObj.Add('label', Kind);
+                ItemObj.Add('kind', 7); // Class
+                ItemObj.Add('detail', 'class');
+                ItemsArr.Add(ItemObj);
+              end;
+            end;
+          end;
+        except
+        end;
+      finally
+        if Assigned(Root) then Root.Free;
+        if Assigned(Pars) then Pars.Free;
+        if Assigned(Lex) then Lex.Free;
+      end;
+    except
+    end;
+
+    Result := TJSONObject.Create;
+    try
+      Result.Add('isIncomplete', False);
+      Result.Add('items', ItemsArr);
+      SendResponse(ReqId, Result);
+    except
+      Result.Free;
+      raise;
+    end;
+  except
+    ItemsArr.Free;
+    raise;
+  end;
+end;
+
+
+function LspFindDeclLocation(Block: TBlockNode; const Word: string;
+  out DeclLine, DeclCol: Integer): Boolean;
+var
+  I: Integer;
+  Stmt: TNode;
+  Line, Col: Integer;
+begin
+  Result := False;
+  DeclLine := 0;
+  DeclCol := 0;
+  if not Assigned(Block) then Exit;
+
+  for I := 0 to Block.Statements.Count - 1 do
+  begin
+    Stmt := TNode(Block.Statements[I]);
+    if Stmt is TVarDeclNode then
+    begin
+      if TVarDeclNode(Stmt).VarName = Word then
+      begin
+        Line := TVarDeclNode(Stmt).Line;
+        Col := TVarDeclNode(Stmt).Col;
+        if Line > 0 then Dec(Line);
+        if Col > 0 then Dec(Col) else Col := 0;
+        DeclLine := Line;
+        DeclCol := Col;
+        Exit(True);
+      end;
+    end
+    else if Stmt is TFunctionNode then
+    begin
+      if TFunctionNode(Stmt).Name = Word then
+      begin
+        Line := TFunctionNode(Stmt).Line;
+        Col := TFunctionNode(Stmt).Col;
+        if Line > 0 then Dec(Line);
+        if Col > 0 then Dec(Col) else Col := 0;
+        DeclLine := Line;
+        DeclCol := Col;
+        Exit(True);
+      end;
+    end
+    else if Stmt is TClassDeclNode then
+    begin
+      if TClassDeclNode(Stmt).sClassName = Word then
+      begin
+        Line := TClassDeclNode(Stmt).Line;
+        Col := TClassDeclNode(Stmt).Col;
+        if Line > 0 then Dec(Line);
+        if Col > 0 then Dec(Col) else Col := 0;
+        DeclLine := Line;
+        DeclCol := Col;
+        Exit(True);
+      end;
+    end
+    else if Stmt is TBlockNode then
+    begin
+      if LspFindDeclLocation(TBlockNode(Stmt), Word, DeclLine, DeclCol) then
+        Exit(True);
+    end;
+  end;
+end;
+
+procedure TLspServer.HandleDefinition(ReqId: TJSONData; Params: TJSONObject);
+var
+  Doc, PosObj, Result, RangeObj, StartPos, EndPos: TJSONObject;
+  DocURI: string;
+  LineVal, CharVal, DeclLine, DeclCol: Integer;
+  Word: string;
+  Lex: TLexer;
+  Pars: TParser;
+  Root: TBlockNode;
+  Found: Boolean;
+begin
+  if not Assigned(Params) then
+  begin
+    SendResponse(ReqId, nil);
+    Exit;
+  end;
+
+  Doc := TJSONObject(Params.Find('textDocument'));
+  PosObj := TJSONObject(Params.Find('position'));
+  DocURI := FDocumentURI;
+  if Assigned(Doc) then
+    DocURI := Doc.Get('uri', DocURI);
+  LineVal := 0;
+  CharVal := 0;
+  if Assigned(PosObj) then
+  begin
+    LineVal := PosObj.Get('line', 0);
+    CharVal := PosObj.Get('character', 0);
+  end;
+
+  Word := LspExtractWordAtPos(FDocumentText, LineVal, CharVal);
+  if Word = '' then
+  begin
+    SendResponse(ReqId, nil);
+    Exit;
+  end;
+
+  Found := False;
+  DeclLine := 0;
+  DeclCol := 0;
+  Lex := nil; Pars := nil; Root := nil;
+  try
+    try
+      Lex := TLexer.Create(FDocumentText);
+      Pars := TParser.Create(Lex);
+      Root := Pars.ParseMainProgram;
+      if Assigned(Root) and (Root is TBlockNode) then
+        Found := LspFindDeclLocation(TBlockNode(Root), Word, DeclLine, DeclCol);
+    except
+    end;
+  finally
+    if Assigned(Root) then Root.Free;
+    if Assigned(Pars) then Pars.Free;
+    if Assigned(Lex) then Lex.Free;
+  end;
+
+  if not Found then
+  begin
+    SendResponse(ReqId, nil);
+    Exit;
+  end;
+
+  Result := TJSONObject.Create;
+  try
+    Result.Add('uri', DocURI);
+    RangeObj := TJSONObject.Create;
+    StartPos := TJSONObject.Create;
+    StartPos.Add('line', DeclLine);
+    StartPos.Add('character', DeclCol);
+    EndPos := TJSONObject.Create;
+    EndPos.Add('line', DeclLine);
+    EndPos.Add('character', DeclCol + Length(Word));
+    RangeObj.Add('start', StartPos);
+    RangeObj.Add('end', EndPos);
+    Result.Add('range', RangeObj);
+    SendResponse(ReqId, Result);
+  finally
+    Result.Free;
+  end;
+end;
+
 
 procedure TLspServer.RunDiagnostics;
 var
