@@ -811,6 +811,39 @@ type
     property IsPaused: Boolean read FIsPaused;
     property StepMode: TDebugStepMode read FStepMode write FStepMode;
   end;
+
+  { E.4 Phase 2a: LSP Server }
+  TLspServer = class
+  private
+    FInput: THandleStream;
+    FOutput: THandleStream;
+    FSequence: Integer;
+    FShutdownRequested: Boolean;
+    FExitRequested: Boolean;
+    FDocumentURI: string;
+    FDocumentText: string;
+    FLock: TCriticalSection;
+
+    function ReadMessage(out Msg: TJSONObject): Boolean;
+    procedure WriteMessage(const JSONStr: string);
+    procedure SendResponse(ReqId: TJSONData; Result: TJSONData);
+    procedure SendError(ReqId: TJSONData; ErrCode: Integer; const Msg: string);
+    procedure SendNotification(const Method: string; Params: TJSONObject);
+
+    procedure HandleRequest(const Method: string; ReqId: TJSONData; Params: TJSONObject);
+    procedure HandleInitialize(ReqId: TJSONData);
+    procedure HandleShutdown(ReqId: TJSONData);
+    procedure HandleDidOpen(Params: TJSONObject);
+    procedure HandleDidChange(Params: TJSONObject);
+    procedure HandleDidClose(Params: TJSONObject);
+    procedure HandleHover(ReqId: TJSONData; Params: TJSONObject);
+    procedure RunDiagnostics;
+  public
+    constructor Create;
+    destructor Destroy; override;
+    procedure Run;
+  end;
+
   
   TProfilerEntry = class
   public
@@ -41410,11 +41443,658 @@ end;
 
 
 // MAIN APP
+{ E.4 Phase 2a: LSP Server implementation }
+
+constructor TLspServer.Create;
+{$IFDEF WINDOWS}
+var
+  InHandle, OutHandle: THandle;
+{$ENDIF}
+begin
+  inherited Create;
+  {$IFDEF WINDOWS}
+  InHandle := GetStdHandle(STD_INPUT_HANDLE);
+  OutHandle := GetStdHandle(STD_OUTPUT_HANDLE);
+  if (InHandle <> INVALID_HANDLE_VALUE) and (InHandle <> 0) then
+    FInput := THandleStream.Create(InHandle);
+  if (OutHandle <> INVALID_HANDLE_VALUE) and (OutHandle <> 0) then
+    FOutput := THandleStream.Create(OutHandle);
+  {$ELSE}
+  FInput := THandleStream.Create(0);
+  FOutput := THandleStream.Create(1);
+  {$ENDIF}
+  FSequence := 0;
+  FShutdownRequested := False;
+  FExitRequested := False;
+  FDocumentURI := '';
+  FDocumentText := '';
+  FLock := TCriticalSection.Create;
+end;
+
+destructor TLspServer.Destroy;
+begin
+  if Assigned(FInput) then FInput.Free;
+  if Assigned(FOutput) then FOutput.Free;
+  if Assigned(FLock) then FLock.Free;
+  inherited;
+end;
+
+function TLspServer.ReadMessage(out Msg: TJSONObject): Boolean;
+var
+  Header, Content: string;
+  B: Byte;
+  ContentLen, P, LineEnd: Integer;
+  JSONData: TJSONData;
+begin
+  Result := False;
+  Msg := nil;
+  if not Assigned(FInput) then Exit;
+
+  Header := '';
+  ContentLen := 0;
+
+  try
+    while FInput.Read(B, 1) = 1 do
+    begin
+      Header := Header + Char(B);
+      if (Length(Header) >= 4) and
+         (Copy(Header, Length(Header) - 3, 4) = #13#10#13#10) then
+        Break;
+      if Length(Header) > 8192 then Exit;
+    end;
+  except
+    Exit;
+  end;
+
+  if Header = '' then Exit;
+
+  P := Pos('Content-Length:', Header);
+  if P = 0 then Exit;
+  Inc(P, Length('Content-Length:'));
+  LineEnd := P;
+  while (LineEnd <= Length(Header)) and
+        (Header[LineEnd] <> #13) and
+        (Header[LineEnd] <> #10) do
+    Inc(LineEnd);
+  ContentLen := StrToIntDef(Trim(Copy(Header, P, LineEnd - P)), 0);
+  if ContentLen <= 0 then Exit;
+
+  SetLength(Content, ContentLen);
+  try
+    if FInput.Read(Content[1], ContentLen) <> ContentLen then Exit;
+  except
+    Exit;
+  end;
+
+  JSONData := nil;
+  try
+    JSONData := GetJSON(Content);
+  except
+    Exit;
+  end;
+
+  if Assigned(JSONData) and (JSONData.JSONType = jtObject) then
+  begin
+    Msg := TJSONObject(JSONData);
+    Result := True;
+  end
+  else if Assigned(JSONData) then
+    JSONData.Free;
+end;
+
+procedure TLspServer.WriteMessage(const JSONStr: string);
+var
+  Header: string;
+begin
+  if not Assigned(FOutput) then Exit;
+  Header := Format('Content-Length: %d'#13#10#13#10, [Length(JSONStr)]);
+  FLock.Acquire;
+  try
+    try
+      FOutput.WriteBuffer(Header[1], Length(Header));
+      if JSONStr <> '' then
+        FOutput.WriteBuffer(JSONStr[1], Length(JSONStr));
+    except
+    end;
+  finally
+    FLock.Release;
+  end;
+end;
+
+procedure TLspServer.SendResponse(ReqId: TJSONData; Result: TJSONData);
+var
+  Root: TJSONObject;
+  J: string;
+begin
+  Inc(FSequence);
+  Root := TJSONObject.Create;
+  try
+    Root.Add('jsonrpc', '2.0');
+    if Assigned(ReqId) then
+      Root.Add('id', ReqId.Clone)
+    else
+      Root.Add('id', TJSONNull.Create);
+    if Assigned(Result) then
+      Root.Add('result', Result.Clone)
+    else
+      Root.Add('result', TJSONNull.Create);
+    J := Root.AsJSON;
+  finally
+    Root.Free;
+  end;
+  WriteMessage(J);
+end;
+
+procedure TLspServer.SendError(ReqId: TJSONData; ErrCode: Integer; const Msg: string);
+var
+  Root, ErrObj: TJSONObject;
+  J: string;
+begin
+  Inc(FSequence);
+  Root := TJSONObject.Create;
+  try
+    Root.Add('jsonrpc', '2.0');
+    if Assigned(ReqId) then
+      Root.Add('id', ReqId.Clone)
+    else
+      Root.Add('id', TJSONNull.Create);
+    ErrObj := TJSONObject.Create;
+    ErrObj.Add('code', ErrCode);
+    ErrObj.Add('message', Msg);
+    Root.Add('error', ErrObj);
+    J := Root.AsJSON;
+  finally
+    Root.Free;
+  end;
+  WriteMessage(J);
+end;
+
+procedure TLspServer.SendNotification(const Method: string; Params: TJSONObject);
+var
+  Root: TJSONObject;
+  J: string;
+begin
+  Inc(FSequence);
+  Root := TJSONObject.Create;
+  try
+    Root.Add('jsonrpc', '2.0');
+    Root.Add('method', Method);
+    if Assigned(Params) then
+      Root.Add('params', Params.Clone)
+    else
+      Root.Add('params', TJSONNull.Create);
+    J := Root.AsJSON;
+  finally
+    Root.Free;
+  end;
+  WriteMessage(J);
+end;
+
+procedure TLspServer.HandleRequest(const Method: string; ReqId: TJSONData; Params: TJSONObject);
+begin
+  if Method = 'initialize' then
+    HandleInitialize(ReqId)
+  else if Method = 'shutdown' then
+    HandleShutdown(ReqId)
+  else if Method = 'textDocument/hover' then
+    HandleHover(ReqId, Params)
+  else if Method = 'textDocument/didOpen' then
+    HandleDidOpen(Params)
+  else if Method = 'textDocument/didChange' then
+    HandleDidChange(Params)
+  else if Method = 'textDocument/didClose' then
+    HandleDidClose(Params)
+  else if Method = 'exit' then
+    FExitRequested := True
+  else if (Pos('$/cancelRequest', Method) <> 1) and Assigned(ReqId) then
+    SendError(ReqId, -32601, 'Method not found: ' + Method);
+  // notifications (ReqId=nil) — ignore if unknown
+end;
+
+procedure TLspServer.HandleInitialize(ReqId: TJSONData);
+var
+  Result, Caps, ServerInfo, SyncOpts: TJSONObject;
+  OffsetEnc: TJSONArray;
+begin
+  Result := TJSONObject.Create;
+  try
+    Caps := TJSONObject.Create;
+    try
+      // textDocumentSync = 2 (Incremental)
+      Caps.Add('textDocumentSync', 2);
+      Caps.Add('hoverProvider', True);
+      ServerInfo := TJSONObject.Create;
+      ServerInfo.Add('name', 'pascak-lsp');
+      ServerInfo.Add('version', '0.1.0');
+      Caps.Add('serverInfo', ServerInfo);
+    except
+      Caps.Free;
+      raise;
+    end;
+    Result.Add('capabilities', Caps);
+
+    SyncOpts := TJSONObject.Create;
+    SyncOpts.Add('openClose', True);
+    SyncOpts.Add('change', 2);
+    Result.Add('textDocumentSyncOptions', SyncOpts);
+
+    OffsetEnc := TJSONArray.Create;
+    OffsetEnc.Add('utf-16');
+    Result.Add('positionEncoding', OffsetEnc);
+
+    SendResponse(ReqId, Result);
+  finally
+    Result.Free;
+  end;
+end;
+
+procedure TLspServer.HandleShutdown(ReqId: TJSONData);
+begin
+  FShutdownRequested := True;
+  SendResponse(ReqId, nil);
+end;
+
+procedure TLspServer.HandleDidOpen(Params: TJSONObject);
+var
+  Doc: TJSONData;
+  URI, Text: string;
+begin
+  if not Assigned(Params) then Exit;
+  Doc := Params.Find('textDocument');
+  if not Assigned(Doc) or (Doc.JSONType <> jtObject) then Exit;
+
+  URI := TJSONObject(Doc).Get('uri', '');
+  Text := TJSONObject(Doc).Get('text', '');
+  FDocumentURI := URI;
+  FDocumentText := Text;
+  WriteLn(ErrOutput, '[lsp-open] URI=', URI, ' textlen=', Length(Text)); Flush(ErrOutput);
+  RunDiagnostics;
+end;
+
+procedure TLspServer.HandleDidChange(Params: TJSONObject);
+var
+  Doc, Changes: TJSONData;
+  ChangesArr: TJSONArray;
+  ChangeObj: TJSONObject;
+  I: Integer;
+begin
+  if not Assigned(Params) then Exit;
+  Doc := Params.Find('textDocument');
+  if Assigned(Doc) and (Doc.JSONType = jtObject) then
+    FDocumentURI := TJSONObject(Doc).Get('uri', FDocumentURI);
+
+  Changes := Params.Find('contentChanges');
+  if not Assigned(Changes) or (Changes.JSONType <> jtArray) then Exit;
+
+  ChangesArr := TJSONArray(Changes);
+  for I := 0 to ChangesArr.Count - 1 do
+  begin
+    if ChangesArr.Items[I].JSONType = jtObject then
+    begin
+      ChangeObj := TJSONObject(ChangesArr.Items[I]);
+      FDocumentText := ChangeObj.Get('text', FDocumentText);
+    end;
+  end;
+  RunDiagnostics;
+end;
+
+procedure TLspServer.HandleDidClose(Params: TJSONObject);
+var
+  URI: string;
+  N, P, DiagsArr: TJSONObject;
+begin
+  URI := FDocumentURI;
+  N := TJSONObject.Create;
+  try
+    N.Add('uri', URI);
+    DiagsArr := TJSONObject.Create;
+    DiagsArr.Add('diagnostics', TJSONArray.Create);
+    N.Add('diagnostics', TJSONArray.Create);
+  except
+    N.Free;
+    raise;
+  end;
+  // Build proper notification params: {uri, diagnostics: []}
+  P := TJSONObject.Create;
+  try
+    P.Add('uri', URI);
+    P.Add('diagnostics', TJSONArray.Create);
+    SendNotification('textDocument/publishDiagnostics', P);
+  finally
+    P.Free;
+    N.Free;
+  end;
+  FDocumentURI := '';
+  FDocumentText := '';
+end;
+
+function LspExtractWordAtPos(const Text: string; Line, Character: Integer): string;
+var
+  Lines: TStringArray;
+  TargetLine: string;
+  I, LineLen, StartIdx, EndIdx: Integer;
+begin
+  Result := '';
+  Lines := Text.Split([#10]);
+  if (Line < 0) or (Line >= Length(Lines)) then Exit;
+  TargetLine := Lines[Line];
+  // strip \r
+  if (Length(TargetLine) > 0) and (TargetLine[Length(TargetLine)] = #13) then
+    SetLength(TargetLine, Length(TargetLine) - 1);
+  LineLen := Length(TargetLine);
+  if LineLen = 0 then Exit;
+  if Character < 0 then Character := 0;
+  if Character >= LineLen then Character := LineLen - 1;
+
+  // expand from character pos to word boundary
+  StartIdx := Character;
+  while (StartIdx > 0) and
+        (TargetLine[StartIdx] in ['a'..'z','A'..'Z','0'..'9','_']) do
+    Dec(StartIdx);
+  if not (TargetLine[StartIdx + 1] in ['a'..'z','A'..'Z','0'..'9','_']) then
+    if StartIdx + 1 <= LineLen then StartIdx := StartIdx + 1;
+  EndIdx := Character;
+  while (EndIdx + 1 <= LineLen) and
+        (TargetLine[EndIdx + 1] in ['a'..'z','A'..'Z','0'..'9','_']) do
+    Inc(EndIdx);
+  if EndIdx >= StartIdx then
+    Result := Copy(TargetLine, StartIdx + 1, EndIdx - StartIdx);
+end;
+
+function LspFindVarInBlock(Block: TBlockNode; const Word: string): string;
+var
+  I: Integer;
+  Stmt: TNode;
+begin
+  Result := '';
+  if not Assigned(Block) then Exit;
+  for I := 0 to Block.Statements.Count - 1 do
+  begin
+    Stmt := TNode(Block.Statements[I]);
+    if Stmt is TVarDeclNode then
+    begin
+      if TVarDeclNode(Stmt).VarName = Word then
+      begin
+        if TVarDeclNode(Stmt).IsConst then Exit('const')
+        else Exit('variable');
+      end;
+    end
+    else if Stmt is TFunctionNode then
+    begin
+      if TFunctionNode(Stmt).Name = Word then Exit('function');
+    end
+    else if Stmt is TClassDeclNode then
+    begin
+      if TClassDeclNode(Stmt).sClassName = Word then Exit('class');
+    end
+    else if Stmt is TBlockNode then
+    begin
+      Result := LspFindVarInBlock(TBlockNode(Stmt), Word);
+      if Result <> '' then Exit;
+    end;
+  end;
+end;
+
+procedure TLspServer.HandleHover(ReqId: TJSONData; Params: TJSONObject);
+var
+  Doc, PosObj, Result, Contents: TJSONObject;
+  RangeObj, StartPos, EndPos: TJSONObject;
+  LineVal, CharVal: Integer;
+  Word, TypeHint, Markdown: string;
+  Lex: TLexer;
+  Pars: TParser;
+  Root: TBlockNode;
+  I: Integer;
+begin
+  if not Assigned(Params) then
+  begin
+    SendResponse(ReqId, nil);
+    Exit;
+  end;
+
+  Doc := TJSONObject(Params.Find('textDocument'));
+  if not Assigned(Doc) then
+  begin
+    SendResponse(ReqId, nil);
+    Exit;
+  end;
+
+  PosObj := TJSONObject(Params.Find('position'));
+  if not Assigned(PosObj) then
+  begin
+    SendResponse(ReqId, nil);
+    Exit;
+  end;
+
+  LineVal := PosObj.Get('line', 0);
+  CharVal := PosObj.Get('character', 0);
+  Word := LspExtractWordAtPos(FDocumentText, LineVal, CharVal);
+
+  if Word = '' then
+  begin
+    SendResponse(ReqId, nil);
+    Exit;
+  end;
+
+  TypeHint := 'identifier';
+  try
+    Lex := TLexer.Create(FDocumentText);
+    Pars := TParser.Create(Lex);
+    Root := nil;
+    try
+      try
+        Root := Pars.ParseMainProgram;
+        if Assigned(Root) and (Root is TBlockNode) then
+        begin
+          Word := LspFindVarInBlock(TBlockNode(Root), Word);
+          if Word <> '' then
+            TypeHint := Word
+          else
+            TypeHint := 'identifier';
+          Word := LspExtractWordAtPos(FDocumentText, LineVal, CharVal);
+        end;
+      except
+      end;
+    finally
+      if Assigned(Root) then Root.Free;
+      if Assigned(Pars) then Pars.Free;
+      if Assigned(Lex) then Lex.Free;
+    end;
+  except
+  end;
+
+  Markdown := '`' + Word + '` — *' + TypeHint + '*';
+  Contents := TJSONObject.Create;
+  try
+    Contents.Add('kind', 'markdown');
+    Contents.Add('value', Markdown);
+  except
+    Contents.Free;
+    raise;
+  end;
+
+  Result := TJSONObject.Create;
+  try
+    Result.Add('contents', Contents);
+
+    RangeObj := TJSONObject.Create;
+    StartPos := TJSONObject.Create;
+    StartPos.Add('line', LineVal);
+    StartPos.Add('character', CharVal);
+    EndPos := TJSONObject.Create;
+    EndPos.Add('line', LineVal);
+    EndPos.Add('character', CharVal + Length(Word));
+    RangeObj.Add('start', StartPos);
+    RangeObj.Add('end', EndPos);
+    Result.Add('range', RangeObj);
+
+    SendResponse(ReqId, Result);
+  finally
+    Result.Free;
+  end;
+end;
+
+procedure TLspServer.RunDiagnostics;
+var
+  Lex: TLexer;
+  Pars: TParser;
+  Root: TBlockNode;
+  Linter: TLinter;
+  DiagsArr: TJSONArray;
+  Params, D, RangeObj, StartPos, EndPos: TJSONObject;
+  I: Integer;
+  Line, Col, MsgStart: Integer;
+  Code, Lvl, Msg, RawLine: string;
+  ColonPos, SecondColonPos: Integer;
+begin
+  WriteLn(ErrOutput, '[lsp-diag] uri=', FDocumentURI, ' textlen=', Length(FDocumentText));
+  Flush(ErrOutput);
+
+  if FDocumentURI = '' then Exit;
+
+  DiagsArr := TJSONArray.Create;
+  Lex := nil; Pars := nil; Root := nil; Linter := nil;
+  try
+    try
+      Lex := TLexer.Create(FDocumentText);
+      Pars := TParser.Create(Lex);
+      Root := Pars.ParseMainProgram;
+      WriteLn(ErrOutput, '[lsp-diag] Root assigned=', Assigned(Root));
+      Flush(ErrOutput);
+      
+      if not Assigned(Root) then
+      begin
+        WriteLn(ErrOutput, '[lsp-diag] Root nil');
+        Flush(ErrOutput);
+      end
+      else
+      begin
+        Linter := TLinter.Create;
+        try
+          Linter.Lint(Root, FDocumentURI);
+          WriteLn(ErrOutput, '[lsp-diag] FIssues.Count=', Linter.FIssues.Count);
+          Flush(ErrOutput);
+          
+          for I := 0 to Linter.FIssues.Count - 1 do
+          begin
+            RawLine := Linter.FIssues[I];
+            WriteLn(ErrOutput, '[lsp-diag] raw[', I, ']=', RawLine);
+            Flush(ErrOutput);
+            
+            if Trim(RawLine) = '' then Continue;
+
+            ColonPos := Pos(':', RawLine);
+            if ColonPos <= 0 then Continue;
+            SecondColonPos := PosEx(':', RawLine, ColonPos + 1);
+            if SecondColonPos <= 0 then Continue;
+
+            Code := Copy(RawLine, 1, ColonPos - 1);
+            Line := StrToIntDef(Copy(RawLine, ColonPos + 1, SecondColonPos - ColonPos - 1), 1) - 1;
+
+            MsgStart := SecondColonPos + 1;
+            while (MsgStart <= Length(RawLine)) and (RawLine[MsgStart] in ['0'..'9']) do
+              Inc(MsgStart);
+            Col := StrToIntDef(Copy(RawLine, SecondColonPos + 1, MsgStart - SecondColonPos - 1), 1) - 1;
+
+            if Pos('warning', RawLine) > 0 then Lvl := 'warning' else Lvl := 'error';
+            Msg := Trim(Copy(RawLine, MsgStart, Length(RawLine)));
+            // Strip leading "warning " / "error " prefix
+            if Copy(Msg, 1, 8) = 'warning ' then
+              Msg := Trim(Copy(Msg, 9, Length(Msg)))
+            else if Copy(Msg, 1, 6) = 'error ' then
+              Msg := Trim(Copy(Msg, 7, Length(Msg)));
+
+            D := TJSONObject.Create;
+            try
+              RangeObj := TJSONObject.Create;
+              StartPos := TJSONObject.Create;
+              StartPos.Add('line', Line);
+              StartPos.Add('character', Col);
+              EndPos := TJSONObject.Create;
+              EndPos.Add('line', Line);
+              EndPos.Add('character', Col + 1);
+              RangeObj.Add('start', StartPos);
+              RangeObj.Add('end', EndPos);
+              D.Add('range', RangeObj);
+              if Lvl = 'error' then
+                D.Add('severity', 1)
+              else
+                D.Add('severity', 2);
+              D.Add('code', Code);
+              D.Add('source', 'pascak');
+              D.Add('message', Msg);
+              DiagsArr.Add(D);
+            except
+              D.Free;
+              raise;
+            end;
+          end;
+        finally
+          Linter.Free;
+        end;
+      end;
+    except
+      on E: Exception do
+      begin
+        WriteLn(ErrOutput, '[lsp-diag] EXCEPTION: ', E.ClassName, ': ', E.Message);
+        Flush(ErrOutput);
+      end;
+    end;
+  finally
+    if Assigned(Root) then Root.Free;
+    if Assigned(Pars) then Pars.Free;
+    if Assigned(Lex) then Lex.Free;
+  end;
+
+  WriteLn(ErrOutput, '[lsp-diag] SendNotification diags=', DiagsArr.Count);
+  Flush(ErrOutput);
+  
+  Params := TJSONObject.Create;
+  try
+    Params.Add('uri', FDocumentURI);
+    Params.Add('diagnostics', DiagsArr);
+    SendNotification('textDocument/publishDiagnostics', Params);
+  finally
+    Params.Free;
+  end;
+end;
+
+procedure TLspServer.Run;
+var
+  Msg: TJSONObject;
+  Method: string;
+  ReqId: TJSONData;
+  Params: TJSONData;
+begin
+  // Ensure global state initialized (errMSG, GC lists, locks)
+  EnsureGlobalsInit;
+  if not Assigned(errMSG) then
+    errMSG := Terror.Create;
+
+  while (not FExitRequested) and ReadMessage(Msg) do
+  begin
+    try
+      Method := Msg.Get('method', '');
+      ReqId := Msg.Find('id');
+      Params := Msg.Find('params');
+      if Params is TJSONObject then
+        HandleRequest(Method, ReqId, TJSONObject(Params))
+      else
+        HandleRequest(Method, ReqId, nil);
+    finally
+      Msg.Free;
+    end;
+    if FShutdownRequested and FExitRequested then Break;
+  end;
+end;
+
 var
   DebugMode: Boolean;
   ScriptArg: string;
   ArgIdx: Integer;
   ReplMode: Boolean;
+  LspMode: Boolean;
+  LspServer: TLspServer;
   TestMode: Boolean;
   FmtMode: Boolean;
   FmtCheck: Boolean;
@@ -41431,6 +42111,7 @@ begin
   DebugMode := False;
   ScriptArg := '';
   ReplMode := False;
+  LspMode := False;
   TestMode := False;
   FmtMode := False;
   FmtCheck := False;  
@@ -41446,6 +42127,8 @@ begin
       GDangerousEnvAllowed := True
     else if ParamStr(ArgIdx) = '--repl' then
       ReplMode := True
+    else if ParamStr(ArgIdx) = '--lsp' then
+      LspMode := True
     else if ParamStr(ArgIdx) = '--test' then
       TestMode := True    
     else if ParamStr(ArgIdx) = '--fmt' then
@@ -41509,6 +42192,24 @@ begin
     {$ENDIF}
   end;
   
+  // E.4 Phase 2a — LSP mode
+  if LspMode then
+  begin
+    LspServer := TLspServer.Create;
+    try
+      LspServer.Run;
+    finally
+      LspServer.Free;
+    end;
+    Flush(Output);
+    Flush(ErrOutput);
+    {$IFDEF UNIX}
+    libc__exit(0);
+    {$ELSE}
+    Halt(0);
+    {$ENDIF}
+  end;
+
   // B.3 — REPL mode
   if ReplMode then
   begin
