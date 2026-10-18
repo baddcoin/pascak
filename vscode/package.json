@@ -1,0 +1,42 @@
+{
+  "name": "pascak",
+  "displayName": "Pascak",
+  "description": "Pascak scripting language support (syntax highlighting)",
+  "version": "0.1.0",
+  "publisher": "pascak",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.60.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "keywords": [
+    "pascak",
+    "pascal",
+    "scripting"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "pascak",
+        "aliases": [
+          "Pascak",
+          "pascak"
+        ],
+        "extensions": [
+          ".pascak",
+          ".psk"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "pascak",
+        "scopeName": "source.pascak",
+        "path": "./syntaxes/pascak.tmLanguage.json"
+      }
+    ]
+  }
+}

@@ -1,0 +1,259 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Pascak",
+  "scopeName": "source.pascak",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#fstrings" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#keywords" },
+    { "include": "#modules" },
+    { "include": "#builtin_functions" },
+    { "include": "#constants" },
+    { "include": "#function_call" },
+    { "include": "#operators" },
+    { "include": "#punctuation" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.pascak",
+          "match": "//.*$"
+        },
+        {
+          "name": "comment.block.pascak",
+          "begin": "/\\*",
+          "end": "\\*/",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.comment.begin.pascak" }
+          },
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.comment.end.pascak" }
+          }
+        }
+      ]
+    },
+    "fstrings": {
+      "patterns": [
+        {
+          "name": "string.interpolated.pascak",
+          "begin": "([fF])([\"'])",
+          "beginCaptures": {
+            "1": { "name": "storage.type.string.fstring.pascak" },
+            "2": { "name": "punctuation.definition.string.begin.pascak" }
+          },
+          "end": "\\2",
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.string.end.pascak" }
+          },
+          "patterns": [
+            {
+              "name": "constant.character.escape.pascak",
+              "match": "\\\\."
+            },
+            {
+              "name": "meta.embedded.expression.pascak",
+              "begin": "\\{",
+              "beginCaptures": {
+                "0": { "name": "punctuation.section.embedded.begin.pascak" }
+              },
+              "end": "\\}",
+              "endCaptures": {
+                "0": { "name": "punctuation.section.embedded.end.pascak" }
+              },
+              "patterns": [
+                { "include": "$self" }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.pascak",
+          "begin": "\"",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.string.begin.pascak" }
+          },
+          "end": "\"",
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.string.end.pascak" }
+          },
+          "patterns": [
+            { "name": "constant.character.escape.pascak", "match": "\\\\." }
+          ]
+        },
+        {
+          "name": "string.quoted.single.pascak",
+          "begin": "'",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.string.begin.pascak" }
+          },
+          "end": "'",
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.string.end.pascak" }
+          },
+          "patterns": [
+            { "name": "constant.character.escape.pascak", "match": "\\\\." }
+          ]
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.hex.pascak",
+          "match": "\\$[0-9A-Fa-f]+"
+        },
+        {
+          "name": "constant.numeric.float.pascak",
+          "match": "\\b\\d+\\.\\d+([eE][+-]?\\d+)?\\b"
+        },
+        {
+          "name": "constant.numeric.integer.pascak",
+          "match": "\\b\\d+\\b"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.pascak",
+          "match": "\\b(if|then|else|case|of|while|do|for|to|downto|in|repeat|until|break|continue|return|yield|defer|throw)\\b"
+        },
+        {
+          "name": "keyword.declaration.pascak",
+          "match": "\\b(var|const|function|method|class|record|new)\\b"
+        },
+        {
+          "name": "keyword.other.pascak",
+          "match": "\\b(begin|end|import|lambda|lock|step)\\b"
+        },
+        {
+          "name": "keyword.operator.word.pascak",
+          "match": "\\b(and|or|not|mod)\\b"
+        }
+      ]
+    },
+    "modules": {
+      "patterns": [
+        {
+          "name": "support.class.module.pascak",
+          "match": "\\b(sys|math|crypto|time|net|http|fs|dll|tls|native|hardware|ws|pkg|log|config|signal|metrics|health)\\b(?=\\s*\\.)"
+        }
+      ]
+    },
+    "builtin_functions": {
+      "patterns": [
+        {
+          "name": "support.function.builtin.pascak",
+          "match": "\\b(print|println|input|len|str|typeOf|toInteger|toFloat|toString|push|pop|delete|clear|reverse|join|indexOf|map|filter|reduce|sort|upper|lower|trim|replace|copy|pos|val|jsonParse|jsonStringify|jsonPath|regExMatch|regExReplace|base64Encode|base64Decode|sha1|fileRead|fileWrite|fileAppend|fileExists|fileDelete|fileWriteRecord|fileReadRecord|getFiles|getDirs|makeDir|thread|poolRun|on|emit|Worker|workerPost|workerGet|range|eval|getTick|sleep|enumerate|gcStep)\\b(?=\\s*\\()"
+        },
+        {
+          "name": "support.function.builtin.test.pascak",
+          "match": "\\b(assertEqual|assertTrue|assertFalse|assertThrows|testBegin|testEnd|testSummary)\\b(?=\\s*\\()"
+        },
+        {
+          "name": "support.function.builtin.timer.pascak",
+          "match": "\\b(setTimeout|setInterval|clearTimeout|clearInterval)\\b(?=\\s*\\()"
+        },
+        {
+          "name": "support.function.builtin.coroutine.pascak",
+          "match": "\\b(coSpawn|coSleep|coWait|coWaitAll|coCount|coCancel|coJoin|coThen|coStatus|coResult|coroutine_create|resume|coroutine_free)\\b(?=\\s*\\()"
+        },
+        {
+          "name": "support.function.builtin.sqlite.pascak",
+          "match": "\\b(sqliteConnect|sqliteExec|sqliteQuery|sqliteClose)\\b(?=\\s*\\()"
+        },
+        {
+          "name": "support.function.builtin.bitwise.pascak",
+          "match": "\\b(bitAnd|bitOr|bitXor|bitNot|shl|shr|bitGet|bitSet|bitClear|bitToggle|toHex|toBin|ord|byteLen|chr)\\b(?=\\s*\\()"
+        },
+        {
+          "name": "support.function.builtin.stats.pascak",
+          "match": "\\b(statSum|statMode|statMean|statMedian|statVariance|statStdDev|statEMA|statRSI)\\b(?=\\s*\\()"
+        },
+        {
+          "name": "support.function.builtin.type.pascak",
+          "match": "\\b(isInstance|isArray|isDict)\\b(?=\\s*\\()"
+        },
+        {
+          "name": "support.function.builtin.lifecycle.pascak",
+          "match": "\\b(onShutdown|loadPlugin|loadFileDLL|runtimeStats|profilerEnable|profilerDisable|profilerReport)\\b(?=\\s*\\()"
+        }
+      ]
+    },
+    "constants": {
+      "patterns": [
+        {
+          "name": "constant.language.pascak",
+          "match": "\\b(true|false)\\b"
+        },
+        {
+          "name": "constant.language.null.pascak",
+          "match": "\\b(null|nil)\\b"
+        },
+        {
+          "name": "variable.language.self.pascak",
+          "match": "\\b(self)\\b"
+        }
+      ]
+    },
+    "function_call": {
+      "patterns": [
+        {
+          "name": "entity.name.function.pascak",
+          "match": "\\b([A-Za-z_][A-Za-z0-9_]*)\\b(?=\\s*\\()"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.assignment.compound.pascak",
+          "match": ":=|\\+=|-=|\\*=|/=|%=|="
+        },
+        {
+          "name": "keyword.operator.comparison.pascak",
+          "match": "==|!=|<>|<=|>=|<|>"
+        },
+        {
+          "name": "keyword.operator.arithmetic.pascak",
+          "match": "\\+|-|\\*|/|%"
+        },
+        {
+          "name": "keyword.operator.spread.pascak",
+          "match": "\\.\\.\\."
+        },
+        {
+          "name": "keyword.operator.ternary.pascak",
+          "match": "\\?|:"
+        }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        {
+          "name": "punctuation.separator.pascak",
+          "match": "[;,.]"
+        },
+        {
+          "name": "punctuation.section.parens.pascak",
+          "match": "[()]"
+        },
+        {
+          "name": "punctuation.section.brackets.pascak",
+          "match": "[\\[\\]]"
+        },
+        {
+          "name": "punctuation.section.braces.pascak",
+          "match": "[{}]"
+        }
+      ]
+    }
+  }
+}
