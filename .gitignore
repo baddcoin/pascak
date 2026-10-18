@@ -152,3 +152,9 @@ vscode/package-lock.json.bak
 *.preb7b
 
 *.preb7b2
+*.preb2.4
+
+# Example binaries
+examples/embed_inproc
+examples/*.o
+examples/*.ppu

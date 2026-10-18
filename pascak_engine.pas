@@ -16,6 +16,7 @@ type
   end;
 
 function ExecuteEngine(const Source: string): TPascakResult;
+procedure ShutdownEngine;
 procedure RunCLI;
 
 implementation
@@ -42435,9 +42436,18 @@ begin
   end;
 end;
 
+var
+  GEmbedEngine: TPascakEngine = nil;
+  GEmbedLock: TCriticalSection = nil;
+
+procedure EnsureEmbedLock; inline;
+begin
+  if not Assigned(GEmbedLock) then
+    GEmbedLock := TCriticalSection.Create;
+end;
+
 function ExecuteEngine(const Source: string): TPascakResult;
 var
-  Engine: TPascakEngine;
   Res: TValue;
 begin
   Result.Success := False;
@@ -42447,12 +42457,17 @@ begin
   Result.ValueAsBool := False;
   Result.Error := '';
 
-  Engine := nil;
+  EnsureEmbedLock;
+  GEmbedLock.Acquire;
   try
-    EnsureGlobalsInit;
-    Engine := TPascakEngine.Create;
+    if not Assigned(GEmbedEngine) then
+    begin
+      EnsureGlobalsInit;
+      GEmbedEngine := TPascakEngine.Create;
+    end;
+
     try
-      Res := Engine.ExecuteString(Source, '<embed>');
+      Res := GEmbedEngine.ExecuteString(Source, '<embed>');
       try
         if not Assigned(Res) then
         begin
@@ -42495,18 +42510,31 @@ begin
       finally
         if Assigned(Res) then Res.Free;
       end;
-    finally
-      if Assigned(Engine) then
+    except
+      on E: Exception do
       begin
-        try Engine.Free; except end;
-        Engine := nil;
+        Result.Success := False;
+        Result.Error := E.ClassName + ': ' + E.Message;
       end;
     end;
-  except
-    on E: Exception do
-    begin
-      Result.Success := False;
-      Result.Error := E.ClassName + ': ' + E.Message;
+  finally
+    GEmbedLock.Release;
+  end;
+end;
+
+procedure ShutdownEngine;
+begin
+  if Assigned(GEmbedLock) then
+  begin
+    GEmbedLock.Acquire;
+    try
+      if Assigned(GEmbedEngine) then
+      begin
+        try GEmbedEngine.Free; except end;
+        GEmbedEngine := nil;
+      end;
+    finally
+      GEmbedLock.Release;
     end;
   end;
 end;
@@ -42668,5 +42696,13 @@ begin
   else 
     runScript(Script, DebugMode);
 end;
+
+finalization
+  ShutdownEngine;
+  if Assigned(GEmbedLock) then
+  begin
+    try GEmbedLock.Free; except end;
+    GEmbedLock := nil;
+  end;
 
 end.
