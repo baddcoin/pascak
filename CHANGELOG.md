@@ -9,6 +9,29 @@ Versi mengikuti [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Planned
+- Register-based VM (tier-2 JIT)
+- Concurrent GC
+- HTTP/2 multiplexing (parallel requests via 1 connection)
+- ChaCha20-Poly1305 cipher
+- JSON Schema validation
+
+### Backlog
+- WebSocket client bidirectional bridge
+- WASM target
+- Package manager: HTTP registry
+
+---
+
+## [0.5.0] — 2026-10-19
+
+**B.7b milestone — In-Process Embedding + `elif`/`elseif` sugar**
+
+Host Pascal code can now `uses pascak_engine` and register native
+callbacks callable from script. Alternative `elif`/`elseif` spelling
+shipped as pure lexer sugar. Full API docs added.
+
+
 ### Added
 - **B.7b Session 1** — engine extraction to `pascak_engine.inc`
   (42,386 lines). Binary identical 2,940,840 bytes. Zero behavioral
@@ -50,21 +73,6 @@ Versi mengikuti [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - Backward compat: `else if` (two tokens) still works
   - LSP autocomplete keywords expanded (44 total, +2)
   - Test: T5 else-if, T6 elif, T7 elseif, T8 elif chain — all PASS
-
-### Planned
-- Register-based VM (tier-2 JIT)
-- Concurrent GC
-- HTTP/2 multiplexing (parallel requests via 1 connection)
-- ChaCha20-Poly1305 cipher
-- JSON Schema validation
-- In-process embedding (B.7b, zero-cost callback)
-
-### Backlog
-- WebSocket client bidirectional bridge (B.7b extension)
-- WASM target
-- Package manager: HTTP registry
-
----
 
 ## [0.4.0] — 2026-10-18
 
