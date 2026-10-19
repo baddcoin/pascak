@@ -170,3 +170,8 @@ examples/*.ppu
 /embed_inproc.o
 /embed_inproc.ppu
 *.prelif
+
+# Doc backups
+docs/*.pre_embed
+docs/*.preb7b*
+docs/*.prelif*

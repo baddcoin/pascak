@@ -23,13 +23,14 @@ Dokumentasi lengkap API standard library Pascak VM.
 12. [Crypto](#crypto)
 13. [Filesystem](#filesystem)
 14. [Linter](#linter)
-15. [Embedding](#embedding)
-16. [Formatter](#formatter)
-17. [Test Runner](#test-runner)
-18. [Parser Tips](#parser-tips)
-19. [Sandbox](#sandbox)
-20. [Error Handling](#error-handling)
-21. [Platform Notes](#platform-notes)
+15. [Embedding (In-Process)](#embedding-in-process)
+16. [Embedding (Subprocess)](#embedding-subprocess)
+17. [Formatter](#formatter)
+18. [Test Runner](#test-runner)
+19. [Parser Tips](#parser-tips)
+20. [Sandbox](#sandbox)
+21. [Error Handling](#error-handling)
+22. [Platform Notes](#platform-notes)
 ---
 
 ## Modul Global
@@ -344,7 +345,125 @@ echo "All checks passed"
 ```
 
 ---
-## Embedding
+## Embedding (In-Process)
+
+**Library-level** embedding: host Pascal code `uses pascak_engine` to
+invoke the VM directly (not via subprocess). ~microseconds per call.
+
+### Quick Start
+
+    program my_host;
+
+    {$MODE OBJFPC}{$H+}
+
+    uses
+      {$IFDEF UNIX}
+        cthreads,       { MANDATORY on Unix — must be first }
+      {$ENDIF}
+      SysUtils, pascak_engine;
+
+    var
+      R: TPascakResult;
+    begin
+      R := ExecuteEngine('begin return 6 * 7; end.');
+      if R.Success then
+        WriteLn('Result: ', R.ValueAsString);   { 42 }
+    end.
+
+**Build**: `fpc -Mobjfpc -Sh -Fu. my_host.pas`
+
+### `TPascakResult`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Success` | Boolean | `False` if runtime error, `True` otherwise |
+| `ValueType` | string | `numeric` / `string` / `boolean` / `null` / `other` |
+| `ValueAsString` | string | String representation |
+| `ValueAsNum` | Double | Numeric value (iff `ValueType=numeric`) |
+| `ValueAsBool` | Boolean | Boolean value (iff `ValueType=boolean`) |
+| `Error` | string | `EClassName: message` on failure |
+
+### `ExecuteEngine(source: string): TPascakResult`
+
+Execute script source, return result. **Thread-safe** (serialized via
+internal CriticalSection). **Singleton** engine — one engine instance
+shared across calls for arena stability.
+
+### `ShutdownEngine`
+
+Release the singleton engine. Auto-called at program exit
+(`finalization` block). Explicit call optional.
+
+### `RegisterNative(name, func)`
+
+Register a Pascal function callable from script. Handled at two
+dispatch points (`opcCall` + `opcTailCall`) that route `dtDict` with
+`__native_simplified` marker to host callback.
+
+**Types**:
+
+| Type | Purpose |
+|------|---------|
+| `TNativeValueKind` | `(nvkNull, nvkNumber, nvkString, nvkBoolean)` |
+| `TNativeValue` | record `{Kind, Num, Str, Bool}` |
+| `TNativeValueArray` | `array of TNativeValue` |
+| `TPascakNativeFunc` | `function(const Args: TNativeValueArray): TNativeValue` |
+
+**Helper constructors**:
+
+- `NVNull` — null value
+- `NVNum(V: Double)` — numeric
+- `NVStr(S: string)` — string
+- `NVBool(B: Boolean)` — boolean
+
+**Example**:
+
+    function MyAdd(const Args: TNativeValueArray): TNativeValue;
+    begin
+      if Length(Args) < 2 then Exit(NVNull);
+      Result := NVNum(Args[0].Num + Args[1].Num);
+    end;
+
+    RegisterNative('add', @MyAdd);
+
+    R := ExecuteEngine('begin return add(10, 20); end.');
+    { R.ValueAsNum = 30 }
+
+Full demo: `examples/embed_inproc.pas` (6 tests including native).
+
+### Comparison: In-Process vs Subprocess
+
+| Aspect | In-Process | Subprocess |
+|--------|-----------|------------|
+| Overhead/call | microseconds | ~2 seconds |
+| State isolation | shared engine | full (new process) |
+| Native callback | yes | no |
+| Requires binary | no (linked in) | yes |
+| Failure isolation | none (host crash risk) | safe |
+| Use case | trusted scripting | untrusted plugins |
+
+### Requirements
+
+- **`cthreads` MUST be first unit on Unix.** Without it, FPC's
+  `SysUtils` initialization may use thread primitives before
+  `cthreads` initializes → runtime error 211.
+- **`pascak_engine.ppu`** must exist (build `pascak_engine.pas` first).
+- **All `pascak_*.pas` units** must be reachable via `-Fu` path.
+
+### Limitations (v1)
+
+| Feature | Status |
+|---------|--------|
+| Singleton engine | yes |
+| Thread-safe (mutex) | yes |
+| Native callback | yes |
+| Structured error object | no (string only) |
+| Multi-engine instance | no (singleton) |
+| Stdout capture from script | no |
+
+---
+
+## Embedding (Subprocess)
 
 Public API untuk embed Pascak VM di aplikasi Pascal host (Lazarus, Delphi, FPC).
 
@@ -650,7 +769,7 @@ end;
 **Optimization**:
 - Untuk batch, gabung jadi 1 script
 - Untuk interaktif, gunakan `--repl` mode via `TProcess` langsung
-- **B.7b backlog**: in-process embed tanpa subprocess (~0.1s overhead)
+- In-process embed (done — see `## Embedding (In-Process)` above)
 
 ---
 
@@ -662,8 +781,8 @@ end;
 | Config env / exec policy / memory / timeout | ✅ |
 | Stdout / stderr capture | ✅ |
 | Exit code normalized | ✅ |
-| Native callback dari host | ❌ (B.7b) |
-| Shared memory / FFI bidirectional | ❌ (B.7b) |
+Native callback dari host | ✅ (B.7b Session 3)
+Shared memory / FFI bidirectional | ❌ (backlog)
 | Streaming stdout (live) | ❌ |
 | Windows signal handling | ⚠️ (Partial) |
 
