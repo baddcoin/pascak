@@ -44,6 +44,13 @@ Versi mengikuti [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - CLI regression: A1/A2/A3 all PASS, 30/30 suite
   - See `examples/embed_inproc.pas` Test 6 for full demo
 
+- **Language: `elif` / `elseif`** — alternative spelling for `else if`:
+  - Both keywords recognized by lexer, translated to `ttElse` + `ttIf`
+  - Zero parser changes — pure syntactic sugar
+  - Backward compat: `else if` (two tokens) still works
+  - LSP autocomplete keywords expanded (44 total, +2)
+  - Test: T5 else-if, T6 elif, T7 elseif, T8 elif chain — all PASS
+
 ### Planned
 - Register-based VM (tier-2 JIT)
 - Concurrent GC

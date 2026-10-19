@@ -1584,6 +1584,7 @@ type
     FPos: Integer;
     FChar: Char;
     FLine, FCol: Integer;
+    FHasPendingIf: Boolean;
     procedure Advance;
     function Peek: Char;
     function ParseIdOrKeyword: TToken;
@@ -10718,6 +10719,7 @@ begin
     FPos := 1; 
     FLine := 1; 
     FCol := 1;  
+    FHasPendingIf := False;
 
     if Length(FText) > 0 then 
         FChar := FText[1] 
@@ -10765,6 +10767,12 @@ begin
   case s of
     'if':       Result.Typ := ttIf;
     'then':     Result.Typ := ttThen;
+    'elif', 'elseif':
+      begin
+        FHasPendingIf := True;
+        Result.Typ := ttElse;
+        Result.Str := 'else';
+      end;
     'else':     Result.Typ := ttElse;
     'case':     Result.Typ := ttCase;
     'of':       Result.Typ := ttOf;
@@ -10937,6 +10945,16 @@ var
   SkipLoop: Boolean;
   StartLine, StartCol: Integer; 
 begin
+  if FHasPendingIf then
+  begin
+    FHasPendingIf := False;
+    Result.Typ := ttIf;
+    Result.Str := 'if';
+    Result.Num := 0;
+    Result.Line := FLine;
+    Result.Col := FCol - 4;
+    Exit;
+  end;
   SkipLoop := True;
   while SkipLoop do
   begin
@@ -42020,13 +42038,13 @@ begin
 end;
 
 const
-  LSP_KEYWORDS: array[0..42] of string = (
+  LSP_KEYWORDS: array[0..44] of string = (
     'begin', 'end', 'var', 'const', 'function', 'class', 'record', 'new',
     'if', 'then', 'else', 'while', 'do', 'for', 'to', 'downto', 'step',
     'in', 'repeat', 'until', 'break', 'continue', 'return', 'try', 'catch',
     'finally', 'true', 'false', 'null', 'nil', 'import', 'lambda', 'lock',
     'yield', 'defer', 'case', 'of', 'throw', 'and', 'or', 'not', 'mod',
-    'self'
+    'elif', 'elseif', 'self'
   );
 
   LSP_MODULES: array[0..11] of string = (

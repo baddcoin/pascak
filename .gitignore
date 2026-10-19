@@ -169,3 +169,4 @@ examples/*.ppu
 /embed_inproc
 /embed_inproc.o
 /embed_inproc.ppu
+*.prelif
