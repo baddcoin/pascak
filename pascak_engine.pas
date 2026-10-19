@@ -15,8 +15,30 @@ type
     Error: string;
   end;
 
+type
+  TNativeValueKind = (nvkNull, nvkNumber, nvkString, nvkBoolean);
+
+  TNativeValue = record
+    Kind: TNativeValueKind;
+    Num: Double;
+    Str: string;
+    Bool: Boolean;
+  end;
+
+  TNativeValueArray = array of TNativeValue;
+
+  TPascakNativeFunc = function(const Args: TNativeValueArray): TNativeValue;
+
 function ExecuteEngine(const Source: string): TPascakResult;
 procedure ShutdownEngine;
+
+function NVNull: TNativeValue;
+function NVNum(V: Double): TNativeValue;
+function NVStr(const S: string): TNativeValue;
+function NVBool(B: Boolean): TNativeValue;
+
+procedure RegisterNative(const Name: string; Func: TPascakNativeFunc);
+
 procedure RunCLI;
 
 implementation
@@ -16012,6 +16034,8 @@ begin
   end;
 end;
 
+function CallNativeSimplified(D: TDictValue; const RawArgs: array of TValue): TValue; forward;
+
 function TVM.Run(Chunk: TChunk; IsResume: Boolean = False): TValue;
 var
   CurrentFrame: PCallFrame; 
@@ -16993,6 +17017,21 @@ begin
                   SetupFrame(a, ArgCount, i + 1);
                 end
                 else if (a.DataType = dtDict) and 
+              a.DictVal.HasKey('__native_simplified') then
+      begin
+        SetLength(ArgArr, ArgCount);
+        for MethodIdx := 0 to ArgCount - 1 do
+          ArgArr[MethodIdx] := FStack[i + 1 + MethodIdx];
+        
+        try
+          ResultVal := CallNativeSimplified(a.DictVal, ArgArr);
+        finally
+          CleanStackTo(i);
+        end;
+        
+        Push(ResultVal);
+      end
+      else if (a.DataType = dtDict) and 
                         a.DictVal.HasKey('__ffi_raw') and
                         a.DictVal.HasKey('__ffi_sig') then
                 begin
@@ -17026,6 +17065,27 @@ begin
 
                 a := FStack[i]; 
                 
+                if (a.DataType = dtDict) and 
+                   a.DictVal.HasKey('__native_simplified') then
+                begin
+                  SetLength(ArgArr, ArgCount);
+                  for MethodIdx := 0 to ArgCount - 1 do
+                    ArgArr[MethodIdx] := FStack[i + 1 + MethodIdx];
+                  
+                  TargetObj := CallNativeSimplified(a.DictVal, ArgArr);
+                  
+                  TeardownCurrentFrame;
+                  if FFrameCount = 0 then
+                  begin
+                    Result := TargetObj;
+                    FHasResult := True;
+                    Exit;
+                  end;
+                  
+                  Push(TargetObj);
+                  CurrentFrame := @FFrames[FFrameCount - 1];
+                end
+                else
                 if a.DataType = dtNative then
                 begin
                   EvalArgs := TObjectList.Create(False); 
@@ -42539,6 +42599,112 @@ begin
   end;
 end;
 
+
+function NVNull: TNativeValue;
+begin
+  Result.Kind := nvkNull;
+  Result.Num := 0;
+  Result.Str := '';
+  Result.Bool := False;
+end;
+
+function NVNum(V: Double): TNativeValue;
+begin
+  Result.Kind := nvkNumber;
+  Result.Num := V;
+  Result.Str := '';
+  Result.Bool := False;
+end;
+
+function NVStr(const S: string): TNativeValue;
+begin
+  Result.Kind := nvkString;
+  Result.Num := 0;
+  Result.Str := S;
+  Result.Bool := False;
+end;
+
+function NVBool(B: Boolean): TNativeValue;
+begin
+  Result.Kind := nvkBoolean;
+  Result.Num := 0;
+  Result.Str := '';
+  Result.Bool := B;
+end;
+
+procedure RegisterNative(const Name: string; Func: TPascakNativeFunc);
+var
+  D: TDictValue;
+begin
+  EnsureEmbedLock;
+  GEmbedLock.Acquire;
+  try
+    if not Assigned(GEmbedEngine) then
+    begin
+      EnsureGlobalsInit;
+      GEmbedEngine := TPascakEngine.Create;
+    end;
+
+    D := TDictValue.Create;
+    try
+      D.SetValue('__native_simplified', TValue.CreateBool(True));
+      D.SetValue('__native_raw', TValue.CreatePtr(Pointer(Func)));
+      D.SetValue('__native_name', TValue.CreateStr(Name));
+      GEmbedEngine.GlobalEnv.DefineOrReplaceVar(Name, TValue.CreateDict(D), False);
+    except
+      D.Free;
+      raise;
+    end;
+  finally
+    GEmbedLock.Release;
+  end;
+end;
+
+function CallNativeSimplified(D: TDictValue; const RawArgs: array of TValue): TValue;
+var
+  NVArgs: TNativeValueArray;
+  NVRes: TNativeValue;
+  NVFunc: TPascakNativeFunc;
+  RawPtrVal: TValue;
+  I: Integer;
+  A: TValue;
+begin
+  RawPtrVal := D.GetValueClone('__native_raw');
+  try
+    if not Assigned(RawPtrVal) or (RawPtrVal.DataType <> dtPointer) then
+      raise EScriptRuntimeError.Create('native: invalid __native_raw');
+    NVFunc := TPascakNativeFunc(RawPtrVal.PtrVal);
+  finally
+    RawPtrVal.Free;
+  end;
+
+  SetLength(NVArgs, Length(RawArgs));
+  for I := 0 to High(RawArgs) do
+  begin
+    A := RawArgs[I];
+    if not Assigned(A) then
+      NVArgs[I] := NVNull
+    else
+      case A.DataType of
+        dtNumeric: NVArgs[I] := NVNum(A.NumVal);
+        dtString:  NVArgs[I] := NVStr(A.StrVal);
+        dtBoolean: NVArgs[I] := NVBool(A.BoolVal);
+        dtNull:    NVArgs[I] := NVNull;
+      else
+        NVArgs[I] := NVStr(TValueToString(A, False));
+      end;
+  end;
+
+  NVRes := NVFunc(NVArgs);
+
+  case NVRes.Kind of
+    nvkNumber:  Result := TValue.CreateNum(NVRes.Num);
+    nvkString:  Result := TValue.CreateStr(NVRes.Str);
+    nvkBoolean: Result := TValue.CreateBool(NVRes.Bool);
+  else
+    Result := TValue.CreateNull;
+  end;
+end;
 
 procedure RunCLI;
 var

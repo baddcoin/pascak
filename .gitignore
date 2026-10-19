@@ -158,3 +158,14 @@ vscode/package-lock.json.bak
 examples/embed_inproc
 examples/*.o
 examples/*.ppu
+*.preb2.5
+*.preb2.6
+
+# Session 3 test artifacts
+/native_test
+/native_test.pas
+/native_test.o
+/native_test.ppu
+/embed_inproc
+/embed_inproc.o
+/embed_inproc.ppu

@@ -31,6 +31,19 @@ Versi mengikuti [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     singleton + finalization code).
 
 
+- **B.7b Session 3** — `RegisterNative` for host->script callbacks:
+  - `TPascakNativeFunc` type: `function(const Args: TNativeValueArray): TNativeValue`
+  - `TNativeValue` record (Kind/Num/Str/Bool) — simplified, no cascade
+  - Helper constructors: `NVNull`, `NVNum`, `NVStr`, `NVBool`
+  - `RegisterNative(name, func)` — stores dict with `__native_simplified`
+    marker in GlobalEnv
+  - Two dispatch points: `opcCall` + `opcTailCall` (native branch
+    before `dtNative`/FFI branches)
+  - Host verification: 6/6 tests PASS (add, greet, isPositive, echo,
+    script-loop call, non-native regression)
+  - CLI regression: A1/A2/A3 all PASS, 30/30 suite
+  - See `examples/embed_inproc.pas` Test 6 for full demo
+
 ### Planned
 - Register-based VM (tier-2 JIT)
 - Concurrent GC

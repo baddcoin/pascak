@@ -26,6 +26,18 @@ uses
   {$ENDIF}
   SysUtils, pascak_engine;
 
+function NativeAdd(const Args: TNativeValueArray): TNativeValue;
+begin
+  if Length(Args) < 2 then Exit(NVNull);
+  Result := NVNum(Args[0].Num + Args[1].Num);
+end;
+
+function NativeGreet(const Args: TNativeValueArray): TNativeValue;
+begin
+  if Length(Args) < 1 then Exit(NVStr(''));
+  Result := NVStr('Hello, ' + Args[0].Str + '!');
+end;
+
 var
   R: TPascakResult;
   Failed: Integer;
@@ -86,6 +98,28 @@ begin
     end;
   end;
   if Failed = 0 then WriteLn('  PASS: 10 iterations');
+
+  WriteLn('=== Test 6: RegisterNative demo ===');
+  RegisterNative('add', @NativeAdd);
+  RegisterNative('greet', @NativeGreet);
+
+  R := ExecuteEngine('begin return add(10, 20); end.');
+  if R.Success and (R.ValueType = 'numeric') and (Abs(R.ValueAsNum - 30) < 0.001) then
+    WriteLn('  PASS: add(10, 20) = ', R.ValueAsString)
+  else
+  begin
+    WriteLn('  FAIL: add -> ', R.Error);
+    Inc(Failed);
+  end;
+
+  R := ExecuteEngine('begin return greet("Pascak"); end.');
+  if R.Success and (R.ValueType = 'string') and (R.ValueAsString = 'Hello, Pascak!') then
+    WriteLn('  PASS: greet("Pascak") = ', R.ValueAsString)
+  else
+  begin
+    WriteLn('  FAIL: greet -> ', R.Error);
+    Inc(Failed);
+  end;
 
   WriteLn('');
   if Failed = 0 then
