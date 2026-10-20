@@ -34,6 +34,8 @@ di folder project.
 23. [Async File I/O](#23-async-file-io)
 24. [Parser Quirk](#24-parser-quirk)
 25. [Timer & JSON Path](#25-timer--json-path)
+26. [Embedding In-Process](#bab-26--embedding-in-process)
+27. [GUI Browser-Based](#bab-27--gui-browser-based)
 ```
 
 ## 1. Setup & Hello World
@@ -2784,6 +2786,819 @@ end.
 4. **Cleanup** timer di script akhir supaya tidak fire setelah selesai
 
 ---
+
+---
+
+## Bab 26 — Embedding In-Process
+
+Bab-bab sebelumnya menjalankan script via `pascak_noASTnet script.pas` — **subprocess**. Setiap call spawn proses baru, ~2 detik startup overhead.
+
+**In-process embedding** berbeda: host Pascal code `uses pascak_engine` dan panggil VM langsung. Overhead per call = microseconds.
+
+### 26.1 — Subprocess vs In-Process
+
+| Aspek | Subprocess | In-Process |
+|-------|-----------|------------|
+| Overhead/call | ~2 detik | ~microseconds |
+| Isolasi | Full (new process) | Shared engine |
+| Native callback | ❌ | ✅ |
+| Requires binary | ✅ | ❌ (linked in) |
+| Failure isolation | ✅ Safe | ⚠️ Host crash risk |
+| Use case | Untrusted script | Trusted, hot-path |
+
+**Kapan pakai subprocess:**
+- CLI tool (`--test`, `--lint`, `--fmt`)
+- Untrusted plugin (safety isolation)
+- One-shot script
+
+**Kapan pakai in-process:**
+- Trusted script dari host app (game, editor, rule engine)
+- Hot-path evaluation (per HTTP request, per user action)
+- Native callback host↔script
+
+### 26.2 — Quick Start: Hello Embed
+
+Minimal host program:
+
+    program my_host;
+
+    {$MODE OBJFPC}{$H+}
+
+    uses
+      {$IFDEF UNIX}
+        cthreads,       { MANDATORY on Unix — must be first unit }
+      {$ENDIF}
+      SysUtils, pascak_engine;
+
+    var
+      R: TPascakResult;
+    begin
+      R := ExecuteEngine('begin return 6 * 7; end.');
+      if R.Success then
+        WriteLn('Result: ', R.ValueAsString)   { 42 }
+      else
+        WriteLn('Error: ', R.Error);
+    end.
+
+**Build:**
+
+    fpc -Mobjfpc -Sh -Fu/path/to/pascak my_host.pas
+
+**Run:**
+
+    ./my_host
+    # Output: Result: 42
+
+⚠️ **`cthreads` WAJIB jadi unit pertama di Unix** — tanpa ini, FPC's SysUtils initialization kadang crash karena thread primitives belum ready. Ini bug FPC yang tidak akan di-fix.
+
+
+### 26.3 — TPascakResult
+
+`ExecuteEngine` return `TPascakResult`:
+
+| Field | Tipe | Deskripsi |
+|-------|------|-----------|
+| `Success` | Boolean | False kalau error, True otherwise |
+| `ValueType` | string | `"numeric"` / `"string"` / `"boolean"` / `"null"` / `"other"` |
+| `ValueAsString` | string | String representation (selalu diisi) |
+| `ValueAsNum` | Double | Numeric (iff `ValueType="numeric"`) |
+| `ValueAsBool` | Boolean | Boolean (iff `ValueType="boolean"`) |
+| `Error` | string | `"EClassName: message"` on failure |
+
+Handler standar:
+
+    R := ExecuteEngine(source);
+    if not R.Success then begin
+      WriteLn('Error: ', R.Error);
+      Exit;
+    end;
+
+    case R.ValueType of
+      'numeric': WriteLn('Num: ',  R.ValueAsNum);
+      'string':  WriteLn('Str: ',  R.ValueAsString);
+      'boolean': WriteLn('Bool: ', R.ValueAsBool);
+      'null':    WriteLn('Null');
+    else
+      WriteLn('Other: ', R.ValueAsString);
+    end;
+
+### 26.4 — ExecuteEngine + ShutdownEngine
+
+**Singleton design**: call pertama create engine, call berikutnya reuse.
+
+    // Call 1 — creates engine
+    R := ExecuteEngine('begin return 1 + 1; end.');     { R.ValueAsNum = 2 }
+
+    // Call 2 — reuses existing engine
+    R := ExecuteEngine('begin return "hello"; end.');   { R.ValueAsString = "hello" }
+
+    // Call 3 — same engine
+    R := ExecuteEngine('begin return true; end.');      { R.ValueAsBool = True }
+
+    // Optional explicit shutdown (auto-called at exit)
+    ShutdownEngine;
+
+**Thread-safe**: internal CriticalSection serializes access — multiple thread bisa call tanpa race.
+
+**Global state persists antar call**:
+
+    ExecuteEngine('begin var COUNTER := 0; end.');
+    ExecuteEngine('begin COUNTER := COUNTER + 1; end.');
+    ExecuteEngine('begin COUNTER := COUNTER + 1; end.');
+    R := ExecuteEngine('begin return COUNTER; end.');
+    { R.ValueAsNum = 2 — state preserved }
+
+⚠️ **Tidak ada cara reset global env** tanpa `ShutdownEngine`. Kalau butuh fresh state, tutup engine lalu create ulang (tapi ini expensive ~100ms).
+
+
+### 26.5 — RegisterNative — Callback ke Host
+
+Ini fitur paling powerful dari in-process embedding: script bisa panggil Pascal function langsung.
+
+    function MyAdd(const Args: TNativeValueArray): TNativeValue;
+    begin
+      if Length(Args) < 2 then Exit(NVNull);
+      Result := NVNum(Args[0].Num + Args[1].Num);
+    end;
+
+    begin
+      RegisterNative('add', @MyAdd);
+
+      R := ExecuteEngine('begin return add(10, 20); end.');
+      WriteLn('Result: ', R.ValueAsString);   { 30 }
+    end.
+
+**Types:**
+
+| Type | Field |
+|------|-------|
+| `TNativeValueKind` | `(nvkNull, nvkNumber, nvkString, nvkBoolean)` |
+| `TNativeValue` | record `{Kind, Num, Str, Bool}` |
+| `TNativeValueArray` | `array of TNativeValue` |
+| `TPascakNativeFunc` | `function(const Args: TNativeValueArray): TNativeValue` |
+
+**Helper constructors:**
+
+- `NVNull` — null value
+- `NVNum(V: Double)` — numeric
+- `NVStr(S: string)` — string
+- `NVBool(B: Boolean)` — boolean
+
+**Contoh — native callback dengan logic:**
+
+    function HostLog(const Args: TNativeValueArray): TNativeValue;
+    var
+      Level, Msg: string;
+    begin
+      if Length(Args) < 2 then Exit(NVNull);
+      Level := Args[0].Str;
+      Msg := Args[1].Str;
+      WriteLn('[', Level, '] ', Msg);   { host-side logging }
+      Result := NVBool(True);
+    end;
+
+    RegisterNative('hostLog', @HostLog);
+
+    ExecuteEngine(
+      'begin'#10 +
+      '  hostLog("INFO", "app started");'#10 +
+      '  hostLog("WARN", "cache miss");'#10 +
+      'end.');
+
+Output di host stdout:
+
+    [INFO] app started
+    [WARN] cache miss
+
+### 26.6 — Batasan Native Callback
+
+- **1 fungsi = 1 dispatch point** — registration jalan sekali, callback persistent
+- **Bukan zero-copy** — string di-copy Pascal→VM dan VM→Pascal
+- **Return type terbatas** — numeric/string/boolean/null; tidak bisa return array/object (v1)
+- **Exception di callback = host crash risk** — kalau callback raise exception, VM tidak catch. Bungkus dengan try/except di callback.
+
+
+### 26.7 — Requirements
+
+**Wajib:**
+
+- **`cthreads` FIRST unit di Unix** — posisi unit ini menentukan init order. Kalau SysUtils jalan dulu, thread primitive belum ready.
+- **`pascak_engine.ppu` exists** — build `pascak_engine.pas` dulu: `fpc -Mobjfpc -Sh pascak_engine.pas`
+- **Semua unit `pascak_*.pas` di `-Fu` path** — engine butuh `pascak_net`, `pascak_proc`, `pascak_crypto`, `pascak_http`, dll.
+
+**Build command minimal:**
+
+    fpc -Mobjfpc -Sh -Fu. -Fuunits my_host.pas
+
+**Windows:** `cthreads` tidak wajib, tapi tidak ada efek samping kalau pakai `{$IFDEF UNIX}`.
+
+### 26.8 — Limitations v1
+
+| Fitur | Status |
+|-------|--------|
+| Singleton engine | ✅ |
+| Thread-safe (mutex) | ✅ |
+| Native callback | ✅ |
+| Structured error object | ❌ (string only) |
+| Multi-engine instance | ❌ (singleton) |
+| Stdout capture dari script | ❌ (script print ke actual stdout) |
+| Bidirectional async (host→script mid-exec) | ❌ |
+
+### 26.9 — Kapan Pakai In-Process
+
+| Skenario | Recommendation |
+|----------|---------------|
+| Trusted script dalam host app | **In-process** |
+| Hot-path evaluation (per request) | **In-process** |
+| Native callback host→script | **In-process** |
+| Game scripting layer | **In-process** |
+| Rule engine evaluator | **In-process** |
+| Untrusted user script | Subprocess (isolation) |
+| CLI tool / plugin CLI | Subprocess |
+| Test runner (`--test`) | Subprocess |
+| Embed application launcher | Subprocess (`TPascakEmbed`) |
+
+**Full example:** `examples/embed_inproc.pas` — 6 test pass (numeric, string, boolean, null, multi-call state, native callback).
+
+
+---
+
+## Bab 27 — GUI Browser-Based
+
+Pascak punya GUI module yang memungkinkan script Anda membuat **aplikasi desktop dengan tampilan browser**. Bukan web app (yang butuh server terpisah) — GUI app yang jalan di device, buka browser otomatis, dan bisa panggil fungsi Pascal dari JavaScript.
+
+### 27.1 — Konsep: WebView Tanpa WebView
+
+Electron/Tauri pakai native webview library. Pascak pakai **browser yang sudah ada di device** — Chrome, Firefox, Safari, Edge.
+
+Arsitektur:
+
+    [Script Pascak]
+         |
+         |-- HTTP server (localhost:8080) → serve HTML/CSS/JS
+         |-- WS server (localhost:8081)   → RPC bridge
+         |-- Spawn browser via termux-open-url / xdg-open
+         |
+    [Browser] → tampil UI, WS call ke server → return ke script
+
+**Keunggulan:**
+- ✅ **Zero dependency** — tidak butuh GTK/Qt/CEF
+- ✅ **Cross-platform** — Windows/Linux/Android/macOS sama
+- ✅ **UI universal** — HTML/CSS/JS skill
+- ✅ **Ringan** — ~5 MB binary vs ~100 MB Electron
+- ✅ **Aman** — browser sandbox (JS tidak bisa akses filesystem langsung)
+
+**Keterbatasan:**
+- ❌ Butuh browser installed (biasanya ada)
+- ❌ Localhost only (tidak bisa remote)
+- ❌ Satu app per proses
+- ❌ Tidak ada native window controls
+
+### 27.2 — Quick Start: Hello GUI
+
+    begin
+      sys.execWhitelist(["termux-open-url", "xdg-open"]);
+
+      var h := gui.create(8080, 8081, "My App");
+
+      gui.bind(h, "add", lambda args : args[0] + args[1]);
+
+      gui.serve(h, "<html><body>" +
+        "<h1>Hello GUI!</h1>" +
+        "<button onclick='go()'>Add 3 + 4</button>" +
+        "<script>" +
+        "async function go(){" +
+        "  var v = await window.pascak.call('add', [3, 4]);" +
+        "  alert('Result: ' + v);" +
+        "}" +
+        "</script>" +
+        "</body></html>");
+
+      gui.start(h);
+      gui.open(h);
+      gui.run(h);
+    end.
+
+**Yang terjadi:**
+1. `gui.create` — buat instance, return handle
+2. `gui.bind` — daftarkan function `add` callable dari JS
+3. `gui.serve` — set HTML content
+4. `gui.start` — bind HTTP :8080 + WS :8081
+5. `gui.open` — spawn browser ke `http://localhost:8080/`
+6. `gui.run` — event loop blocking
+
+Setelah `gui.open`, browser terbuka dengan UI. Klik tombol → JS panggil `window.pascak.call('add', [3, 4])` → WS kirim ke server → server panggil `add` function → return 7 → alert tampil.
+
+### 27.3 — gui.create(port, [wsPort], [title]) → handle
+
+    var h := gui.create(8080);                          // default wsPort=8081, title="Pascak GUI"
+    var h := gui.create(8080, 8082);                    // custom wsPort
+    var h := gui.create(8080, 8081, "My Todo App");     // custom title
+
+**Parameter:**
+
+| Param | Tipe | Default | Deskripsi |
+|-------|------|---------|-----------|
+| `port` | int | wajib | HTTP port (1..65535) |
+| `wsPort` | int | port+1 | WebSocket port |
+| `title` | string | "Pascak GUI" | Default HTML `<h1>` |
+
+**Return:** handle (int ≥ 1) atau `-1` on error.
+
+**Handle** dipakai untuk semua API GUI berikutnya. Bisa punya multiple GUI app — tapi v1 hanya 1 yang aktif (last-created = active).
+
+### 27.4 — gui.serve(handle, html) → bool
+
+Set HTML content. Bisa dipanggil sebelum atau sesudah `gui.start`.
+
+    var html := "<html><body>" +
+      "<h1>My App</h1>" +
+      "<p>Build with Pascak</p>" +
+      "</body></html>";
+
+    gui.serve(h, html);
+
+**Behavior:**
+- **Auto-inject** `<script>` block sebelum `</body>` untuk expose `window.pascak.call`
+- Content-Type otomatis `text/html; charset=utf-8`
+- Kalau tidak ada `</body>`, script di-append di akhir
+
+**Return:** `true` kalau berhasil.
+
+
+### 27.5 — gui.bind(handle, name, callback) → bool
+
+Daftarkan server-side function yang callable dari JavaScript via `window.pascak.call(name, argsArray)`.
+
+    gui.bind(h, "add", lambda args : args[0] + args[1]);
+    gui.bind(h, "greet", lambda args : "Halo, " + args[0] + "!");
+    gui.bind(h, "fetchUser", lambda args : fetchUserById(args[0]));
+
+**Signature callback:** `function(args: array) → any`
+
+**PENTING**: callback menerima **satu argumen** — array berisi semua argumen dari JS.
+
+    // JS call:
+    window.pascak.call('add', [3, 4])
+    // Server callback: lambda args : args[0] + args[1]
+    //                  args = [3, 4]
+    //                  return 7
+
+    // JS call no args:
+    window.pascak.call('ping', [])
+    // Server callback: lambda args : "pong"
+    //                  args = []
+
+**Return value**: JSON-serializable (number, string, boolean, dict, array, null).
+
+**Error handling** — kalau callback throw:
+
+    gui.bind(h, "risky", lambda args : begin
+      if args[0] < 0 then
+        throw("negative not allowed");
+      return args[0] * 2
+    end);
+
+    // JS:
+    try {
+      var v = await window.pascak.call('risky', [-5]);
+    } catch (e) {
+      console.log('Error:', e.message);   // "negative not allowed"
+    }
+
+### 27.6 — gui.open(handle) → bool
+
+Spawn browser ke `http://localhost:{port}/`.
+
+    gui.open(h);
+
+**Strategi spawn (fallback chain):**
+1. `termux-open-url URL` (Android/Termux)
+2. `xdg-open URL` (Linux)
+3. `open URL` (macOS)
+
+**Requirements**: binary di exec whitelist.
+
+    sys.execWhitelist(["termux-open-url", "xdg-open", "open"]);
+
+**Return:**
+- `true` — salah satu spawn sukses
+- `false` — semua spawn gagal (buka URL manual di browser)
+
+**Manual fallback**: buka browser sendiri ke `http://localhost:8080/`.
+
+### 27.7 — gui.start(handle) → bool
+
+Bind HTTP + WS listener. Non-blocking.
+
+    gui.start(h);
+
+**Behavior:**
+- HTTP bind ke `127.0.0.1:{port}` (loopback only — tidak bisa diakses network)
+- WS serve + `ws.listenAsync` (event mode)
+- Spawn poll timer 20ms untuk HTTP accept loop
+- Return immediately
+
+**Kenapa 127.0.0.1 bukan 0.0.0.0?**
+- Security — GUI hanya untuk local user, bukan publik
+- Termux Android sering reject 0.0.0.0 untuk loopback
+
+**Return:**
+- `true` — semua listener bound
+- `false` — port conflict / permission denied
+
+### 27.8 — gui.run(handle)
+
+Blocking event loop. Script menunggu sampai `gui.close` atau `sys.exit`.
+
+    gui.run(h);
+
+**Behavior:**
+- Tick event loop (timer, WS, async callback)
+- Block sampai shutdown
+- Return void
+
+**Kapan selesai:**
+- `gui.close(h)` dipanggil
+- `sys.exit(code)`
+- SIGINT/SIGTERM
+
+**Kombinasi timer:**
+
+    setTimeout(lambda : begin
+      println("auto-close in 5s");
+      gui.close(h);
+    end, 5000);
+
+    gui.run(h);   // blocking 5 detik, lalu close
+
+### 27.9 — gui.close(handle) → bool
+
+Graceful shutdown.
+
+    gui.close(h);
+
+**Cleanup yang dilakukan:**
+1. Cancel poll timer
+2. HTTP `StopRequested` flag
+3. WS `StopRequested` flag + `RemoveServer` (dari event loop)
+4. Free server entries
+5. Free GUI state
+
+**Return:** `true` kalau handle valid.
+
+**Idempotent**: panggil dua kali aman — call kedua return `false`.
+
+
+### 27.10 — Auto JS Injection
+
+Setiap `gui.serve(h, html)` menyisipkan script ini sebelum `</body>`:
+
+    <script>
+    (function(){
+      var ws = new WebSocket("ws://localhost:{wsPort}/");
+      var pending = {};
+      ws.onmessage = function(e){
+        try {
+          var m = JSON.parse(e.data);
+          if (m.id && pending[m.id]) {
+            pending[m.id](m);
+            delete pending[m.id];
+          }
+        } catch(err) { console.error("[pascak] parse:", err); }
+      };
+      window.pascak = {
+        call: function(method, args) {
+          return new Promise(function(resolve, reject) {
+            var id = Math.random().toString(36).slice(2);
+            pending[id] = function(m) {
+              if (m.error) reject(new Error(m.error));
+              else resolve(m.result);
+            };
+            ws.send(JSON.stringify({
+              id: id, method: method, args: args || []
+            }));
+          });
+        }
+      };
+    })();
+    </script>
+
+**Exposed global:** `window.pascak.call(method, argsArray) → Promise`
+
+**Anda tidak perlu include ini** — sudah otomatis.
+
+**Cara pakai dari JS:**
+
+    // Call server function
+    var result = await window.pascak.call("add", [3, 4]);
+    console.log(result);   // 7
+
+    // Multiple parallel calls
+    var [a, b, c] = await Promise.all([
+      window.pascak.call("add", [1, 2]),
+      window.pascak.call("add", [3, 4]),
+      window.pascak.call("add", [5, 6])
+    ]);
+
+    // Error handling
+    try {
+      var v = await window.pascak.call("risky", [-5]);
+    } catch (e) {
+      alert("Error: " + e.message);
+    }
+
+### 27.11 — Contoh: Counter App (Server State)
+
+Counter disimpan di server, dipanggil via RPC:
+
+    var COUNTER := 0;
+
+    begin
+      sys.execWhitelist(["termux-open-url", "xdg-open"]);
+
+      var h := gui.create(8080, 8081, "Counter");
+
+      gui.bind(h, "get", lambda args : COUNTER);
+
+      gui.bind(h, "increment", lambda args : begin
+        COUNTER := COUNTER + 1;
+        return COUNTER
+      end);
+
+      gui.bind(h, "decrement", lambda args : begin
+        COUNTER := COUNTER - 1;
+        return COUNTER
+      end);
+
+      gui.serve(h, "<html><body style='font-family:sans-serif;text-align:center;padding:50px'>" +
+        "<h1>Counter</h1>" +
+        "<h2 id='val' style='font-size:64px;color:#007bff'>0</h2>" +
+        "<button onclick='inc()' style='padding:10px 30px;font-size:20px'>+1</button>" +
+        "<button onclick='dec()' style='padding:10px 30px;font-size:20px'>-1</button>" +
+        "<script>" +
+        "async function refresh(){" +
+        "  document.getElementById('val').textContent = await window.pascak.call('get', []);" +
+        "}" +
+        "async function inc(){" +
+        "  await window.pascak.call('increment', []);" +
+        "  refresh();" +
+        "}" +
+        "async function dec(){" +
+        "  await window.pascak.call('decrement', []);" +
+        "  refresh();" +
+        "}" +
+        "refresh();" +
+        "</script></body></html>");
+
+      gui.start(h);
+      gui.open(h);
+      gui.run(h);
+    end.
+
+**Key pattern:**
+- `COUNTER` di server → persist antar call
+- Button click → call → refresh — UI selalu sync dengan server
+- Kalau user buka 2 tab, keduanya lihat counter yang sama
+
+### 27.12 — Custom WS Port
+
+Default `wsPort = port + 1`. Kalau port `8080` terpakai atau conflict, custom:
+
+    var h := gui.create(9000, 9001);   // HTTP :9000, WS :9001
+
+Auto JS injection otomatis pakai `wsPort` yang benar:
+
+    ws = new WebSocket("ws://localhost:9001/");   // ← inject otomatis
+
+
+### 27.13 — Contoh: Todo dengan SQLite
+
+Server-side persistence, UI reactive:
+
+    var DB := -1;
+
+    function listTodos() begin
+      return sqliteQuery(DB, "SELECT id, text, done FROM todos ORDER BY id DESC")
+    end;
+
+    function addTodo(text) begin
+      sqliteExec(DB, "INSERT INTO todos (text, done) VALUES (?, 0)", [text]);
+      return listTodos()
+    end;
+
+    function toggleTodo(id) begin
+      sqliteExec(DB, "UPDATE todos SET done = 1 - done WHERE id = ?", [id]);
+      return listTodos()
+    end;
+
+    function deleteTodo(id) begin
+      sqliteExec(DB, "DELETE FROM todos WHERE id = ?", [id]);
+      return listTodos()
+    end;
+
+    begin
+      sys.execWhitelist(["termux-open-url", "xdg-open"]);
+
+      DB := sqliteConnect("todos.db");
+      sqliteExec(DB, "CREATE TABLE IF NOT EXISTS todos (" +
+                     "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+                     "text TEXT, done INTEGER DEFAULT 0)");
+
+      var h := gui.create(8080, 8081, "Todo");
+      gui.bind(h, "list", lambda args : listTodos());
+      gui.bind(h, "add", lambda args : addTodo(args[0]));
+      gui.bind(h, "toggle", lambda args : toggleTodo(args[0]));
+      gui.bind(h, "delete", lambda args : deleteTodo(args[0]));
+
+      gui.serve(h, "<html><body style='font-family:sans-serif;max-width:600px;margin:40px auto;padding:20px'>" +
+        "<h1>Todo</h1>" +
+        "<input id='inp' placeholder='What to do?' style='width:70%;padding:8px'>" +
+        "<button onclick='add()'>Add</button>" +
+        "<ul id='list' style='list-style:none;padding:0'></ul>" +
+        "<script>" +
+        "async function render(todos){" +
+        "  var ul = document.getElementById('list');" +
+        "  ul.innerHTML = '';" +
+        "  for (var t of todos) {" +
+        "    var li = document.createElement('li');" +
+        "    li.style.cssText = 'padding:10px;border-bottom:1px solid #eee;" +
+        "      display:flex;justify-content:space-between;" +
+        "      ' + (t.done ? 'text-decoration:line-through;color:#999' : '');" +
+        "    li.innerHTML = '<span onclick=\\'toggle(' + t.id + ')\\' style=\\'cursor:pointer;flex:1\\'>' +" +
+        "      t.text + '</span><button onclick=\\'del(' + t.id + ')\\'>X</button>';" +
+        "    ul.appendChild(li);" +
+        "  }" +
+        "}" +
+        "async function refresh(){ render(await window.pascak.call('list', [])); }" +
+        "async function add(){" +
+        "  var inp = document.getElementById('inp');" +
+        "  if (!inp.value) return;" +
+        "  await window.pascak.call('add', [inp.value]);" +
+        "  inp.value = ''; refresh();" +
+        "}" +
+        "async function toggle(id){ await window.pascak.call('toggle', [id]); refresh(); }" +
+        "async function del(id){ await window.pascak.call('delete', [id]); refresh(); }" +
+        "refresh();" +
+        "</script></body></html>");
+
+      gui.start(h);
+      gui.open(h);
+      gui.run(h);
+
+      sqliteClose(DB);
+    end.
+
+**Full example:** `examples/todo_gui.pas` (124 lines).
+
+### 27.14 — Contoh: Chat Multi-User
+
+Polling-based chat (v1 tidak support server→client push):
+
+    var MESSAGES := [];
+
+    function getMessages(since) begin
+      var result := [];
+      var i := since;
+      while i < len(MESSAGES) do begin
+        push(result, MESSAGES[i]);
+        i := i + 1;
+      end;
+      return {"messages": result, "total": len(MESSAGES)}
+    end;
+
+    function sendMessage(user, text) begin
+      push(MESSAGES, {
+        "user": user, "text": text, "ts": time.now()
+      });
+      return true
+    end;
+
+    begin
+      sys.execWhitelist(["termux-open-url", "xdg-open"]);
+
+      var h := gui.create(8080, 8081, "Chat");
+
+      gui.bind(h, "getMessages", lambda args : getMessages(args[0]));
+      gui.bind(h, "sendMessage", lambda args : sendMessage(args[0], args[1]));
+
+      gui.serve(h, "<html><body style='font-family:sans-serif;max-width:600px;margin:40px auto;padding:20px'>" +
+        "<h1>Chat</h1>" +
+        "<div id='msgs' style='border:1px solid #ccc;height:300px;overflow-y:auto;padding:10px'></div>" +
+        "<input id='user' placeholder='Your name' value='Guest' style='width:100px;padding:6px'>" +
+        "<input id='msg' placeholder='Message' style='width:60%;padding:6px'>" +
+        "<button onclick='send()'>Send</button>" +
+        "<script>" +
+        "var lastCount = 0;" +
+        "async function poll(){" +
+        "  var r = await window.pascak.call('getMessages', [lastCount]);" +
+        "  for (var m of r.messages) {" +
+        "    var div = document.getElementById('msgs');" +
+        "    div.innerHTML += '<div><b>' + m.user + ':</b> ' + m.text + '</div>';" +
+        "    div.scrollTop = div.scrollHeight;" +
+        "  }" +
+        "  lastCount = r.total;" +
+        "}" +
+        "async function send(){" +
+        "  var u = document.getElementById('user').value;" +
+        "  var m = document.getElementById('msg').value;" +
+        "  if (!m) return;" +
+        "  await window.pascak.call('sendMessage', [u, m]);" +
+        "  document.getElementById('msg').value = '';" +
+        "  poll();" +
+        "}" +
+        "setInterval(poll, 500);" +
+        "poll();" +
+        "</script></body></html>");
+
+      gui.start(h);
+      gui.open(h);
+      gui.run(h);
+    end.
+
+**Full example:** `examples/chat_gui.pas` (131 lines).
+
+### 27.15 — Pattern: Native Callback Integration
+
+GUI + RegisterNative (kalau host app):
+
+    // Host Pascal code
+    function MyNativeFeature(const Args: TNativeValueArray): TNativeValue;
+    begin
+      // ... akses native resource ...
+      Result := NVStr('native result');
+    end;
+
+    RegisterNative('nativeFeature', @MyNativeFeature);
+
+    // Script:
+    gui.bind(h, "runNative", lambda args : nativeFeature(args[0]));
+
+
+### 27.16 — Batasan v1
+
+| Fitur | Status |
+|-------|--------|
+| HTTP + WS RPC | ✅ |
+| Auto JS injection | ✅ |
+| Browser spawn | ✅ (butuh exec whitelist) |
+| HTTPS | ❌ (localhost only, tidak ada cert) |
+| Multi-window | ❌ (satu GUI per proses) |
+| Native window | ❌ (browser only) |
+| Server→client push | ❌ (pakai polling) |
+| File upload | ⚠️ (via `req["body"]`, max 10MB) |
+| Auth | ❌ (localhost, tidak butuh) |
+| Custom favicon | ❌ (default browser) |
+
+**Workarounds:**
+
+- **Server→client push**: polling 100ms–500ms. Kalau butuh realtime, buka WS sendiri via `ws.connect` atau `ws.serve` terpisah.
+- **HTTPS**: tidak perlu untuk localhost — browser treat `localhost` sebagai secure context.
+- **Multi-window**: buka tab baru via `window.open()`, share state via RPC.
+- **File upload**: `gui.bind` menerima string; file biner via `base64Encode` di JS.
+
+### 27.17 — Kapan Pakai GUI Browser-Based
+
+**Cocok untuk:**
+- ✅ Tools internal (dashboard, admin panel, debug UI)
+- ✅ Editor / text tools
+- ✅ Data viewer (SQLite, JSON, log)
+- ✅ Game state debugger
+- ✅ Prototype aplikasi desktop
+- ✅ Cross-device app (buka di HP, tablet, laptop — asal satu network)
+
+**Tidak cocok untuk:**
+- ❌ Game realtime (render loop di JS via canvas → bisa, tapi butuh setup)
+- ❌ Native OS integration (system tray, notification native, dll)
+- ❌ Performance-critical UI (webview overhead)
+- ❌ Fully offline (butuh browser)
+
+### 27.18 — Ringkasan GUI API
+
+| API | Signature | Return |
+|-----|-----------|--------|
+| `gui.create` | `(port, [wsPort], [title])` | `handle` |
+| `gui.serve` | `(handle, html)` | `bool` |
+| `gui.bind` | `(handle, name, callback)` | `bool` |
+| `gui.open` | `(handle)` | `bool` |
+| `gui.start` | `(handle)` | `bool` |
+| `gui.run` | `(handle)` | `null` (blocking) |
+| `gui.close` | `(handle)` | `bool` |
+
+**JS bridge:** `window.pascak.call(method, argsArray) → Promise`
+
+**4 contoh tersedia:**
+- `examples/hello_gui.pas` — counter basic (82 lines)
+- `examples/todo_gui.pas` — SQLite CRUD (124 lines)
+- `examples/chat_gui.pas` — multi-user polling (131 lines)
+- `examples/embed_inproc.pas` — host embedding (native callback)
+
+**Kombinasi powerful:**
+- GUI + SQLite → data-driven app
+- GUI + HTTP client → consume external API
+- GUI + FFI → akses native library
+- GUI + Coroutine → background tasks dengan timer
+
 ## Bonus — HTTP/2 Client
 
 Pascak juga mendukung HTTP/2 client via ALPN negotiation (RFC 7301).
