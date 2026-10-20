@@ -28512,7 +28512,7 @@ begin
         Exit(TValue.CreateNull);
       end;
 
-      Ctx := TTLSContext.Create(True);
+      Ctx := GetSharedTLSContext(True);
       if not TLSConnectALPN(Ctx, Sock, Host, ['h2'], TLSConn, Negotiated) then
       begin
         errMSG.callerror(144,
@@ -28592,7 +28592,7 @@ begin
       try TLSClose(TLSConn); except end;
       TLSConn.Free;
     end;
-    if Assigned(Ctx) then Ctx.Free;
+    if Assigned(Ctx) then Ctx.Release;
     if Sock >= 0 then NetClose(Sock);
   end;
 end;
