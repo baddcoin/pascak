@@ -2379,12 +2379,12 @@ else
 end;
 ```
 
-### 24.7 — Tidak Ada `var` Inline
+### 24.7 — `var` Inline vs For-Loop Iterator
 
-Deklarasi `var` harus di awal blok, tidak bisa di tengah.
+Deklarasi `var` reguler harus di awal blok, tidak bisa di tengah:
 
 ```pascal
-// ❌ Tidak valid
+// ❌ Tidak valid — var di tengah if-body
 if cond then
   var x := 5;
 
@@ -2399,8 +2399,34 @@ if cond then begin
 end;
 ```
 
-**Exception**: statement `var a, b := ...` di top-level dan di awal
-function body OK. Tapi tidak boleh di tengah block.
+**Exception 1 — top-level & awal function**: `var a, b := ...` di
+top-level dan di awal function body OK. Tapi tidak boleh di tengah
+block.
+
+**Exception 2 — For-loop iterator (sejak v0.8.1)**: variabel loop
+**tidak** butuh prior `var`. Parser auto-scope di dalam loop:
+
+```pascal
+// ✅ Semua valid tanpa `var x` di awal:
+
+for x in [1, 2, 3] do
+  println(x);
+
+for i := 1 to 5 do
+  println(i);
+
+for k in {"a": 1, "b": 2} do
+  println(k);
+
+var doubled := [x * 2 for x in [1, 2, 3]];
+```
+
+**Histori**: Sebelum v0.8.1, pattern di atas error
+"belum dideklarasikan" — DCE (`TDeadCodeAnalyzer.Analyze`) memanggil
+`MarkUsed` **sebelum** `DeclareSymbol`. Fix v0.8.1: `MarkUsedIfExists`
+yang silently skip jika loop var belum ada di scope. Shadowing tetap
+bekerja — kalau `x` sudah ada di scope luar, tetap ditandai `used`
+(captured). 8 regression test pass.
 
 ### 24.8 — Named Function vs Lambda di FFI Callback
 
@@ -2468,7 +2494,7 @@ pakai indexing `["key"]` — aman untuk semua key name.
 | Literal newline | Pakai `\n` atau `chr(10)` |
 | `if` bukan expression | Pakai ternary `?:` atau block lambda |
 | Tidak ada `elif` | Sequential `if` atau nested else-if |
-| Tidak ada inline var | Deklarasi di awal blok |
+| Tidak ada inline var | Deklarasi di awal blok (kecuali for-loop iterator — auto-scoped sejak v0.8.1) |
 | Dot + keyword | Indexing `d["method"]` |
 | FFI callback | Named function atau lambda |
 
