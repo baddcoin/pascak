@@ -377,6 +377,41 @@ with a browser.
 Create GUI app instance. `wsPort` default = `port + 1`. Returns handle ≥ 1,
 or `-1` on error.
 
+#### `gui.createTLS(port, certPath, keyPath, [wsPort], [title]) → handle`
+
+Create GUI app dengan **HTTPS + WSS** (self-signed cert). Browser spawn ke
+`https://localhost:{port}/`, auto-injected JS pakai `wss://localhost:{wsPort}/`.
+
+**Parameter:**
+- `certPath`, `keyPath` — PEM cert + key. Absolute path di `$HOME` diizinkan, atau sandbox-relative
+- `wsPort` — default `port + 1`
+- `title` — default `"Pascak GUI (TLS)"`
+
+**Cert generation:**
+
+    openssl req -x509 -newkey rsa:2048 \
+      -keyout ~/server.key -out ~/server.crt \
+      -days 365 -nodes -subj "/CN=localhost" \
+      -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+
+**Behavior:**
+- HTTP listener → TLS-wrapped (TLSContext shared dengan WS, refcounted)
+- WS listener → WSS (wajib — browser block `ws://` dari HTTPS)
+- Compression auto-enabled untuk WSS (payload encrypted, aman dari CRIME/BREACH)
+- Self-signed cert → browser warning sekali per host, click Advanced > Proceed
+
+**Kapan pakai:**
+- Browser modern **wajib** HTTPS untuk `getUserMedia`, `serviceWorker`, `clipboard`
+- Demo `wss://` production-like
+- LAN access dari device lain (custom CA / self-signed trust)
+
+**Return:** handle ≥ 1, atau `-1` on error.
+
+**Limitations:**
+- Localhost only (`127.0.0.1` bind, tidak bisa diakses network)
+- Self-signed → warning sekali per browser
+- Cert expired → handshake fail
+
 #### `gui.serve(handle, html) → bool`
 
 Set HTML content. The engine **auto-injects** a `<script>` block before

@@ -3599,6 +3599,127 @@ GUI + RegisterNative (kalau host app):
 - GUI + FFI → akses native library
 - GUI + Coroutine → background tasks dengan timer
 
+### 27.19 — GUI dengan HTTPS (TLS)
+
+Mulai **v0.7.0**, GUI module mendukung HTTPS + WSS via `gui.createTLS`.
+Berguna untuk:
+
+- Browser modern yang **wajib** HTTPS untuk `getUserMedia`, `serviceWorker`, `clipboard`
+- Testing skenario `wss://` production-like
+- LAN access dari device lain (HP/tablet connect ke GUI yang jalan di laptop)
+
+#### Generate Cert (Self-Signed, Dev)
+
+    openssl req -x509 -newkey rsa:2048 \
+      -keyout ~/server.key -out ~/server.crt \
+      -days 365 -nodes -subj "/CN=localhost" \
+      -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+
+Hasil: `~/server.crt` (~1 KB) + `~/server.key` (~1.7 KB). Expired dalam 365 hari.
+
+#### Server HTTPS
+
+Ganti `gui.create` → `gui.createTLS`:
+
+    var home := sys.env("HOME");
+    var h := gui.createTLS(8090,
+      home + "/server.crt",
+      home + "/server.key",
+      8091,                     // WS port (optional)
+      "Counter TLS");           // title (optional)
+
+    gui.bind(h, "add", lambda args : args[0] + args[1]);
+    gui.serve(h, "<html>...<button onclick='go()'>+1</button>...</html>");
+
+    gui.start(h);
+    gui.open(h);       // spawn browser ke https://localhost:8090/
+    gui.run(h);
+
+**Yang terjadi otomatis:**
+
+| Komponen | Protokol |
+|----------|----------|
+| HTTP listener | `https://localhost:8090/` |
+| WS listener | `wss://localhost:8091/` |
+| `gui.open()` URL | `https://localhost:8090/` |
+| Auto-inject JS | `new WebSocket("wss://...")` |
+
+**Tidak ada kode JS yang berubah** — semua `window.pascak.call()` tetap sama.
+
+#### Test dengan curl
+
+    curl -k https://localhost:8090/
+    # HTML dengan wss:// di auto-inject script
+
+    curl -k -o /dev/null -w "%{http_code}\n" https://localhost:8090/
+    # 200
+
+`-k` = ignore self-signed cert warning.
+
+#### Buka di Browser
+
+Buka `https://localhost:8090/` di browser → warning "Not secure" (self-signed):
+
+- **Chrome/Edge**: klik **Advanced** → **Proceed to localhost (unsafe)**
+- **Firefox**: klik **Advanced** → **Accept the Risk and Continue**
+- **Safari**: klik **Show Details** → **visit this website** → **Visit Website**
+
+Warning muncul **sekali per host**. Setelah accept, GUI berjalan normal.
+
+#### Kapan Butuh TLS?
+
+| Use case | Butuh TLS? |
+|----------|-----------|
+| Admin dashboard internal (localhost) | ❌ Optional |
+| App yang butuh `getUserMedia` (kamera/mic) | ✅ Wajib |
+| App yang butuh `serviceWorker` (offline) | ✅ Wajib |
+| App yang butuh `clipboard.writeText()` | ✅ Wajib (Chrome) |
+| Testing `wss://` production | ✅ Wajib |
+| LAN access dari HP/tablet | ✅ Wajib (atau self-signed trust) |
+
+#### Perbandingan
+
+| Aspek | `gui.create` | `gui.createTLS` |
+|-------|-------------|-----------------|
+| HTTP | `http://localhost:PORT/` | `https://localhost:PORT/` |
+| WS | `ws://localhost:WSPORT/` | `wss://localhost:WSPORT/` |
+| Cert | Tidak butuh | Wajib (PEM + key) |
+| Browser warning | Tidak ada | Sekali per host |
+| Browser API access | Terbatas | Full (secure context) |
+| Setup cost | 0 detik | ~5 detik (generate cert) |
+
+#### Production Notes
+
+**Self-signed cert cukup untuk dev/lokal**. Untuk production LAN access, pilihan:
+
+1. **Custom CA** — generate CA root, install di device target, issue leaf cert
+2. **mkcert** — tool lokal yang auto-generate CA + cert per domain (`mkcert localhost 127.0.0.1 ::1`), install CA di browser
+3. **Reverse proxy** — GUI tetap HTTP localhost, reverse proxy (nginx/caddy) handle TLS publik
+
+Untuk production deployment GUI ke **banyak device**, rekomendasi: pakai **mkcert** (browser trust CA-nya) atau reverse proxy.
+
+#### Limitations v0.7.0
+
+| Fitur | Status |
+|-------|--------|
+| HTTPS + WSS self-signed | ✅ |
+| Custom CA / trusted cert | ✅ (drop-in cert + key) |
+| Cert hot-reload | ❌ (restart needed) |
+| Mutual TLS (client cert) | ❌ |
+| ALPN / HTTP/2 untuk GUI | ❌ (pakai HTTP/1.1) |
+
+**Full example:** `examples/todo_gui_tls.pas` — 120 lines, Todo dengan HTTPS + SQLite.
+
+**Cheat sheet:**
+
+    // Dev (HTTP)
+    var h := gui.create(8080, 8081, "App");
+
+    // Dev/prod-lokal (HTTPS + WSS)
+    var cert := sys.env("HOME") + "/server.crt";
+    var key  := sys.env("HOME") + "/server.key";
+    var h := gui.createTLS(8080, cert, key, 8081, "App");
+
 ## Bonus — HTTP/2 Client
 
 Pascak juga mendukung HTTP/2 client via ALPN negotiation (RFC 7301).
