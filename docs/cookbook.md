@@ -59,6 +59,7 @@ Ini memandu Anda ke reference kalau butuh detail signature.
 8. [Request batching + dedup](#8-request-batching--dedup) — async + cache
 9. [Scheduled job runner](#9-scheduled-job-runner) — setInterval + SQLite + DLQ
 10. [Broadcast backpressure](#10-broadcast-backpressure) — WS + queue + drop
+11. [REST+GUI app](#11-restgui-app--shared-state-dual-interface) — shared state, dual interface
 
 ---
 
@@ -1078,6 +1079,168 @@ per-client, drop kalau penuh.
   backpressure. Untuk strict flow control, butuh protocol di atas WS
 
 ---
+
+
+---
+
+## 11. REST+GUI app — shared state, dual interface
+
+**Kapan pakai**: Butuh satu aplikasi yang melayani dua interface sekaligus — REST API untuk integrasi eksternal (mobile app, CI, curl) dan GUI untuk user manusia (dashboard, admin panel). Keduanya share data yang sama (SQLite atau dict).
+
+**Cross-ref**: http.serve · gui.create/bind/serve/start/run · sqliteQuery · jsonStringify
+
+Contoh — admin dashboard dengan REST API + GUI browser, sharing SQLite:
+
+    var DB := -1;
+    var GUI_HANDLE := -1;
+    var API_HANDLE := -1;
+
+    // ─── Business logic (dipakai oleh keduanya) ───
+    function listItems() begin
+      return sqliteQuery(DB,
+        "SELECT id, name, price FROM items ORDER BY id DESC")
+    end;
+
+    function createItem(name, price) begin
+      sqliteExec(DB,
+        "INSERT INTO items (name, price) VALUES (?, ?)",
+        [name, price]);
+      return {"ok": true}
+    end;
+
+    function deleteItem(id) begin
+      sqliteExec(DB, "DELETE FROM items WHERE id = ?", [id]);
+      return {"ok": true}
+    end;
+
+    // ─── REST API handler (dipanggil dari http.serve) ───
+    function apiHandler(req) begin
+      var m := req["method"];     // keyword — indexing
+      var p := req["path"];
+
+      if p == "/api/items" and m == "GET" then
+        return {
+          "status": 200,
+          "headers": {"Content-Type": "application/json"},
+          "body": jsonStringify({"items": listItems()})
+        };
+
+      if p == "/api/items" and m == "POST" then begin
+        var data := jsonParse(req["body"]);
+        if data == null then
+          return {"status": 400, "body": "invalid JSON"};
+        return {
+          "status": 201,
+          "headers": {"Content-Type": "application/json"},
+          "body": jsonStringify(createItem(data["name"], data["price"]))
+        };
+      end;
+
+      if p == "/api/items" and m == "DELETE" then begin
+        var data := jsonParse(req["body"]);
+        if data == null then
+          return {"status": 400, "body": "invalid JSON"};
+        return {
+          "status": 200,
+          "headers": {"Content-Type": "application/json"},
+          "body": jsonStringify(deleteItem(data["id"]))
+        };
+      end;
+
+      return {"status": 404, "body": "not found"};
+    end;
+
+    // ─── GUI HTML ───
+    function guiHtml() begin
+      return
+        "<html><body style='font-family:sans-serif;" +
+        "max-width:700px;margin:40px auto;padding:20px'>" +
+        "<h1>Items Dashboard</h1>" +
+        "<input id='n' placeholder='Name' style='padding:6px'> " +
+        "<input id='p' type='number' placeholder='Price' style='padding:6px'> " +
+        "<button onclick='add()'>Add</button>" +
+        "<ul id='list' style='list-style:none;padding:0'></ul>" +
+        "<script>" +
+        "async function refresh(){" +
+        "  var rows = await window.pascak.call('list', []);" +
+        "  var ul = document.getElementById('list');" +
+        "  ul.innerHTML = '';" +
+        "  for (var it of rows) {" +
+        "    var li = document.createElement('li');" +
+        "    li.style.cssText='padding:8px;border-bottom:1px solid #eee';" +
+        "    li.innerHTML = it.name + ' — $' + it.price +" +
+        "      ' <button onclick=\\'del(' + it.id + ')\\'>X</button>';" +
+        "    ul.appendChild(li);" +
+        "  }" +
+        "}" +
+        "async function add(){" +
+        "  var n = document.getElementById('n').value;" +
+        "  var p = parseFloat(document.getElementById('p').value) || 0;" +
+        "  if (!n) return;" +
+        "  await window.pascak.call('create', [n, p]);" +
+        "  document.getElementById('n').value='';" +
+        "  document.getElementById('p').value='';" +
+        "  refresh();" +
+        "}" +
+        "async function del(id){" +
+        "  await window.pascak.call('remove', [id]);" +
+        "  refresh();" +
+        "}" +
+        "refresh();" +
+        "</script></body></html>";
+    end;
+
+    begin
+      // Whitelist browser launcher (Android + Linux)
+      sys.execWhitelist(["termux-open-url", "xdg-open"]);
+
+      // 1. Init database
+      DB := sqliteConnect("app.db");
+      sqliteExec(DB, "CREATE TABLE IF NOT EXISTS items (" +
+                     "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+                     "name TEXT NOT NULL, price REAL)");
+
+      // 2. REST API (port 8080 — bisa diakses network)
+      API_HANDLE := http.serve(8080, apiHandler);
+      http.listenAsync(API_HANDLE);
+      println("API:  http://0.0.0.0:8080/api/items");
+
+      // 3. GUI (port 8090 — localhost only)
+      GUI_HANDLE := gui.create(8090, 8091, "Items Dashboard");
+      gui.bind(GUI_HANDLE, "list",   lambda args : listItems());
+      gui.bind(GUI_HANDLE, "create", lambda args : createItem(args[0], args[1]));
+      gui.bind(GUI_HANDLE, "remove", lambda args : deleteItem(args[0]));
+      gui.serve(GUI_HANDLE, guiHtml());
+      gui.start(GUI_HANDLE);
+      gui.open(GUI_HANDLE);
+
+      // 4. Block — GUI event loop juga drive HTTP API accept queue
+      gui.run(GUI_HANDLE);
+    end.
+
+Test dengan curl (REST) + browser (GUI):
+
+    # REST — create
+    curl -X POST -H "Content-Type: application/json" \
+      -d '{"name":"Widget","price":9.99}' \
+      http://localhost:8080/api/items
+
+    # REST — list
+    curl http://localhost:8080/api/items
+
+    # GUI — buka http://localhost:8090/ di browser
+    # Klik "Add" di GUI → list di curl juga ke-update
+
+**Notes**:
+
+- **Zero duplication** — `listItems()`, `createItem()`, `deleteItem()` adalah single source of truth. REST handler dan GUI binding sama-sama panggil fungsi ini. Kalau ada perubahan logic (tambah validasi, audit log), edit di satu tempat.
+- **Port terpisah** — REST `:8080` bind ke `0.0.0.0` (bisa diakses HP/tablet di jaringan), GUI `:8090` bind ke `127.0.0.1` (localhost saja). Jangan pakai port sama untuk keduanya.
+- **One event loop** — `gui.run()` tick event loop yang juga memproses HTTP API accept queue. **Jangan** panggil `http.listen()` (blocking) setelah `gui.run()` — script akan freeze.
+- **Auth berbeda** — REST perlu auth middleware (token/JWT) kalau di-expose ke publik. GUI tidak perlu karena localhost. Pasang auth hanya di `apiHandler`, tidak di `gui.bind`.
+- **CORS** — kalau GUI diakses dari domain lain, REST perlu header `Access-Control-Allow-Origin`. Untuk localhost, browser tidak butuh CORS.
+- **Payload limit** — REST body di-cap `HTTP_MAX_HEADER_BYTES` (16 MB). GUI WS frame di-cap 16 MB. Untuk upload file besar, gunakan `fs.writeAsync` chunk dari JS ke RPC.
+- **Anti-pattern**: jangan panggil `http.get("http://localhost:8080/...")` dari `gui.bind` — itu loopback HTTP ke diri sendiri (boros resource). Panggil `listItems()` langsung.
+- **Shutdown** — `onShutdown` register `sqliteClose(DB)`, `http.stop(API_HANDLE)`. Event loop sudah graceful exit kalau `gui.close` dipanggil.
 
 ## Kontribusi Resep
 
