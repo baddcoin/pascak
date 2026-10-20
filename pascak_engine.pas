@@ -36641,6 +36641,10 @@ type
     PollTimerID: Int64;
     Bindings: TDictValue;
     Running: Boolean;
+    IsTLS: Boolean;
+    TLSContext: Pointer;
+    TLSCertPath: string;
+    TLSKeyPath: string;
     constructor Create(AHandle, APort, AWSPort: Integer; const ATitle: string);
     destructor Destroy; override;
   end;
@@ -36682,6 +36686,11 @@ end;
 destructor TGuiApp.Destroy;
 begin
   if Assigned(Bindings) then Bindings.Free;
+  if Assigned(TLSContext) then
+  begin
+    try TLSServerContext(TLSContext).Release; except end;
+    TLSContext := nil;
+  end;
   inherited;
 end;
 
@@ -36752,7 +36761,10 @@ begin
     errMSG.callerror(144, 'gui.open: invalid handle', errMSG.xrow, errMSG.xcol);
     Exit(TValue.CreateBool(False));
   end;
-  URL := 'http://localhost:' + IntToStr(App.Port) + '/';
+  if App.IsTLS then
+    URL := 'https://localhost:' + IntToStr(App.Port) + '/'
+  else
+    URL := 'http://localhost:' + IntToStr(App.Port) + '/';
 
   if ProcExec('termux-open-url', [URL], OutS, ErrS, ExitCode, 5000) then
     if ExitCode = 0 then
@@ -36777,7 +36789,7 @@ var
   D, H: TDictValue;
   Body, Html: string;
   WsPort: Integer;
-  Script: string;
+  Script, WsScheme: string;
 begin
   App := GuiAppsGetLast;
   if not Assigned(App) then
@@ -36791,10 +36803,13 @@ begin
   Html := App.HTML;
   WsPort := App.WSPort;
 
+  WsScheme := 'ws';
+  if App.IsTLS then WsScheme := 'wss';
+  
   Script :=
     '<script>' +
     '(function(){' +
-    'var ws=new WebSocket("ws://localhost:' + IntToStr(WsPort) + '/");' +
+    'var ws=new WebSocket("' + WsScheme + '://localhost:' + IntToStr(WsPort) + '/");' +
     'var pending={};' +
     'ws.onmessage=function(e){' +
     'try{var m=JSON.parse(e.data);' +
@@ -37004,13 +37019,15 @@ end;
 function Native_GUI_Start(Args: TObjectList; CallEnv: TSymbolTable): TValue;
 var
   App: TGuiApp;
-  HttpH, WsH: Integer;
+  HttpH, WsH, WsSock: Integer;
   CallArgs: TObjectList;
-  PortVal, HandlerVal, WsCfgVal, ResultVal: TValue;
+  PortVal, ResultVal: TValue;
   WsCfg: TDictValue;
+  WsCfgVal: TValue;
   Ctx: TEngineContext;
   PollVal: TValue;
   E: PHTTPServerEntry;
+  WsE: PWSServerEntry;
 begin
   if (Args.Count <> 1) or (TValue(Args[0]).DataType <> dtNumeric) then
   begin
@@ -37032,11 +37049,12 @@ begin
     Exit(TValue.CreateBool(False));
   end;
 
-  // HTTP bind manually on 127.0.0.1 (0.0.0.0 may not accept loopback on Termux)
   if not NetListen('127.0.0.1', App.Port, HttpH) then
   begin
-    errMSG.callerror(145, 'gui.start: listen 127.0.0.1:' + IntToStr(App.Port) + ' failed — ' + NetLastError,
-                     errMSG.xrow, errMSG.xcol);
+    errMSG.callerror(145, 
+      'gui.start: listen 127.0.0.1:' + IntToStr(App.Port) + 
+      ' failed — ' + NetLastError,
+      errMSG.xrow, errMSG.xcol);
     Exit(TValue.CreateBool(False));
   end;
   App.HttpHandle := AllocHTTPServer;
@@ -37046,31 +37064,60 @@ begin
     E^.ListenSock := HttpH;
     E^.Port := App.Port;
     E^.Handler := TValue.CreateNative(@Native_GUI_HttpHandler);
+    if App.IsTLS then
+    begin
+      E^.IsTLS := True;
+      E^.TLSContext := App.TLSContext;
+      if Assigned(E^.TLSContext) then
+        TLSServerContext(E^.TLSContext).Retain;
+      E^.TLSCert := App.TLSCertPath;
+      E^.TLSKey := App.TLSKeyPath;
+    end;
   end;
 
-  WsCfg := TDictValue.Create;
-  WsCfg.SetValue('onMessage', TValue.CreateNative(@Native_GUI_WsHandler));
-  WsCfgVal := TValue.CreateDict(WsCfg);
-  PortVal := TValue.CreateNum(App.WSPort);
-  CallArgs := TObjectList.Create(False);
-  try
-    CallArgs.Add(PortVal);
-    CallArgs.Add(WsCfgVal);
+  if not NetListen('127.0.0.1', App.WSPort, WsSock) then
+  begin
+    if Assigned(E) then E^.StopRequested := True;
+    FreeHTTPServer(App.HttpHandle);
+    App.HttpHandle := -1;
+    errMSG.callerror(145, 
+      'gui.start: listen 127.0.0.1:' + IntToStr(App.WSPort) + 
+      ' failed — ' + NetLastError,
+      errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateBool(False));
+  end;
+  
+  WsH := AllocWSServer;
+  WsE := GetWSServer(WsH);
+  if Assigned(WsE) then
+  begin
+    WsE^.ListenSock := WsSock;
+    WsE^.Port := App.WSPort;
+    WsE^.IsTLS := App.IsTLS;
+    if App.IsTLS then
+    begin
+      WsE^.TLSContext := App.TLSContext;
+      if Assigned(WsE^.TLSContext) then
+        TLSServerContext(WsE^.TLSContext).Retain;
+      WsE^.TLSCert := App.TLSCertPath;
+      WsE^.TLSKey := App.TLSKeyPath;
+    end;
+    
+    WsCfg := TDictValue.Create;
     try
-      ResultVal := Native_WS_Serve(CallArgs, CallEnv);
-      WsH := Trunc(ResultVal.NumVal);
-      ResultVal.Free;
+      WsCfg.SetValue('onMessage', TValue.CreateNative(@Native_GUI_WsHandler));
+      if App.IsTLS then
+        WsCfg.SetValue('compression', TValue.CreateStr('on'));
+      WsCfgVal := TValue.CreateDict(WsCfg);
+    except
+      WsCfg.Free;
+      raise;
+    end;
+    try
+      WSExtractHandlers(WsE, WsCfgVal);
     finally
-      PortVal.Free;
       WsCfgVal.Free;
     end;
-  finally
-    CallArgs.Free;
-  end;
-  if WsH < 0 then
-  begin
-    errMSG.callerror(144, 'gui.start: ws.serve failed', errMSG.xrow, errMSG.xcol);
-    Exit(TValue.CreateBool(False));
   end;
   App.WSHandle := WsH;
 
@@ -37109,6 +37156,88 @@ begin
   Result := TValue.CreateNull;
 end;
 
+
+function Native_GUI_CreateTLS(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  Port, WSPort, H: Integer;
+  Title, CertPath, KeyPath, SafeCert, SafeKey, HomeDir, Msg: string;
+  App: TGuiApp;
+  Ctx: TLSServerContext;
+begin
+  if (Args.Count < 3) or (Args.Count > 5) then
+  begin
+    errMSG.callerror(140, 
+      'gui.createTLS(port, certPath, keyPath, [wsPort], [title])', 
+      errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateNum(-1));
+  end;
+  if (TValue(Args[0]).DataType <> dtNumeric) or
+     (TValue(Args[1]).DataType <> dtString) or
+     (TValue(Args[2]).DataType <> dtString) then
+  begin
+    errMSG.callerror(140, 
+      'gui.createTLS: port int, cert string, key string', 
+      errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateNum(-1));
+  end;
+  
+  Port := Trunc(TValue(Args[0]).NumVal);
+  CertPath := TValue(Args[1]).StrVal;
+  KeyPath := TValue(Args[2]).StrVal;
+  WSPort := Port + 1;
+  Title := 'Pascak GUI (TLS)';
+  if Args.Count >= 4 then
+    if TValue(Args[3]).DataType = dtNumeric then
+      WSPort := Trunc(TValue(Args[3]).NumVal);
+  if Args.Count >= 5 then
+    if TValue(Args[4]).DataType = dtString then
+      Title := TValue(Args[4]).StrVal;
+  
+  HomeDir := GetEnvironmentVariable('HOME');
+  if (Length(CertPath) > 0) and (CertPath[1] = '/') and
+     (HomeDir <> '') and (Copy(CertPath, 1, Length(HomeDir)) = HomeDir) then
+    SafeCert := CertPath
+  else
+    SafeCert := GetSafeSandboxedPath(CertPath);
+  if (Length(KeyPath) > 0) and (KeyPath[1] = '/') and
+     (HomeDir <> '') and (Copy(KeyPath, 1, Length(HomeDir)) = HomeDir) then
+    SafeKey := KeyPath
+  else
+    SafeKey := GetSafeSandboxedPath(KeyPath);
+  
+  if not TLSInit then
+  begin
+    errMSG.callerror(144, 'gui.createTLS: libssl tidak tersedia',
+                     errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateNum(-1));
+  end;
+  
+  Ctx := TLSServerContext.Create(SafeCert, SafeKey);
+  if not Ctx.IsValid then
+  begin
+    Msg := Ctx.LastError;
+    Ctx.Release;
+    errMSG.callerror(144, 'gui.createTLS: ' + Msg,
+                     errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateNum(-1));
+  end;
+  
+  EnsureGuiAppsInit;
+  GGuiAppsLock.Acquire;
+  try
+    Inc(GGuiAppCounter);
+    H := GGuiAppCounter;
+    App := TGuiApp.Create(H, Port, WSPort, Title);
+    App.IsTLS := True;
+    App.TLSContext := Pointer(Ctx);
+    App.TLSCertPath := SafeCert;
+    App.TLSKeyPath := SafeKey;
+    GGuiApps.Add(App);
+  finally
+    GGuiAppsLock.Release;
+  end;
+  Result := TValue.CreateNum(H);
+end;
 
 function Native_GUI_Create(Args: TObjectList; CallEnv: TSymbolTable): TValue;
 var
@@ -37373,6 +37502,7 @@ begin
   // GUI Path C — browser-based GUI
   GuiDef := TTypeDefinition.Create('GuiLib', tkClass);
   GuiDef.Methods.Add('create', TVMFunction.Create);
+  GuiDef.Methods.Add('createTLS', TVMFunction.Create);
   GuiDef.Methods.Add('serve',  TVMFunction.Create);
   GuiDef.Methods.Add('bind',   TVMFunction.Create);
   GuiDef.Methods.Add('open',   TVMFunction.Create);
@@ -37381,6 +37511,7 @@ begin
   GuiDef.Methods.Add('close',  TVMFunction.Create);
   GuiInst := TInstanceValue.Create(GuiDef);
   GuiInst.Members.DefineVar('create', TValue.CreateNative(@Native_GUI_Create));
+  GuiInst.Members.DefineVar('createTLS', TValue.CreateNative(@Native_GUI_CreateTLS));
   GuiInst.Members.DefineVar('serve',  TValue.CreateNative(@Native_GUI_Serve));
   GuiInst.Members.DefineVar('bind',   TValue.CreateNative(@Native_GUI_Bind));
   GuiInst.Members.DefineVar('open',   TValue.CreateNative(@Native_GUI_Open));
@@ -41861,6 +41992,27 @@ begin
       Engine := nil;
     end;
   
+    // Free GUI apps before TLS shutdown (releases TLSContext refs)
+    if Assigned(GGuiAppsLock) then
+    begin
+      GGuiAppsLock.Acquire;
+      try
+        if Assigned(GGuiApps) then
+        begin
+          for i := 0 to GGuiApps.Count - 1 do
+            if Assigned(GGuiApps[i]) then
+              try TGuiApp(GGuiApps[i]).Free; except end;
+          GGuiApps.Clear;
+          GGuiApps.Free;
+          GGuiApps := nil;
+        end;
+      finally
+        GGuiAppsLock.Release;
+      end;
+      GGuiAppsLock.Free;
+      GGuiAppsLock := nil;
+    end;
+
     ReleaseSharedTLSContext;
     TLSShutdown;
     if Assigned(GTLSContextLock) then
