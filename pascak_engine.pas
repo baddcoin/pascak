@@ -2253,6 +2253,11 @@ var //global
  
   GWSServers: TList;                // of PWSServerEntry
   GWSServersLock: TCriticalSection;
+  
+  // GUI Path C — browser-based app registry
+  GGuiApps: TList;
+  GGuiAppsLock: TCriticalSection;
+  GGuiAppsInitialized: Boolean;
   GWSConnections: TStringList;      // sorted by ConnID, Objects[i]=TWSConnection
   GWSConnectionsLock: TCriticalSection;
   GWSConnCounter: LongInt;
@@ -18804,7 +18809,7 @@ end;
 function TEventLoop.SetTimer(Callback: TValue; DelayMs: QWord; IsInterval: Boolean): Integer;
 var NewTask: PEventTask;
 begin
-  if Callback.DataType <> dtFunction then errMSG.callerror(137, 'TEventLoop.SetTimer', errMSG.xrow, errMSG.xcol);
+  if not (Callback.DataType in [dtFunction, dtNative]) then errMSG.callerror(137, 'TEventLoop.SetTimer', errMSG.xrow, errMSG.xcol);
   NewTask := New(PEventTask);
   if IsInterval then NewTask^.TaskType := etInterval else NewTask^.TaskType := etTimer;
   NewTask^.CallbackFunc := Callback.Clone; 
@@ -25463,7 +25468,7 @@ var
 begin
   if (Args.Count <> 2) or 
      (TValue(Args[0]).DataType <> dtNumeric) or
-     (TValue(Args[1]).DataType <> dtFunction) then
+     not (TValue(Args[1]).DataType in [dtFunction, dtNative]) then
   begin
     errMSG.callerror(140, 'http.serve(port, handler) butuh (int, function)',
                      errMSG.xrow, errMSG.xcol);
@@ -25510,7 +25515,7 @@ begin
      (TValue(Args[0]).DataType <> dtNumeric) or
      (TValue(Args[1]).DataType <> dtString) or
      (TValue(Args[2]).DataType <> dtString) or
-     (TValue(Args[3]).DataType <> dtFunction) then
+     not (TValue(Args[3]).DataType in [dtFunction, dtNative]) then
   begin
     errMSG.callerror(140, 'http.serveTLS(port, cert, key, handler) butuh (int, str, str, fn)',
                      errMSG.xrow, errMSG.xcol);
@@ -25733,7 +25738,7 @@ begin
 
   ClientSock := Trunc(RealArgs.ArrayVal[0].NumVal);
   HandlerVal := RealArgs.ArrayVal[1];
-  if (HandlerVal = nil) or (HandlerVal.DataType <> dtFunction) then Exit;
+  if (HandlerVal = nil) or not (HandlerVal.DataType in [dtFunction, dtNative]) then Exit;
   if ClientSock < 0 then Exit;
 
   IsTLS := False;
@@ -26646,19 +26651,19 @@ var
   i: Integer;
 begin
   V := Config.DictVal.GetValueClone('onOpen');
-  if Assigned(V) and (V.DataType = dtFunction) then Server^.OnOpen := V
+  if Assigned(V) and (V.DataType in [dtFunction, dtNative]) then Server^.OnOpen := V
   else if Assigned(V) then V.Free;
   
   V := Config.DictVal.GetValueClone('onMessage');
-  if Assigned(V) and (V.DataType = dtFunction) then Server^.OnMessage := V
+  if Assigned(V) and (V.DataType in [dtFunction, dtNative]) then Server^.OnMessage := V
   else if Assigned(V) then V.Free;
   
   V := Config.DictVal.GetValueClone('onClose');
-  if Assigned(V) and (V.DataType = dtFunction) then Server^.OnClose := V
+  if Assigned(V) and (V.DataType in [dtFunction, dtNative]) then Server^.OnClose := V
   else if Assigned(V) then V.Free;
   
   V := Config.DictVal.GetValueClone('onError');
-  if Assigned(V) and (V.DataType = dtFunction) then Server^.OnError := V
+  if Assigned(V) and (V.DataType in [dtFunction, dtNative]) then Server^.OnError := V
   else if Assigned(V) then V.Free;
   
   V := Config.DictVal.GetValueClone('pingInterval');
@@ -27230,19 +27235,19 @@ begin
     begin
       Config := TValue(Args[1]);
       V := Config.DictVal.GetValueClone('onOpen');
-      if Assigned(V) and (V.DataType = dtFunction) then Conn.OnOpen := V
+      if Assigned(V) and (V.DataType in [dtFunction, dtNative]) then Conn.OnOpen := V
       else if Assigned(V) then V.Free;
 
       V := Config.DictVal.GetValueClone('onMessage');
-      if Assigned(V) and (V.DataType = dtFunction) then Conn.OnMessage := V
+      if Assigned(V) and (V.DataType in [dtFunction, dtNative]) then Conn.OnMessage := V
       else if Assigned(V) then V.Free;
 
       V := Config.DictVal.GetValueClone('onClose');
-      if Assigned(V) and (V.DataType = dtFunction) then Conn.OnClose := V
+      if Assigned(V) and (V.DataType in [dtFunction, dtNative]) then Conn.OnClose := V
       else if Assigned(V) then V.Free;
 
       V := Config.DictVal.GetValueClone('onError');
-      if Assigned(V) and (V.DataType = dtFunction) then Conn.OnError := V
+      if Assigned(V) and (V.DataType in [dtFunction, dtNative]) then Conn.OnError := V
       else if Assigned(V) then V.Free;
 
       V := Config.DictVal.GetValueClone('verify');
@@ -36620,19 +36625,607 @@ end;//end native Signal Handling
 
 //native main=============
 //========================
+
+{ ═══ GUI Path C — browser-based GUI (S2a: class + simple natives) ═══ }
+
+type
+  TGuiApp = class
+  public
+    Handle: Integer;
+    Port: Integer;
+    WSPort: Integer;
+    Title: string;
+    HTML: string;
+    HttpHandle: Integer;
+    WSHandle: Integer;
+    PollTimerID: Int64;
+    Bindings: TDictValue;
+    Running: Boolean;
+    constructor Create(AHandle, APort, AWSPort: Integer; const ATitle: string);
+    destructor Destroy; override;
+  end;
+
+var
+  GGuiAppCounter: LongInt = 0;
+
+procedure EnsureGuiAppsInit;
+begin
+  if not Assigned(GGuiAppsLock) then GGuiAppsLock := TCriticalSection.Create;
+  if GGuiAppsInitialized then Exit;
+  GGuiAppsLock.Acquire;
+  try
+    if not GGuiAppsInitialized then
+    begin
+      GGuiApps := TList.Create;
+      GGuiAppsInitialized := True;
+    end;
+  finally
+    GGuiAppsLock.Release;
+  end;
+end;
+
+constructor TGuiApp.Create(AHandle, APort, AWSPort: Integer; const ATitle: string);
+begin
+  inherited Create;
+  Handle := AHandle;
+  Port := APort;
+  WSPort := AWSPort;
+  Title := ATitle;
+  HTML := '<!DOCTYPE html><html><body><h1>' + ATitle + '</h1></body></html>';
+  HttpHandle := -1;
+  WSHandle := -1;
+  PollTimerID := 0;
+  Bindings := TDictValue.Create;
+  Running := False;
+end;
+
+destructor TGuiApp.Destroy;
+begin
+  if Assigned(Bindings) then Bindings.Free;
+  inherited;
+end;
+
+function GuiAppByHandle(H: Integer): TGuiApp;
+var
+  i: Integer;
+begin
+  Result := nil;
+  EnsureGuiAppsInit;
+  GGuiAppsLock.Acquire;
+  try
+    for i := 0 to GGuiApps.Count - 1 do
+      if TGuiApp(GGuiApps[i]).Handle = H then
+        Exit(TGuiApp(GGuiApps[i]));
+  finally
+    GGuiAppsLock.Release;
+  end;
+end;
+
+function GuiAppsGetLast: TGuiApp;
+begin
+  Result := nil;
+  EnsureGuiAppsInit;
+  GGuiAppsLock.Acquire;
+  try
+    if GGuiApps.Count > 0 then Result := TGuiApp(GGuiApps.Last);
+  finally
+    GGuiAppsLock.Release;
+  end;
+end;
+
+function Native_GUI_Bind(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  App: TGuiApp;
+begin
+  if (Args.Count <> 3) or (TValue(Args[0]).DataType <> dtNumeric) or
+     (TValue(Args[1]).DataType <> dtString) or
+     (TValue(Args[2]).DataType <> dtFunction) then
+  begin
+    errMSG.callerror(140, 'gui.bind(handle, name, fn)', errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateBool(False));
+  end;
+  App := GuiAppByHandle(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(App) then
+  begin
+    errMSG.callerror(144, 'gui.bind: invalid handle', errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateBool(False));
+  end;
+  App.Bindings.SetValue(TValue(Args[1]).StrVal, TValue(Args[2]).Clone);
+  Result := TValue.CreateBool(True);
+end;
+
+function Native_GUI_Open(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  App: TGuiApp;
+  URL: string;
+  OutS, ErrS: RawByteString;
+  ExitCode: Integer;
+begin
+  if (Args.Count <> 1) or (TValue(Args[0]).DataType <> dtNumeric) then
+  begin
+    errMSG.callerror(138, 'gui.open(handle)', errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateBool(False));
+  end;
+  App := GuiAppByHandle(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(App) then
+  begin
+    errMSG.callerror(144, 'gui.open: invalid handle', errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateBool(False));
+  end;
+  URL := 'http://localhost:' + IntToStr(App.Port) + '/';
+
+  if ProcExec('termux-open-url', [URL], OutS, ErrS, ExitCode, 5000) then
+    if ExitCode = 0 then
+    begin
+      Result := TValue.CreateBool(True);
+      Exit;
+    end;
+
+  if ProcExec('xdg-open', [URL], OutS, ErrS, ExitCode, 5000) then
+    if ExitCode = 0 then
+    begin
+      Result := TValue.CreateBool(True);
+      Exit;
+    end;
+
+  Result := TValue.CreateBool(False);
+end;
+
+function Native_GUI_HttpHandler(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  App: TGuiApp;
+  D, H: TDictValue;
+  Body, Html: string;
+  WsPort: Integer;
+  Script: string;
+begin
+  App := GuiAppsGetLast;
+  if not Assigned(App) then
+  begin
+    D := TDictValue.Create;
+    D.SetValue('status', TValue.CreateNum(500));
+    D.SetValue('body', TValue.CreateStr('no GUI app'));
+    Exit(TValue.CreateDict(D));
+  end;
+
+  Html := App.HTML;
+  WsPort := App.WSPort;
+
+  Script :=
+    '<script>' +
+    '(function(){' +
+    'var ws=new WebSocket("ws://localhost:' + IntToStr(WsPort) + '/");' +
+    'var pending={};' +
+    'ws.onmessage=function(e){' +
+    'try{var m=JSON.parse(e.data);' +
+    'if(m.id&&pending[m.id]){pending[m.id](m);delete pending[m.id];}' +
+    '}catch(err){console.error("[pascak] parse:",err);}' +
+    '};' +
+    'window.pascak={call:function(method,args){' +
+    'return new Promise(function(resolve,reject){' +
+    'var id=Math.random().toString(36).slice(2);' +
+    'pending[id]=function(m){if(m.error)reject(new Error(m.error));else resolve(m.result);};' +
+    'ws.send(JSON.stringify({id:id,method:method,args:args||[]}));' +
+    '});' +
+    '}};' +
+    '})();' +
+    '</script>';
+
+  if Pos('</body>', Html) > 0 then
+    Html := StringReplace(Html, '</body>', Script + '</body>', [rfReplaceAll])
+  else
+    Html := Html + Script;
+
+  D := TDictValue.Create;
+  H := TDictValue.Create;
+  H.SetValue('Content-Type', TValue.CreateStr('text/html; charset=utf-8'));
+  Body := Html;
+  D.SetValue('status', TValue.CreateNum(200));
+  D.SetValue('headers', TValue.CreateDict(H));
+  D.SetValue('body', TValue.CreateStr(Body));
+  Result := TValue.CreateDict(D);
+end;
+
+function Native_GUI_WsHandler(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  Conn, Msg: TValue;
+  JData: TJSONData;
+  JObj: TJSONObject;
+  CmdId, Method: string;
+  App: TGuiApp;
+  Fn, ResVal, RespVal: TValue;
+  MiniVM: TVM;
+  TmpChunk: TChunk;
+  ArgsList: TValueArray;
+  JArr: TJSONArray;
+  JArgs: TJSONData;
+  I: Integer;
+  RespDict: TDictValue;
+begin
+  Result := TValue.CreateNull;
+  if Args.Count < 2 then Exit;
+  Conn := TValue(Args[0]);
+  Msg := TValue(Args[1]);
+  if (not Assigned(Conn)) or (Conn.DataType <> dtDict) then Exit;
+  if (not Assigned(Msg)) or (Msg.DataType <> dtString) then Exit;
+
+  JData := nil;
+  try
+    try JData := GetJSON(Msg.StrVal); except Exit; end;
+    if (not Assigned(JData)) or (JData.JSONType <> jtObject) then Exit;
+    JObj := TJSONObject(JData);
+    CmdId := JObj.Get('id', '0');
+    Method := JObj.Get('method', '');
+
+    App := GuiAppsGetLast;
+    if not Assigned(App) then Exit;
+
+    Fn := App.Bindings.GetValueClone(Method);
+    if (not Assigned(Fn)) or (Fn.DataType <> dtFunction) then
+    begin
+      if Assigned(Fn) then Fn.Free;
+      RespDict := TDictValue.Create;
+      try
+        RespDict.SetValue('id', TValue.CreateStr(CmdId));
+        RespDict.SetValue('error', TValue.CreateStr('method not found: ' + Method));
+        RespVal := TValue.CreateDict(RespDict);
+        try ExecuteNativeTypeMethod(Conn, 'send', [RespVal]);
+        finally RespVal.Free; end;
+      except RespDict.Free; raise; end;
+      Exit;
+    end;
+
+    SetLength(ArgsList, 0);
+    JArgs := JObj.Find('args');
+    if Assigned(JArgs) and (JArgs.JSONType = jtArray) then
+    begin
+      JArr := TJSONArray(JArgs);
+      SetLength(ArgsList, JArr.Count);
+      for I := 0 to JArr.Count - 1 do
+        ArgsList[I] := ConvertJSONToTValue(JArr.Items[I], 0);
+    end;
+
+    MiniVM := TVM.Create(CallEnv.GetGlobal);
+    TmpChunk := TChunk.Create;
+    try
+      TmpChunk.AddInstruction(opcConstant, TmpChunk.AddConstant(Fn.Clone));
+      for I := 0 to High(ArgsList) do
+        TmpChunk.AddInstruction(opcConstant, TmpChunk.AddConstant(ArgsList[I].Clone));
+      TmpChunk.AddInstruction(opcCall, Length(ArgsList));
+      TmpChunk.AddInstruction(opcReturn);
+      ResVal := MiniVM.Run(TmpChunk);
+    finally
+      TmpChunk.Free;
+      MiniVM.Free;
+      Fn.Free;
+      for I := 0 to High(ArgsList) do if Assigned(ArgsList[I]) then ArgsList[I].Free;
+    end;
+
+    RespDict := TDictValue.Create;
+    try
+      RespDict.SetValue('id', TValue.CreateStr(CmdId));
+      if Assigned(ResVal) then
+      begin
+        RespDict.SetValue('result', ResVal);
+        ResVal := nil;
+      end else
+        RespDict.SetValue('result', TValue.CreateNull);
+      RespVal := TValue.CreateDict(RespDict);
+    except RespDict.Free; raise; end;
+
+    try ExecuteNativeTypeMethod(Conn, 'send', [RespVal]);
+    finally
+      RespVal.Free;
+      if Assigned(ResVal) then ResVal.Free;
+    end;
+  finally
+    if Assigned(JData) then JData.Free;
+  end;
+end;
+
+function Native_GUI_Poll(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  App: TGuiApp;
+  E: PHTTPServerEntry;
+  ClientSock: Integer;
+  ClientList: TValueList;
+  ArgsArr, FuncVal: TValue;
+  Ctx: TEngineContext;
+  Guard: Integer;
+begin
+  Result := TValue.CreateNull;
+  App := GuiAppsGetLast;
+  if (not Assigned(App)) or (App.HttpHandle < 0) or (not App.Running) then Exit;
+
+  E := GetHTTPServer(App.HttpHandle);
+  if (not Assigned(E)) or (E^.ListenSock < 0) or E^.StopRequested then Exit;
+
+  Ctx := GetContextFromEnv(CallEnv);
+  if (not Assigned(Ctx)) or (not Assigned(Ctx.WorkerPool)) then Exit;
+
+  Guard := 0;
+  while (Guard < 32) and NetAcceptTimeout(E^.ListenSock, 1, ClientSock) do
+  begin
+    Inc(Guard);
+    ClientList := TValueList.Create(True);
+    try
+      ClientList.Add(TValue.CreateNum(ClientSock));
+      ClientList.Add(E^.Handler.Clone);
+      ClientList.Add(TValue.CreateBool(E^.IsTLS));
+      if E^.IsTLS and Assigned(E^.TLSContext) then
+        ClientList.Add(TValue.CreatePtr(E^.TLSContext))
+      else
+        ClientList.Add(TValue.CreatePtr(nil));
+      ArgsArr := TValue.CreateArray(ClientList);
+    except
+      ClientList.Free;
+      NetClose(ClientSock);
+      raise;
+    end;
+
+    FuncVal := TValue.CreateNative(@Worker_HandleClient);
+    try
+      try
+        Ctx.WorkerPool.EnqueueTask(FuncVal, ArgsArr, nil);
+      except
+        NetClose(ClientSock);
+      end;
+    finally
+      FuncVal.Free;
+      ArgsArr.Free;
+    end;
+  end;
+end;
+
+function Native_GUI_Start(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  App: TGuiApp;
+  HttpH, WsH: Integer;
+  CallArgs: TObjectList;
+  PortVal, HandlerVal, WsCfgVal, ResultVal: TValue;
+  WsCfg: TDictValue;
+  Ctx: TEngineContext;
+  PollVal: TValue;
+  E: PHTTPServerEntry;
+begin
+  if (Args.Count <> 1) or (TValue(Args[0]).DataType <> dtNumeric) then
+  begin
+    errMSG.callerror(138, 'gui.start(handle)', errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateBool(False));
+  end;
+  App := GuiAppByHandle(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(App) then
+  begin
+    errMSG.callerror(144, 'gui.start: invalid handle', errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateBool(False));
+  end;
+  if App.Running then Exit(TValue.CreateBool(True));
+
+  Ctx := GetContextFromEnv(CallEnv);
+  if (not Assigned(Ctx)) or (not Assigned(Ctx.EventLoop)) then
+  begin
+    errMSG.callerror(144, 'gui.start: engine context missing', errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateBool(False));
+  end;
+
+  // HTTP bind manually on 127.0.0.1 (0.0.0.0 may not accept loopback on Termux)
+  if not NetListen('127.0.0.1', App.Port, HttpH) then
+  begin
+    errMSG.callerror(145, 'gui.start: listen 127.0.0.1:' + IntToStr(App.Port) + ' failed — ' + NetLastError,
+                     errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateBool(False));
+  end;
+  App.HttpHandle := AllocHTTPServer;
+  E := GetHTTPServer(App.HttpHandle);
+  if Assigned(E) then
+  begin
+    E^.ListenSock := HttpH;
+    E^.Port := App.Port;
+    E^.Handler := TValue.CreateNative(@Native_GUI_HttpHandler);
+  end;
+
+  WsCfg := TDictValue.Create;
+  WsCfg.SetValue('onMessage', TValue.CreateNative(@Native_GUI_WsHandler));
+  WsCfgVal := TValue.CreateDict(WsCfg);
+  PortVal := TValue.CreateNum(App.WSPort);
+  CallArgs := TObjectList.Create(False);
+  try
+    CallArgs.Add(PortVal);
+    CallArgs.Add(WsCfgVal);
+    try
+      ResultVal := Native_WS_Serve(CallArgs, CallEnv);
+      WsH := Trunc(ResultVal.NumVal);
+      ResultVal.Free;
+    finally
+      PortVal.Free;
+      WsCfgVal.Free;
+    end;
+  finally
+    CallArgs.Free;
+  end;
+  if WsH < 0 then
+  begin
+    errMSG.callerror(144, 'gui.start: ws.serve failed', errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateBool(False));
+  end;
+  App.WSHandle := WsH;
+
+  PortVal := TValue.CreateNum(WsH);
+  CallArgs := TObjectList.Create(False);
+  try
+    CallArgs.Add(PortVal);
+    try
+      ResultVal := Native_WS_ListenAsync(CallArgs, CallEnv);
+      ResultVal.Free;
+    finally
+      PortVal.Free;
+    end;
+  finally
+    CallArgs.Free;
+  end;
+
+  PollVal := TValue.CreateNative(@Native_GUI_Poll);
+  try
+    App.PollTimerID := Ctx.EventLoop.SetTimer(PollVal, 20, True);
+  finally
+    PollVal.Free;
+  end;
+
+  App.Running := True;
+  Result := TValue.CreateBool(True);
+end;
+
+function Native_GUI_Run(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  Ctx: TEngineContext;
+begin
+  Ctx := GetContextFromEnv(CallEnv);
+  if Assigned(Ctx) and Assigned(Ctx.EventLoop) then
+    Ctx.EventLoop.RunLoop(CallEnv);
+  Result := TValue.CreateNull;
+end;
+
+
+function Native_GUI_Create(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  Port, WSPort, H: Integer;
+  Title: string;
+  App: TGuiApp;
+begin
+  if (Args.Count < 1) or (Args.Count > 3) then
+  begin
+    errMSG.callerror(140, 'gui.create(port, [wsPort], [title])', errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateNum(-1));
+  end;
+  if TValue(Args[0]).DataType <> dtNumeric then
+  begin
+    errMSG.callerror(138, 'gui.create: port harus numerik', errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateNum(-1));
+  end;
+  Port := Trunc(TValue(Args[0]).NumVal);
+  WSPort := Port + 1;
+  Title := 'Pascak GUI';
+  if Args.Count >= 2 then
+    if TValue(Args[1]).DataType = dtNumeric then
+      WSPort := Trunc(TValue(Args[1]).NumVal);
+  if Args.Count >= 3 then
+    if TValue(Args[2]).DataType = dtString then
+      Title := TValue(Args[2]).StrVal;
+  EnsureGuiAppsInit;
+  GGuiAppsLock.Acquire;
+  try
+    Inc(GGuiAppCounter);
+    H := GGuiAppCounter;
+    App := TGuiApp.Create(H, Port, WSPort, Title);
+    GGuiApps.Add(App);
+  finally
+    GGuiAppsLock.Release;
+  end;
+  Result := TValue.CreateNum(H);
+end;
+
+function Native_GUI_Serve(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  App: TGuiApp;
+begin
+  if (Args.Count <> 2) or (TValue(Args[0]).DataType <> dtNumeric) or
+     (TValue(Args[1]).DataType <> dtString) then
+  begin
+    errMSG.callerror(140, 'gui.serve(handle, html)', errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateBool(False));
+  end;
+  App := GuiAppByHandle(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(App) then
+  begin
+    errMSG.callerror(144, 'gui.serve: invalid handle', errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateBool(False));
+  end;
+  App.HTML := TValue(Args[1]).StrVal;
+  Result := TValue.CreateBool(True);
+end;
+
+function Native_GUI_Close(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  App: TGuiApp;
+  H, i: Integer;
+  HttpE: PHTTPServerEntry;
+  WsE: PWSServerEntry;
+  Ctx: TEngineContext;
+begin
+  if (Args.Count <> 1) or (TValue(Args[0]).DataType <> dtNumeric) then
+  begin
+    errMSG.callerror(138, 'gui.close(handle)', errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateBool(False));
+  end;
+  H := Trunc(TValue(Args[0]).NumVal);
+  App := nil;
+  EnsureGuiAppsInit;
+  GGuiAppsLock.Acquire;
+  try
+    for i := 0 to GGuiApps.Count - 1 do
+      if TGuiApp(GGuiApps[i]).Handle = H then
+      begin
+        App := TGuiApp(GGuiApps[i]);
+        GGuiApps.Delete(i);
+        Break;
+      end;
+  finally
+    GGuiAppsLock.Release;
+  end;
+  if not Assigned(App) then Exit(TValue.CreateBool(False));
+
+  // Cancel poll timer FIRST (before any other cleanup)
+  if (App.PollTimerID <> 0) and Assigned(CallEnv) then
+  begin
+    try
+      Ctx := GetContextFromEnv(CallEnv);
+      if Assigned(Ctx) and Assigned(Ctx.EventLoop) then
+        Ctx.EventLoop.ClearTimer(App.PollTimerID);
+    except end;
+    App.PollTimerID := 0;
+  end;
+
+  if App.HttpHandle >= 0 then
+  begin
+    HttpE := GetHTTPServer(App.HttpHandle);
+    if Assigned(HttpE) then HttpE^.StopRequested := True;
+  end;
+  if App.WSHandle >= 0 then
+  begin
+    WsE := GetWSServer(App.WSHandle);
+    if Assigned(WsE) then
+    begin
+      WsE^.StopRequested := True;
+      if Assigned(GWSEventLoop) then
+        try GWSEventLoop.RemoveServer(App.WSHandle); except end;
+    end;
+  end;
+  if App.HttpHandle >= 0 then
+    try FreeHTTPServer(App.HttpHandle); except end;
+  if App.WSHandle >= 0 then
+  begin
+    WsE := GetWSServer(App.WSHandle);
+    if Assigned(WsE) then WsE^.Used := False;
+  end;
+
+  App.Free;
+  Result := TValue.CreateBool(True);
+end;
+
+
 procedure initNativeCode(GEnvv: TSymbolTable);
 var
   MathDef, HardDef, TimeDef, SysDef, 
   CryptoDef, NetDef, HTTPDef, FSDef,
   DLLDef, TLSDef, NativeLibDef, 
   WSDef, PkgDef, LogDef, ConfigDef,
-  SignalDef, MetricsDef, HealthDef : TTypeDefinition; 
+  GuiDef, SignalDef, MetricsDef, HealthDef : TTypeDefinition; 
   
   MathInst, HardInst, TimeInst, SysInst, 
   CryptoInst, NetInst, HTTPInst, FSInst,
   DLLInst, TLSInst, NativeLibInst, 
   WSInst, PkgInst, LogInst, ConfigInst,
-  SignalInst, MetricsInst, HealthInst: TInstanceValue; 
+  GuiInst, SignalInst, MetricsInst, HealthInst: TInstanceValue; 
 
 begin
   SignalDef := TTypeDefinition.Create('SignalLib', tkClass);
@@ -36753,6 +37346,24 @@ begin
   TimeInst.Members.DefineVar('startOfYear', TValue.CreateNative(@Native_Time_StartOfYear));
   TimeInst.Members.DefineVar('zoneOffset', TValue.CreateNative(@Native_Time_ZoneOffset));
 
+  // GUI Path C — browser-based GUI
+  GuiDef := TTypeDefinition.Create('GuiLib', tkClass);
+  GuiDef.Methods.Add('create', TVMFunction.Create);
+  GuiDef.Methods.Add('serve',  TVMFunction.Create);
+  GuiDef.Methods.Add('bind',   TVMFunction.Create);
+  GuiDef.Methods.Add('open',   TVMFunction.Create);
+  GuiDef.Methods.Add('start',  TVMFunction.Create);
+  GuiDef.Methods.Add('run',    TVMFunction.Create);
+  GuiDef.Methods.Add('close',  TVMFunction.Create);
+  GuiInst := TInstanceValue.Create(GuiDef);
+  GuiInst.Members.DefineVar('create', TValue.CreateNative(@Native_GUI_Create));
+  GuiInst.Members.DefineVar('serve',  TValue.CreateNative(@Native_GUI_Serve));
+  GuiInst.Members.DefineVar('bind',   TValue.CreateNative(@Native_GUI_Bind));
+  GuiInst.Members.DefineVar('open',   TValue.CreateNative(@Native_GUI_Open));
+  GuiInst.Members.DefineVar('start',  TValue.CreateNative(@Native_GUI_Start));
+  GuiInst.Members.DefineVar('run',    TValue.CreateNative(@Native_GUI_Run));
+  GuiInst.Members.DefineVar('close',  TValue.CreateNative(@Native_GUI_Close));
+  GEnvv.DefineVar('gui', TValue.CreateObj(GuiInst));
   MathDef := TTypeDefinition.Create('MathLib', tkClass);
   MathDef.Methods.Add('random', TVMFunction.Create);
   MathDef.Methods.Add('sin', TVMFunction.Create);
@@ -38820,7 +39431,7 @@ var
   i: Integer;
   ResVal: TValue;
 begin
-  if (not Assigned(Cb)) or (Cb.DataType <> dtFunction) then Exit;
+  if (not Assigned(Cb)) or not (Cb.DataType in [dtFunction, dtNative]) then Exit;
   
   Env := Cb.ClosureEnv;
   if not Assigned(Env) then
