@@ -187,3 +187,12 @@ docs/*.prelif*
 examples/hello_gui
 examples/hello_gui.o
 examples/hello_gui.ppu
+*.pregu3
+
+# GUI example binaries
+examples/todo_gui
+examples/todo_gui.o
+examples/todo_gui.ppu
+examples/chat_gui
+examples/chat_gui.o
+examples/chat_gui.ppu

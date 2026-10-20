@@ -36836,6 +36836,7 @@ var
   Fn, ResVal, RespVal: TValue;
   MiniVM: TVM;
   TmpChunk: TChunk;
+  ArgsArrayVal: TValue;
   ArgsList: TValueArray;
   JArr: TJSONArray;
   JArgs: TJSONData;
@@ -36887,14 +36888,37 @@ begin
 
     MiniVM := TVM.Create(CallEnv.GetGlobal);
     TmpChunk := TChunk.Create;
+    ArgsArrayVal := nil;
     try
-      TmpChunk.AddInstruction(opcConstant, TmpChunk.AddConstant(Fn.Clone));
+      // Pack all args into ONE array value — matches RegisterNative convention
+      ArgsArrayVal := TValue.CreateArray(TValueList.Create(True));
       for I := 0 to High(ArgsList) do
-        TmpChunk.AddInstruction(opcConstant, TmpChunk.AddConstant(ArgsList[I].Clone));
-      TmpChunk.AddInstruction(opcCall, Length(ArgsList));
+        ArgsArrayVal.ArrayVal.Add(ArgsList[I].Clone);
+
+      TmpChunk.AddInstruction(opcConstant, TmpChunk.AddConstant(Fn.Clone));
+      TmpChunk.AddInstruction(opcConstant, TmpChunk.AddConstant(ArgsArrayVal.Clone));
+      TmpChunk.AddInstruction(opcCall, 1);
       TmpChunk.AddInstruction(opcReturn);
-      ResVal := MiniVM.Run(TmpChunk);
+      try
+        ResVal := MiniVM.Run(TmpChunk);
+      except
+        on E: Exception do
+        begin
+          // Return error to client
+          if Assigned(ResVal) then begin ResVal.Free; ResVal := nil; end;
+          RespDict := TDictValue.Create;
+          try
+            RespDict.SetValue('id', TValue.CreateStr(CmdId));
+            RespDict.SetValue('error', TValue.CreateStr(E.Message));
+            RespVal := TValue.CreateDict(RespDict);
+            try ExecuteNativeTypeMethod(Conn, 'send', [RespVal]);
+            finally RespVal.Free; end;
+          except RespDict.Free; raise; end;
+          Exit;
+        end;
+      end;
     finally
+      if Assigned(ArgsArrayVal) then ArgsArrayVal.Free;
       TmpChunk.Free;
       MiniVM.Free;
       Fn.Free;
