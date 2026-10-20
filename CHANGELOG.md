@@ -15,13 +15,57 @@ Versi mengikuti [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - HTTP/2 multiplexing (parallel requests via 1 connection)
 - ChaCha20-Poly1305 cipher
 - JSON Schema validation
+- GUI: HTTPS localhost (self-signed)
 
 ### Backlog
 - WebSocket client bidirectional bridge
 - WASM target
 - Package manager: HTTP registry
+- GUI: dev-mode file watcher
 
 ---
+
+## [0.6.0] — 2026-10-20
+
+**Browser-Based GUI — HTTP + WS RPC bridge**
+
+New `gui` module brings GUI to any Pascak app via local browser.
+Zero external deps: HTML served from engine HTTP, JS bridges back
+via WebSocket JSON-RPC. Works on Termux, Linux, macOS, Windows.
+### Added
+
+- **GUI (Browser-Based)** — new `gui` module, zero external deps:
+  - `gui.create(port, [wsPort], [title]) -> handle`
+  - `gui.serve(handle, html) -> bool` (auto-injects JS bridge script)
+  - `gui.bind(handle, name, callback) -> bool` (register Pascal callback)
+  - `gui.start(handle) -> bool` (bind HTTP + WS ports)
+  - `gui.open(handle) -> bool` (spawn browser via termux-open-url/xdg-open)
+  - `gui.run(handle)` (blocking event loop)
+  - `gui.close(handle) -> bool` (cancels timer, clean shutdown)
+  - Architecture: `http.serve` + auto `<script>` with
+    `window.pascak.call(method, args) -> Promise`, JS↔Pascal via
+    WebSocket JSON-RPC on separate port
+  - HTTP accept driven by event-loop timer (poll), not blocking
+  - `examples/hello_gui.pas` — counter demo with state in closure
+  - `docs/pascak_api.md` §GUI (Browser-Based)
+
+- **Handler type relaxations** — accept `dtNative` alongside `dtFunction`:
+  - `http.serve` / `http.serveTLS` handler arg
+  - `ws.serve` callbacks (`WSExtractHandlers`: onOpen/onMessage/onClose/onError)
+  - WS client handlers (4×)
+  - `Worker_HandleClient` (HTTP worker)
+  - `CallWSCallback` (WS dispatch)
+  - `TEventLoop.SetTimer` (for poll callback)
+
+- **`NetAcceptTimeout` non-blocking** — `timeout=0` now uses 1ms poll
+  (was blocking on `fpAccept`); GUI poll timer relies on this.
+
+- **`gui.close` timer cleanup** — `PollTimerID` field cancels event-loop
+  timer on close, prevents hang when script exits with active poll.
+
+- **`gui.start` binds `127.0.0.1` explicitly** — `0.0.0.0` listen may
+  not accept loopback on Termux.
+
 
 ## [0.5.0] — 2026-10-19
 
