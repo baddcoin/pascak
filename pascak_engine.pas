@@ -28434,8 +28434,9 @@ var
   H2: TH2Connection;
   Resp: TH2Response;
   ResultDict, HeadersDict: TDictValue;
-  PoolEntry: TH2PooledEntry;
-  GotFromPool: Boolean;
+  Slot: TPoolSlot;
+  IsCreator: Boolean;
+  SlotErrMsg: string;
 begin
   if (Args.Count < 1) or (Args.Count > 3) or
      (TValue(Args[0]).DataType <> dtString) then
@@ -28512,91 +28513,102 @@ begin
   Ctx := nil;
   TLSConn := nil;
   H2 := nil;
-  PoolEntry := nil;
-  GotFromPool := False;
-
-  if Assigned(G_H2Pool) then
-  begin
-    PoolEntry := G_H2Pool.Get(PoolKey);
-    if Assigned(PoolEntry) then
-    begin
-      H2 := PoolEntry.Conn;
-      TLSConn := PoolEntry.TLSConn;
-      Sock := PoolEntry.Sock;
-      PoolEntry.Conn := nil;
-      PoolEntry.TLSConn := nil;
-      PoolEntry.Sock := -1;
-      PoolEntry.Free;
-      PoolEntry := nil;
-      GotFromPool := True;
-    end;
-  end;
+  Slot := nil;
+  IsCreator := False;
 
   try
-    if not GotFromPool then
+    if Assigned(G_H2Pool) then
+      Slot := G_H2Pool.Acquire(PoolKey, IsCreator);
+
+    if Assigned(Slot) and IsCreator then
+    begin
+      try
+        if not NetConnect(Host, Port, 10000, Sock) then
+          errMSG.callerror(145, 'http.get2: connect gagal - ' + NetLastError,
+                           errMSG.xrow, errMSG.xcol);
+        if not TLSInit then
+          errMSG.callerror(144, 'http.get2: TLS tidak tersedia',
+                           errMSG.xrow, errMSG.xcol);
+        Ctx := GetSharedTLSContext(True);
+        if not TLSConnectALPN(Ctx, Sock, Host, ['h2'], TLSConn, Negotiated) then
+          errMSG.callerror(144, 'http.get2: TLS handshake gagal - ' + TLSConn.LastError,
+                           errMSG.xrow, errMSG.xcol);
+        if Negotiated <> 'h2' then
+          errMSG.callerror(144, 'http.get2: server tidak support h2 (negotiated: ' + Negotiated + ')',
+                           errMSG.xrow, errMSG.xcol);
+        H2 := TH2Connection.Create(TLSConn, Host);
+        if not H2.Open(10000) then
+          errMSG.callerror(144, 'http.get2: H2 handshake gagal',
+                           errMSG.xrow, errMSG.xcol);
+
+        G_H2Pool.Publish(Slot, H2, TLSConn, Sock);
+      except
+        on E: Exception do
+        begin
+          SlotErrMsg := E.Message;
+          G_H2Pool.FailCreate(Slot, SlotErrMsg);
+          Slot.Release;
+          Slot := nil;
+          if Assigned(H2) then begin try H2.Free; except end; H2 := nil; end;
+          if Assigned(TLSConn) then begin try TLSConn.Free; except end; TLSConn := nil; end;
+          if Sock >= 0 then begin try NetClose(Sock); except end; Sock := -1; end;
+          if Assigned(Ctx) then begin try Ctx.Release; except end; Ctx := nil; end;
+          raise;
+        end;
+      end;
+    end
+    else if Assigned(Slot) and not IsCreator then
+    begin
+      if Slot.Creating then
+        RTLEventWaitFor(Slot.InitEvent, 30000);
+
+      if Slot.Failed then
+      begin
+        SlotErrMsg := Slot.ErrorMsg;
+        Slot.Release;
+        Slot := nil;
+        errMSG.callerror(144, 'http.get2: pool creation failed: ' + SlotErrMsg,
+                         errMSG.xrow, errMSG.xcol);
+      end;
+
+      if not Assigned(Slot.Conn) then
+      begin
+        Slot.Release;
+        Slot := nil;
+        errMSG.callerror(144, 'http.get2: pool slot invalid',
+                         errMSG.xrow, errMSG.xcol);
+      end;
+
+      H2 := Slot.Conn;
+      TLSConn := Slot.TLSConn;
+      Sock := Slot.Sock;
+    end
+    else
     begin
       if not NetConnect(Host, Port, 10000, Sock) then
-      begin
         errMSG.callerror(145, 'http.get2: connect gagal - ' + NetLastError,
                          errMSG.xrow, errMSG.xcol);
-        Exit(TValue.CreateNull);
-      end;
-
       if not TLSInit then
-      begin
         errMSG.callerror(144, 'http.get2: TLS tidak tersedia',
                          errMSG.xrow, errMSG.xcol);
-        Exit(TValue.CreateNull);
-      end;
-
       Ctx := GetSharedTLSContext(True);
       if not TLSConnectALPN(Ctx, Sock, Host, ['h2'], TLSConn, Negotiated) then
-      begin
-        errMSG.callerror(144,
-          'http.get2: TLS handshake gagal - ' + TLSConn.LastError,
-          errMSG.xrow, errMSG.xcol);
-        Exit(TValue.CreateNull);
-      end;
-
+        errMSG.callerror(144, 'http.get2: TLS handshake gagal - ' + TLSConn.LastError,
+                         errMSG.xrow, errMSG.xcol);
       if Negotiated <> 'h2' then
-      begin
-        errMSG.callerror(144,
-          'http.get2: server tidak support h2 (negotiated: ' + Negotiated + ')',
-          errMSG.xrow, errMSG.xcol);
-        Exit(TValue.CreateNull);
-      end;
-
+        errMSG.callerror(144, 'http.get2: server tidak support h2 (negotiated: ' + Negotiated + ')',
+                         errMSG.xrow, errMSG.xcol);
       H2 := TH2Connection.Create(TLSConn, Host);
       if not H2.Open(10000) then
-      begin
         errMSG.callerror(144, 'http.get2: H2 handshake gagal',
                          errMSG.xrow, errMSG.xcol);
-        Exit(TValue.CreateNull);
-      end;
     end;
 
     Resp := H2.Request('GET', Path, ExtraHeaders, BodyStr, 30000);
 
     if Resp.HasError then
-    begin
       errMSG.callerror(144, 'http.get2: request gagal - ' + Resp.Error,
                        errMSG.xrow, errMSG.xcol);
-      Exit(TValue.CreateNull);
-    end;
-
-    if (not H2.Closed) and Assigned(G_H2Pool) then
-    begin
-      PoolEntry := TH2PooledEntry.Create;
-      PoolEntry.Key := PoolKey;
-      PoolEntry.Conn := H2;
-      PoolEntry.TLSConn := TLSConn;
-      PoolEntry.Sock := Sock;
-      H2 := nil;
-      TLSConn := nil;
-      Sock := -1;
-      G_H2Pool.Put(PoolEntry);
-      PoolEntry := nil;
-    end;
 
     ResultDict := TDictValue.Create;
     try
@@ -28618,19 +28630,20 @@ begin
       ResultDict.Free;
       raise;
     end;
+
   finally
-    if Assigned(H2) then
+    if Assigned(Slot) then
     begin
-      try H2.Close; except end;
-      H2.Free;
-    end;
-    if Assigned(TLSConn) then
+      Slot.Release;
+      Slot := nil;
+    end
+    else
     begin
-      try TLSClose(TLSConn); except end;
-      TLSConn.Free;
+      if Assigned(H2) then begin try H2.Free; except end; H2 := nil; end;
+      if Assigned(TLSConn) then begin try TLSConn.Free; except end; TLSConn := nil; end;
+      if Sock >= 0 then begin try NetClose(Sock); except end; Sock := -1; end;
+      if Assigned(Ctx) then begin try Ctx.Release; except end; Ctx := nil; end;
     end;
-    if Assigned(Ctx) then Ctx.Release;
-    if Sock >= 0 then NetClose(Sock);
   end;
 end;
 

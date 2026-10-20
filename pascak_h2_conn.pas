@@ -102,21 +102,42 @@ type
     destructor Destroy; override;
   end;
 
+  TPoolSlot = class
+  public
+    Key: string;
+    Conn: TH2Connection;
+    TLSConn: TTLSConnection;
+    Sock: Integer;
+    Creating: Boolean;
+    Failed: Boolean;
+    ErrorMsg: string;
+    InitEvent: PRTLEvent;
+    RefCount: LongInt;
+    LastUsed: QWord;
+    constructor Create(const AKey: string);
+    destructor Destroy; override;
+    procedure AddRef;
+    procedure Release;
+  end;
+
   TH2Pool = class
   private
-    FEntries: TList;
+    FSlots: TList;
     FLock: TCriticalSection;
     FMaxPerHost: Integer;
     FIdleMs: Integer;
     FHits: Int64;
     FMisses: Int64;
     procedure CleanupLocked;
-    function CountForKey(const Key: string): Integer;
+    function FindSlotLocked(const Key: string): TPoolSlot;
   public
     constructor Create(AMaxPerHost: Integer = 8; AIdleMs: Integer = 30000);
     destructor Destroy; override;
-    function Get(const Key: string): TH2PooledEntry;
-    function Put(E: TH2PooledEntry): Boolean;
+    function Acquire(const Key: string; out IsCreator: Boolean): TPoolSlot;
+    procedure Publish(Slot: TPoolSlot; Conn: TH2Connection;
+                      TLSConn: TTLSConnection; Sock: Integer);
+    procedure FailCreate(Slot: TPoolSlot; const ErrMsg: string);
+    procedure Release(Slot: TPoolSlot);
     procedure Cleanup;
     procedure Clear;
     function GetHits: Int64;
@@ -760,10 +781,69 @@ end;
   TH2Pool
   ═══════════════════════════════════════════════════════════════ }
 
+{ ═══════════════════════════════════════════════════════════════
+  TPoolSlot — single-entry pool storage (D.2b.2b Session 2)
+  ═══════════════════════════════════════════════════════════════ }
+
+constructor TPoolSlot.Create(const AKey: string);
+begin
+  Key := AKey;
+  Conn := nil;
+  TLSConn := nil;
+  Sock := -1;
+  Creating := True;
+  Failed := False;
+  ErrorMsg := '';
+  InitEvent := RTLEventCreate;
+  RefCount := 1;
+  LastUsed := GetTickCount64;
+end;
+
+destructor TPoolSlot.Destroy;
+begin
+  if Assigned(Conn) then
+  begin
+    try
+      if not Conn.Closed then Conn.Close;
+    except
+    end;
+    try Conn.Free; except end;
+    Conn := nil;
+  end;
+  if Assigned(TLSConn) then
+  begin
+    try TLSClose(TLSConn); except end;
+    try TLSConn.Free; except end;
+    TLSConn := nil;
+  end;
+  if Sock >= 0 then
+  begin
+    try NetClose(Sock); except end;
+    Sock := -1;
+  end;
+  RTLEventDestroy(InitEvent);
+  inherited;
+end;
+
+procedure TPoolSlot.AddRef;
+begin
+  InterlockedIncrement(RefCount);
+end;
+
+procedure TPoolSlot.Release;
+begin
+  if InterlockedDecrement(RefCount) = 0 then
+    Free;
+end;
+
+{ ═══════════════════════════════════════════════════════════════
+  TH2Pool — singleflight slot manager (D.2b.2b Session 2)
+  ═══════════════════════════════════════════════════════════════ }
+
 constructor TH2Pool.Create(AMaxPerHost: Integer; AIdleMs: Integer);
 begin
   inherited Create;
-  FEntries := TList.Create;
+  FSlots := TList.Create;
   FLock := TCriticalSection.Create;
   FMaxPerHost := AMaxPerHost;
   FIdleMs := AIdleMs;
@@ -774,7 +854,7 @@ end;
 destructor TH2Pool.Destroy;
 begin
   Clear;
-  FEntries.Free;
+  FSlots.Free;
   FLock.Free;
   inherited;
 end;
@@ -782,19 +862,22 @@ end;
 procedure TH2Pool.CleanupLocked;
 var
   i: Integer;
-  E: TH2PooledEntry;
+  S: TPoolSlot;
   NowTick: QWord;
 begin
   NowTick := GetTickCount64;
-  i := FEntries.Count - 1;
+  i := FSlots.Count - 1;
   while i >= 0 do
   begin
-    E := TH2PooledEntry(FEntries[i]);
-    if (not Assigned(E.Conn)) or E.Conn.Closed or
-       ((NowTick - E.LastUsed) > QWord(FIdleMs)) then
+    S := TPoolSlot(FSlots[i]);
+    if InterlockedCompareExchange(S.RefCount, 1, 1) = 1 then
     begin
-      FEntries.Delete(i);
-      try E.Free; except end;
+      if S.Failed or (not Assigned(S.Conn)) or S.Conn.Closed or
+         ((NowTick - S.LastUsed) > QWord(FIdleMs)) then
+      begin
+        FSlots.Delete(i);
+        try S.Release; except end;
+      end;
     end;
     Dec(i);
   end;
@@ -803,137 +886,152 @@ end;
 procedure TH2Pool.Cleanup;
 begin
   FLock.Acquire;
-  try CleanupLocked;
-  finally FLock.Release;
+  try CleanupLocked; finally FLock.Release; end;
+end;
+
+function TH2Pool.FindSlotLocked(const Key: string): TPoolSlot;
+var
+  i: Integer;
+  S: TPoolSlot;
+begin
+  Result := nil;
+  for i := 0 to FSlots.Count - 1 do
+  begin
+    S := TPoolSlot(FSlots[i]);
+    if (S.Key = Key) and (not S.Failed) then
+    begin
+      Result := S;
+      Exit;
+    end;
   end;
 end;
 
-function TH2Pool.CountForKey(const Key: string): Integer;
+function TH2Pool.Acquire(const Key: string; out IsCreator: Boolean): TPoolSlot;
 var
-  i: Integer;
+  S: TPoolSlot;
 begin
-  Result := 0;
-  for i := 0 to FEntries.Count - 1 do
-    if TH2PooledEntry(FEntries[i]).Key = Key then
-      Inc(Result);
-end;
-
-function TH2Pool.Get(const Key: string): TH2PooledEntry;
-var
-  i: Integer;
-  E: TH2PooledEntry;
-begin
+  IsCreator := False;
   Result := nil;
   FLock.Acquire;
   try
     CleanupLocked;
-    for i := FEntries.Count - 1 downto 0 do
+    S := FindSlotLocked(Key);
+    if Assigned(S) then
     begin
-      E := TH2PooledEntry(FEntries[i]);
-      if E.Key = Key then
-      begin
-        Result := E;
-        FEntries.Delete(i);
+      if not S.Creating then
         Inc(FHits);
-        Exit;
-      end;
+      S.AddRef;
+      Result := S;
+      Exit;
     end;
+    S := TPoolSlot.Create(Key);   { RefCount=1, owned by pool }
+    S.AddRef;                     { RefCount=2, caller also holds }
+    FSlots.Add(S);
     Inc(FMisses);
-  finally FLock.Release;
+    IsCreator := True;
+    Result := S;
+  finally
+    FLock.Release;
   end;
 end;
 
-function TH2Pool.Put(E: TH2PooledEntry): Boolean;
-var
-  i, SameKeyCount: Integer;
-  EvictIdx: Integer;
-  EvictTick: QWord;
+procedure TH2Pool.Publish(Slot: TPoolSlot; Conn: TH2Connection;
+                          TLSConn: TTLSConnection; Sock: Integer);
 begin
-  Result := False;
-  if not Assigned(E) then Exit;
-
+  if not Assigned(Slot) then Exit;
   FLock.Acquire;
   try
-    CleanupLocked;
-
-    if (not Assigned(E.Conn)) or E.Conn.Closed then
-    begin
-      try E.Free; except end;
-      Exit;
-    end;
-
-    // FIX: MaxPerHost=0 = pool disabled, reject entry
-    if FMaxPerHost <= 0 then
-    begin
-      try E.Free; except end;
-      Exit;
-    end;
-
-    SameKeyCount := CountForKey(E.Key);
-    if SameKeyCount >= FMaxPerHost then
-    begin
-      EvictIdx := -1;
-      EvictTick := High(QWord);
-      for i := 0 to FEntries.Count - 1 do
-      begin
-        if (TH2PooledEntry(FEntries[i]).Key = E.Key) and
-           (TH2PooledEntry(FEntries[i]).LastUsed < EvictTick) then
-        begin
-          EvictTick := TH2PooledEntry(FEntries[i]).LastUsed;
-          EvictIdx := i;
-        end;
-      end;
-      if EvictIdx >= 0 then
-      begin
-        try TH2PooledEntry(FEntries[EvictIdx]).Free; except end;
-        FEntries.Delete(EvictIdx);
-      end;
-    end;
-
-    E.LastUsed := GetTickCount64;
-    FEntries.Add(E);
-    Result := True;
-  finally FLock.Release;
+    Slot.Conn := Conn;
+    Slot.TLSConn := TLSConn;
+    Slot.Sock := Sock;
+    Slot.Creating := False;
+    Slot.LastUsed := GetTickCount64;
+    RTLEventSetEvent(Slot.InitEvent);
+  finally
+    FLock.Release;
   end;
+end;
+
+procedure TH2Pool.FailCreate(Slot: TPoolSlot; const ErrMsg: string);
+var
+  i: Integer;
+begin
+  if not Assigned(Slot) then Exit;
+  FLock.Acquire;
+  try
+    Slot.Creating := False;
+    Slot.Failed := True;
+    Slot.ErrorMsg := ErrMsg;
+    for i := 0 to FSlots.Count - 1 do
+      if TPoolSlot(FSlots[i]) = Slot then
+      begin
+        FSlots.Delete(i);
+        Break;
+      end;
+    RTLEventSetEvent(Slot.InitEvent);
+  finally
+    FLock.Release;
+  end;
+  Slot.Release;
+end;
+
+procedure TH2Pool.Release(Slot: TPoolSlot);
+begin
+  if not Assigned(Slot) then Exit;
+  Slot.LastUsed := GetTickCount64;
+  Slot.Release;
 end;
 
 procedure TH2Pool.Clear;
 var
   i: Integer;
+  S: TPoolSlot;
 begin
   FLock.Acquire;
   try
-    for i := 0 to FEntries.Count - 1 do
-      try TH2PooledEntry(FEntries[i]).Free; except end;
-    FEntries.Clear;
-  finally FLock.Release;
+    for i := 0 to FSlots.Count - 1 do
+    begin
+      S := TPoolSlot(FSlots[i]);
+      RTLEventSetEvent(S.InitEvent);
+      try S.Release; except end;
+    end;
+    FSlots.Clear;
+  finally
+    FLock.Release;
   end;
 end;
 
 function TH2Pool.GetHits: Int64;
 begin
   FLock.Acquire;
-  try Result := FHits;
-  finally FLock.Release;
-  end;
+  try Result := FHits; finally FLock.Release; end;
 end;
 
 function TH2Pool.GetMisses: Int64;
 begin
   FLock.Acquire;
-  try Result := FMisses;
-  finally FLock.Release;
-  end;
+  try Result := FMisses; finally FLock.Release; end;
 end;
 
 function TH2Pool.GetIdleCount: Integer;
+var
+  i: Integer;
+  S: TPoolSlot;
 begin
+  Result := 0;
   FLock.Acquire;
-  try Result := FEntries.Count;
-  finally FLock.Release;
+  try
+    for i := 0 to FSlots.Count - 1 do
+    begin
+      S := TPoolSlot(FSlots[i]);
+      if (not S.Creating) and (not S.Failed) and Assigned(S.Conn)
+         and (InterlockedCompareExchange(S.RefCount, 1, 1) = 1) then
+        Inc(Result);
+    end;
+  finally
+    FLock.Release;
   end;
 end;
-
 
 initialization
 end.
