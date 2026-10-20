@@ -1,5 +1,8 @@
 { ====================================================================
-  pascak_h2_conn.pas — HTTP/2 single-stream connection (RFC 7540)
+  pascak_h2_conn.pas — HTTP/2 multiplexed connection (RFC 7540)
+
+  v2 (D.2b.2b): Reader thread + per-stream state + concurrent Request().
+  Multiple streams active on the same connection.
   ==================================================================== }
 unit pascak_h2_conn;
 
@@ -8,7 +11,7 @@ unit pascak_h2_conn;
 interface
 
 uses
-  Classes, SyncObjs, SysUtils,
+  Classes, SyncObjs, SysUtils, fgl,
   pascak_tls, pascak_h2, pascak_h2_hpack, pascak_net;
 
 type
@@ -22,6 +25,25 @@ type
     HasError: Boolean;
   end;
 
+  TStreamState = class
+  public
+    Event: PRTLEvent;
+    RefCount: LongInt;
+    HeadersAccum: RawByteString;
+    Headers: THPACKHeaderArray;
+    Body: RawByteString;
+    Status: Integer;
+    Ended: Boolean;
+    HeadersDecoded: Boolean;
+    ErrorMsg: string;
+    constructor Create;
+    destructor Destroy; override;
+    procedure AddRef;
+    procedure Release;
+  end;
+
+  TStreamMap = specialize TFPGMap<Cardinal, TStreamState>;
+
   TH2Connection = class
   private
     FTLS: TTLSConnection;
@@ -33,10 +55,30 @@ type
     FClosed: Boolean;
     FNextStreamID: Cardinal;
 
-    function SendFrame(const Frame: RawByteString): Boolean;
+    FReaderThread: TThread;
+    FReaderTerminated: LongInt;
+    FWriteLock: TCriticalSection;
+    FStreamLock: TCriticalSection;
+    FStreams: TStreamMap;
+    FConnectionError: string;
+    FGoAwayLastStreamID: Cardinal;
+    FServerInitialWindow: Cardinal;
+    FServerMaxStreams: Cardinal;
+
+    function SendFrameRaw(const Frame: RawByteString): Boolean;
+    function SendFrameLocked(const Frame: RawByteString): Boolean;
     function RecvRaw(TimeoutMs: Integer): Integer;
     function TryExtractFrame(out Frame: TH2Frame): Boolean;
     function RecvFrame(out Frame: TH2Frame; TimeoutMs: Integer = 10000): Boolean;
+
+    procedure ReaderLoop;
+    procedure DispatchFrame(const Frame: TH2Frame);
+    procedure HandleSettings(const Payload: RawByteString);
+    procedure HandleHeadersFrame(const Frame: TH2Frame);
+    procedure HandleDataFrame(const Frame: TH2Frame);
+    procedure HandleRSTStream(const Frame: TH2Frame);
+    procedure HandleGoAway(const Frame: TH2Frame);
+    procedure FailAllPending(const Msg: string);
   public
     constructor Create(ATLS: TTLSConnection; const AHost: string);
     destructor Destroy; override;
@@ -86,6 +128,66 @@ type
 
 implementation
 
+type
+  TH2ReaderThread = class(TThread)
+  private
+    FOwner: TH2Connection;
+  protected
+    procedure Execute; override;
+  public
+    constructor Create(AOwner: TH2Connection);
+  end;
+
+constructor TH2ReaderThread.Create(AOwner: TH2Connection);
+begin
+  inherited Create(True);
+  FOwner := AOwner;
+  FreeOnTerminate := False;
+end;
+
+procedure TH2ReaderThread.Execute;
+begin
+  FOwner.ReaderLoop;
+end;
+
+{ ═══════════════════════════════════════════════════════════════
+  TStreamState
+  ═══════════════════════════════════════════════════════════════ }
+
+constructor TStreamState.Create;
+begin
+  Event := RTLEventCreate;
+  RefCount := 1;
+  HeadersAccum := '';
+  SetLength(Headers, 0);
+  Body := '';
+  Status := 0;
+  Ended := False;
+  HeadersDecoded := False;
+  ErrorMsg := '';
+end;
+
+destructor TStreamState.Destroy;
+begin
+  RTLEventDestroy(Event);
+  inherited;
+end;
+
+procedure TStreamState.AddRef;
+begin
+  InterlockedIncrement(RefCount);
+end;
+
+procedure TStreamState.Release;
+begin
+  if InterlockedDecrement(RefCount) = 0 then
+    Free;
+end;
+
+{ ═══════════════════════════════════════════════════════════════
+  TH2Connection — lifecycle
+  ═══════════════════════════════════════════════════════════════ }
+
 constructor TH2Connection.Create(ATLS: TTLSConnection; const AHost: string);
 begin
   inherited Create;
@@ -97,16 +199,31 @@ begin
   FStreamWindow := 1048576;
   FClosed := False;
   FNextStreamID := 1;
+
+  FReaderThread := nil;
+  FReaderTerminated := 0;
+  FWriteLock := TCriticalSection.Create;
+  FStreamLock := TCriticalSection.Create;
+  FStreams := TStreamMap.Create;
+  FStreams.Sorted := True;
+  FConnectionError := '';
+  FGoAwayLastStreamID := 0;
+  FServerInitialWindow := 65535;
+  FServerMaxStreams := 100;
 end;
 
 destructor TH2Connection.Destroy;
 begin
+  Close;
   FDec.Free;
   FEnc.Free;
+  FWriteLock.Free;
+  FStreamLock.Free;
+  FStreams.Free;
   inherited;
 end;
 
-function TH2Connection.SendFrame(const Frame: RawByteString): Boolean;
+function TH2Connection.SendFrameRaw(const Frame: RawByteString): Boolean;
 begin
   Result := False;
   if not Assigned(FTLS) or FClosed then Exit;
@@ -116,6 +233,16 @@ begin
     Exit;
   end;
   Result := True;
+end;
+
+function TH2Connection.SendFrameLocked(const Frame: RawByteString): Boolean;
+begin
+  FWriteLock.Acquire;
+  try
+    Result := SendFrameRaw(Frame);
+  finally
+    FWriteLock.Release;
+  end;
 end;
 
 function TH2Connection.RecvRaw(TimeoutMs: Integer): Integer;
@@ -185,17 +312,19 @@ begin
   Result := False;
   if not Assigned(FTLS) then Exit;
 
-  if not SendFrame(H2BuildClientPreface) then Exit;
+  if not SendFrameLocked(H2BuildClientPreface) then Exit;
 
-  SetLength(Settings, 3);
+  SetLength(Settings, 4);
   Settings[0].ID := H2_SETTINGS_HEADER_TABLE_SIZE;
   Settings[0].Value := 4096;
   Settings[1].ID := H2_SETTINGS_INITIAL_WINDOW_SIZE;
   Settings[1].Value := FStreamWindow;
   Settings[2].ID := H2_SETTINGS_MAX_CONCURRENT_STREAMS;
   Settings[2].Value := 100;
+  Settings[3].ID := H2_SETTINGS_ENABLE_PUSH;
+  Settings[3].Value := 0;
 
-  if not SendFrame(H2BuildSettings(Settings, False)) then Exit;
+  if not SendFrameLocked(H2BuildSettings(Settings, False)) then Exit;
 
   GotServerSettings := False;
   Start := GetTickCount64;
@@ -209,13 +338,14 @@ begin
       H2_FRAME_SETTINGS:
         if (Frame.Flags and H2_FLAG_ACK) = 0 then
         begin
-          if not SendFrame(H2BuildSettingsAck) then Exit;
+          HandleSettings(Frame.Payload);
+          if not SendFrameLocked(H2BuildSettingsAck) then Exit;
           GotServerSettings := True;
         end;
 
       H2_FRAME_PING:
         if (Frame.Flags and H2_FLAG_ACK) = 0 then
-          SendFrame(H2BuildPing(Frame.Payload, True));
+          SendFrameLocked(H2BuildPing(Frame.Payload, True));
 
       H2_FRAME_GOAWAY:
         begin
@@ -225,7 +355,233 @@ begin
     end;
   end;
 
-  Result := GotServerSettings and (not FClosed);
+  if not (GotServerSettings and (not FClosed)) then Exit;
+
+  FReaderThread := TH2ReaderThread.Create(Self);
+  FReaderThread.Start;
+  Result := True;
+end;
+
+procedure TH2Connection.HandleSettings(const Payload: RawByteString);
+var
+  Items: TH2SettingArray;
+  I: Integer;
+begin
+  if not H2ParseSettings(Payload, Items) then Exit;
+  for I := 0 to High(Items) do
+    case Items[I].ID of
+      H2_SETTINGS_INITIAL_WINDOW_SIZE:
+        FServerInitialWindow := Items[I].Value;
+      H2_SETTINGS_MAX_CONCURRENT_STREAMS:
+        FServerMaxStreams := Items[I].Value;
+    end;
+end;
+
+procedure TH2Connection.DispatchFrame(const Frame: TH2Frame);
+begin
+  case Frame.FrameType of
+    H2_FRAME_SETTINGS:
+      if (Frame.Flags and H2_FLAG_ACK) = 0 then
+      begin
+        HandleSettings(Frame.Payload);
+        SendFrameLocked(H2BuildSettingsAck);
+      end;
+
+    H2_FRAME_PING:
+      if (Frame.Flags and H2_FLAG_ACK) = 0 then
+        SendFrameLocked(H2BuildPing(Frame.Payload, True));
+
+    H2_FRAME_HEADERS, H2_FRAME_CONTINUATION:
+      HandleHeadersFrame(Frame);
+
+    H2_FRAME_DATA:
+      HandleDataFrame(Frame);
+
+    H2_FRAME_RST_STREAM:
+      HandleRSTStream(Frame);
+
+    H2_FRAME_GOAWAY:
+      HandleGoAway(Frame);
+
+    H2_FRAME_WINDOW_UPDATE:
+      ;  // per-stream flow control: v1 ignores
+  end;
+end;
+
+procedure TH2Connection.HandleHeadersFrame(const Frame: TH2Frame);
+var
+  Idx: Integer;
+  Stream: TStreamState;
+  Hdrs: THPACKHeaderArray;
+  I: Integer;
+begin
+  FStreamLock.Acquire;
+  try
+    Idx := FStreams.IndexOf(Frame.StreamID);
+    if Idx < 0 then Exit;
+    Stream := FStreams.Data[Idx];
+    Stream.AddRef;
+  finally
+    FStreamLock.Release;
+  end;
+  try
+    Stream.HeadersAccum := Stream.HeadersAccum + Frame.Payload;
+    if (Frame.Flags and H2_FLAG_END_HEADERS) <> 0 then
+    begin
+      try
+        Hdrs := FDec.Decode(Stream.HeadersAccum);
+        Stream.Headers := Hdrs;
+        Stream.HeadersDecoded := True;
+        for I := 0 to High(Hdrs) do
+          if Hdrs[I].Name = ':status' then
+            Stream.Status := StrToIntDef(Hdrs[I].Value, 0);
+        Stream.HeadersAccum := '';
+      except
+        on E: Exception do
+        begin
+          Stream.ErrorMsg := 'HPACK: ' + E.Message;
+          Stream.Ended := True;
+          RTLEventSetEvent(Stream.Event);
+          Exit;
+        end;
+      end;
+    end;
+    if (Frame.Flags and H2_FLAG_END_STREAM) <> 0 then
+    begin
+      Stream.Ended := True;
+      RTLEventSetEvent(Stream.Event);
+    end;
+  finally
+    Stream.Release;
+  end;
+end;
+
+procedure TH2Connection.HandleDataFrame(const Frame: TH2Frame);
+var
+  Idx: Integer;
+  Stream: TStreamState;
+begin
+  FStreamLock.Acquire;
+  try
+    Idx := FStreams.IndexOf(Frame.StreamID);
+    if Idx < 0 then Exit;
+    Stream := FStreams.Data[Idx];
+    Stream.AddRef;
+  finally
+    FStreamLock.Release;
+  end;
+  try
+    Stream.Body := Stream.Body + Frame.Payload;
+    if Length(Frame.Payload) > 0 then
+      SendFrameLocked(H2BuildWindowUpdate(Frame.StreamID, Length(Frame.Payload)));
+    if (Frame.Flags and H2_FLAG_END_STREAM) <> 0 then
+    begin
+      Stream.Ended := True;
+      RTLEventSetEvent(Stream.Event);
+    end;
+  finally
+    Stream.Release;
+  end;
+end;
+
+procedure TH2Connection.HandleRSTStream(const Frame: TH2Frame);
+var
+  Idx: Integer;
+  Stream: TStreamState;
+  ErrCode: Cardinal;
+begin
+  if not H2ParseRSTStream(Frame.Payload, ErrCode) then Exit;
+  FStreamLock.Acquire;
+  try
+    Idx := FStreams.IndexOf(Frame.StreamID);
+    if Idx < 0 then Exit;
+    Stream := FStreams.Data[Idx];
+    Stream.AddRef;
+  finally
+    FStreamLock.Release;
+  end;
+  try
+    Stream.ErrorMsg := 'RST_STREAM: ' + H2ErrorName(ErrCode);
+    Stream.Ended := True;
+    RTLEventSetEvent(Stream.Event);
+  finally
+    Stream.Release;
+  end;
+end;
+
+procedure TH2Connection.HandleGoAway(const Frame: TH2Frame);
+var
+  LastID, ErrCode: Cardinal;
+  DebugData: RawByteString;
+begin
+  if H2ParseGoAway(Frame.Payload, LastID, ErrCode, DebugData) then
+  begin
+    FGoAwayLastStreamID := LastID;
+    FConnectionError := 'GOAWAY: ' + H2ErrorName(ErrCode);
+  end
+  else
+    FConnectionError := 'GOAWAY received';
+  FailAllPending(FConnectionError);
+  FClosed := True;
+end;
+
+procedure TH2Connection.FailAllPending(const Msg: string);
+var
+  I: Integer;
+  Streams: array of TStreamState;
+begin
+  FStreamLock.Acquire;
+  try
+    SetLength(Streams, FStreams.Count);
+    for I := 0 to FStreams.Count - 1 do
+    begin
+      Streams[I] := FStreams.Data[I];
+      Streams[I].AddRef;
+    end;
+  finally
+    FStreamLock.Release;
+  end;
+  for I := 0 to High(Streams) do
+  begin
+    Streams[I].ErrorMsg := Msg;
+    Streams[I].Ended := True;
+    RTLEventSetEvent(Streams[I].Event);
+    Streams[I].Release;
+  end;
+end;
+
+procedure TH2Connection.ReaderLoop;
+var
+  Frame: TH2Frame;
+begin
+  while InterlockedCompareExchange(FReaderTerminated, 0, 0) = 0 do
+  begin
+    if FClosed then
+    begin
+      FailAllPending('connection closed');
+      Break;
+    end;
+
+    if not RecvFrame(Frame, 500) then
+    begin
+      if FClosed then
+      begin
+        FailAllPending('connection closed');
+        Break;
+      end;
+      Continue;
+    end;
+
+    try
+      DispatchFrame(Frame);
+    except
+      on E: Exception do
+      begin
+        FConnectionError := 'reader: ' + E.Message;
+        FClosed := True;
+      end;
+    end;
+  end;
 end;
 
 { --- Part 2 (Request + Close) follows --- }
@@ -235,180 +591,141 @@ function TH2Connection.Request(const Method, Path: string;
   const Body: RawByteString;
   TimeoutMs: Integer): TH2Response;
 var
+  SID: Cardinal;
+  Stream: TStreamState;
   ReqHeaders: THPACKHeaderArray;
-  I, Total: Integer;
-  HeaderBlock, RespHeadersAccum, BodyAccum: RawByteString;
-  Frame: TH2Frame;
-  GotEndStream, HeadersDecoded, IsDone: Boolean;
-  Hdrs: THPACKHeaderArray;
-  StatusCode: Integer;
+  HeaderBlock: RawByteString;
+  Total, I, Idx: Integer;
+  SendOK, RemovedFromMap: Boolean;
   Start: QWord;
-  CurrentStreamID: Cardinal;
-
-  procedure Fail(const Msg: string);
-  begin
-    Result.HasError := True;
-    Result.Error := Msg;
-    IsDone := True;
-  end;
-
+  WaitMs, ElapsedMs: Integer;
 begin
   Result.Status := 0;
   SetLength(Result.Headers, 0);
   Result.Body := '';
   Result.Error := '';
   Result.HasError := False;
-  IsDone := False;
-  StatusCode := 0;
 
-  CurrentStreamID := FNextStreamID;
-  Inc(FNextStreamID, 2);
-
-  Total := 4 + Length(ExtraHeaders);
-  SetLength(ReqHeaders, Total);
-  ReqHeaders[0].Name := ':method';    ReqHeaders[0].Value := Method;
-  ReqHeaders[1].Name := ':scheme';    ReqHeaders[1].Value := 'https';
-  ReqHeaders[2].Name := ':path';      ReqHeaders[2].Value := Path;
-  ReqHeaders[3].Name := ':authority'; ReqHeaders[3].Value := FHost;
-  for I := 0 to High(ExtraHeaders) do
-    ReqHeaders[4 + I] := ExtraHeaders[I];
-
-  HeaderBlock := FEnc.Encode(ReqHeaders);
-
-  if not SendFrame(H2BuildHeaders(CurrentStreamID, HeaderBlock, Length(Body) = 0, True)) then
+  if FReaderThread = nil then
   begin
-    Fail('Send HEADERS failed');
+    Result.HasError := True;
+    Result.Error := 'connection not opened or reader not running';
     Exit;
   end;
 
-  if Length(Body) > 0 then
-  begin
-    if not SendFrame(H2BuildData(CurrentStreamID, Body, True)) then
+  FStreamLock.Acquire;
+  try
+    if FClosed then
     begin
-      Fail('Send DATA failed');
+      Result.HasError := True;
+      Result.Error := 'connection closed: ' + FConnectionError;
       Exit;
     end;
+    if FGoAwayLastStreamID > 0 then
+    begin
+      Result.HasError := True;
+      Result.Error := 'connection GOAWAY received';
+      Exit;
+    end;
+    SID := FNextStreamID;
+    Inc(FNextStreamID, 2);
+    Stream := TStreamState.Create;
+    FStreams.Add(SID, Stream);
+    Stream.AddRef;
+  finally
+    FStreamLock.Release;
   end;
 
-  RespHeadersAccum := '';
-  BodyAccum := '';
-  GotEndStream := False;
-  HeadersDecoded := False;
-  Start := GetTickCount64;
+  try
+    Total := 4 + Length(ExtraHeaders);
+    SetLength(ReqHeaders, Total);
+    ReqHeaders[0].Name := ':method';    ReqHeaders[0].Value := Method;
+    ReqHeaders[1].Name := ':scheme';    ReqHeaders[1].Value := 'https';
+    ReqHeaders[2].Name := ':path';      ReqHeaders[2].Value := Path;
+    ReqHeaders[3].Name := ':authority'; ReqHeaders[3].Value := FHost;
+    for I := 0 to High(ExtraHeaders) do
+      ReqHeaders[4 + I] := ExtraHeaders[I];
 
-  while (not IsDone) and (not GotEndStream) and (not FClosed) do
-  begin
-    if GetTickCount64 - Start > QWord(TimeoutMs) then
+    FWriteLock.Acquire;
+    try
+      HeaderBlock := FEnc.Encode(ReqHeaders);
+      SendOK := SendFrameRaw(H2BuildHeaders(SID, HeaderBlock,
+        Length(Body) = 0, True));
+      if SendOK and (Length(Body) > 0) then
+        SendOK := SendFrameRaw(H2BuildData(SID, Body, True));
+    finally
+      FWriteLock.Release;
+    end;
+
+    if not SendOK then
     begin
-      Fail('Response timeout');
-      Break;
+      Result.HasError := True;
+      Result.Error := 'send failed';
+      Exit;
     end;
 
-    if not RecvFrame(Frame, TimeoutMs) then
+    Start := GetTickCount64;
+    while not Stream.Ended do
     begin
-      if FClosed then Fail('Connection closed before END_STREAM')
-      else Fail('RecvFrame failed');
-      Break;
+      ElapsedMs := Integer(GetTickCount64 - Start);
+      if ElapsedMs >= TimeoutMs then Break;
+      WaitMs := TimeoutMs - ElapsedMs;
+      if WaitMs > 500 then WaitMs := 500;
+      RTLEventWaitFor(Stream.Event, WaitMs);
     end;
 
-    case Frame.FrameType of
-      H2_FRAME_SETTINGS:
-        if (Frame.Flags and H2_FLAG_ACK) = 0 then
-          SendFrame(H2BuildSettingsAck);
-
-      H2_FRAME_PING:
-        if (Frame.Flags and H2_FLAG_ACK) = 0 then
-          SendFrame(H2BuildPing(Frame.Payload, True));
-
-      H2_FRAME_WINDOW_UPDATE:
-        ;
-
-      H2_FRAME_HEADERS:
-        if Frame.StreamID = CurrentStreamID then
-        begin
-          if not HeadersDecoded then
-          begin
-            RespHeadersAccum := RespHeadersAccum + Frame.Payload;
-            if (Frame.Flags and H2_FLAG_END_HEADERS) <> 0 then
-            begin
-              try
-                Hdrs := FDec.Decode(RespHeadersAccum);
-              except
-                on E: Exception do
-                begin
-                  Fail('HPACK decode failed: ' + E.Message);
-                  Continue;
-                end;
-              end;
-              for I := 0 to High(Hdrs) do
-                if Hdrs[I].Name = ':status' then
-                  StatusCode := StrToIntDef(Hdrs[I].Value, 0);
-              Result.Headers := Hdrs;
-              HeadersDecoded := True;
-              RespHeadersAccum := '';
-            end;
-          end;
-          if (Frame.Flags and H2_FLAG_END_STREAM) <> 0 then
-            GotEndStream := True;
-        end;
-
-      H2_FRAME_CONTINUATION:
-        if (Frame.StreamID = CurrentStreamID) and (not HeadersDecoded) then
-        begin
-          RespHeadersAccum := RespHeadersAccum + Frame.Payload;
-          if (Frame.Flags and H2_FLAG_END_HEADERS) <> 0 then
-          begin
-            try
-              Hdrs := FDec.Decode(RespHeadersAccum);
-            except
-              on E: Exception do
-              begin
-                Fail('HPACK decode failed (CONT): ' + E.Message);
-                Continue;
-              end;
-            end;
-            for I := 0 to High(Hdrs) do
-              if Hdrs[I].Name = ':status' then
-                StatusCode := StrToIntDef(Hdrs[I].Value, 0);
-            Result.Headers := Hdrs;
-            HeadersDecoded := True;
-          end;
-        end;
-
-      H2_FRAME_DATA:
-        if Frame.StreamID = CurrentStreamID then
-        begin
-          BodyAccum := BodyAccum + Frame.Payload;
-          if Length(Frame.Payload) > 0 then
-            SendFrame(H2BuildWindowUpdate(CurrentStreamID, Length(Frame.Payload)));
-          if (Frame.Flags and H2_FLAG_END_STREAM) <> 0 then
-            GotEndStream := True;
-        end;
-
-      H2_FRAME_RST_STREAM:
-        if Frame.StreamID = CurrentStreamID then
-          Fail('Server sent RST_STREAM');
-
-      H2_FRAME_GOAWAY:
-        Fail('Server sent GOAWAY');
+    if Stream.ErrorMsg <> '' then
+    begin
+      Result.HasError := True;
+      Result.Error := Stream.ErrorMsg;
+    end
+    else if not Stream.Ended then
+    begin
+      Result.HasError := True;
+      Result.Error := 'timeout waiting for response';
+      SendFrameLocked(H2BuildRSTStream(SID, H2_ERR_CANCEL));
+    end
+    else
+    begin
+      Result.Status := Stream.Status;
+      Result.Headers := Stream.Headers;
+      Result.Body := Stream.Body;
     end;
-  end;
-
-  Result.Status := StatusCode;
-  Result.Body := BodyAccum;
-  if not Result.HasError and not GotEndStream then
-  begin
-    Result.HasError := True;
-    Result.Error := 'No END_STREAM received';
+  finally
+    RemovedFromMap := False;
+    FStreamLock.Acquire;
+    try
+      Idx := FStreams.IndexOf(SID);
+      if (Idx >= 0) and (FStreams.Data[Idx] = Stream) then
+      begin
+        FStreams.Remove(SID);
+        RemovedFromMap := True;
+      end;
+    finally
+      FStreamLock.Release;
+    end;
+    if RemovedFromMap then
+      Stream.Release;
+    Stream.Release;
   end;
 end;
 
 procedure TH2Connection.Close;
 begin
-  if not Assigned(FTLS) or FClosed then Exit;
-  try
-    SendFrame(H2BuildGoAway(1, H2_ERR_NO_ERROR, ''));
-  except
+  if InterlockedCompareExchange(FReaderTerminated, 1, 0) <> 0 then Exit;
+
+  FailAllPending('connection closed by user');
+
+  if Assigned(FReaderThread) then
+  begin
+    try FReaderThread.WaitFor; except end;
+    try FReaderThread.Free; except end;
+    FReaderThread := nil;
+  end;
+
+  if (not FClosed) and Assigned(FTLS) then
+  begin
+    try SendFrameLocked(H2BuildGoAway(1, H2_ERR_NO_ERROR, '')); except end;
   end;
   FClosed := True;
 end;
