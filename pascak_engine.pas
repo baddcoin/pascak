@@ -647,6 +647,7 @@ type
     procedure PopFuncScope;
     procedure DeclareSymbol(const Name: string; Node: TNode);
     procedure MarkUsed(const Name: string; ErrNode: TNode);
+    procedure MarkUsedIfExists(const Name: string);
   public
     constructor Create(AGlobalEnv: TSymbolTable);
     destructor Destroy; override;
@@ -4642,6 +4643,42 @@ begin
   end;
 end;
 
+procedure TDeadCodeAnalyzer.MarkUsedIfExists(const Name: string);
+var
+  i, idx: Integer;
+  Node: TNode;
+  CapturedBoundary: Integer;
+begin
+  if FFuncScopeStack.Count > 0 then
+    CapturedBoundary := FFuncScopeStack.Last
+  else
+    CapturedBoundary := 0;
+
+  for i := FScopes.Count - 1 downto 0 do
+  begin
+    idx := FScopes[i].IndexOf(Name);
+    if idx <> -1 then
+    begin
+      Node := FScopes[i].Data[idx];
+      if Node <> nil then
+      begin
+        if Node is TVarDeclNode then
+        begin
+          TVarDeclNode(Node).IsReferenced := True;
+          if i < CapturedBoundary then
+            TVarDeclNode(Node).IsCaptured := True;
+        end
+        else if Node is TFunctionNode then
+          TFunctionNode(Node).IsReferenced := True
+        else if Node is TClassDeclNode then
+          TClassDeclNode(Node).IsReferenced := True;
+      end;
+      Exit;
+    end;
+  end;
+  { Not found — silently skip (var will be declared fresh in loop scope) }
+end;
+
 procedure TDeadCodeAnalyzer.MarkUsed(const Name: string; ErrNode: TNode);
 var
   i, idx: Integer;
@@ -4844,7 +4881,7 @@ begin
     // `var i;` dikompilasi jadi opcDefineGlobal, dan slot stack `i`
     // yang dipakai opcForLoopCond menjadi tidak sinkron (nil).
     // ══════════════════════════════════════════════════════════════════
-    MarkUsed(TForNode(Node).VarName, Node);
+    MarkUsedIfExists(TForNode(Node).VarName);
   
     PushScope; 
     DeclareSymbol(TForNode(Node).VarName, Node);
@@ -4856,7 +4893,7 @@ begin
     Analyze(TForEachNode(Node).CollectionExpr); 
   
     // FIX KRITIS: sama seperti TForNode.
-    MarkUsed(TForEachNode(Node).VarName, Node);
+    MarkUsedIfExists(TForEachNode(Node).VarName);
   
     PushScope; 
     DeclareSymbol(TForEachNode(Node).VarName, Node);
