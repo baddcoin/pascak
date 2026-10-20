@@ -23,7 +23,8 @@ Dokumentasi lengkap API standard library Pascak VM.
 12. [Crypto](#crypto)
 13. [Filesystem](#filesystem)
 14. [Linter](#linter)
-15. [Embedding (In-Process)](#embedding-in-process)
+15. [GUI (Browser-Based)](#gui-browser-based)
+16. [Embedding (In-Process)](#embedding-in-process)
 16. [Embedding (Subprocess)](#embedding-subprocess)
 17. [Formatter](#formatter)
 18. [Test Runner](#test-runner)
@@ -345,6 +346,91 @@ echo "All checks passed"
 ```
 
 ---
+## GUI (Browser-Based)
+
+Browser-based GUI via local HTTP server + WebSocket RPC bridge.
+No native window, no external dependencies — works on any device
+with a browser.
+
+### Quick Start
+
+    begin
+      sys.execWhitelist(["termux-open-url", "xdg-open"]);
+      var h := gui.create(8080, 8081, "My App");
+      gui.bind(h, "add", lambda args : args[0] + args[1]);
+      gui.serve(h, "<html><button onclick='go()'>Add</button>
+        <script>
+        async function go(){
+          var v = await window.pascak.call('add', [3, 4]);
+          alert(v);
+        }
+        </script></html>");
+      gui.start(h);
+      gui.open(h);
+      gui.run(h);
+    end.
+
+### API
+
+#### `gui.create(port, [wsPort], [title]) → handle`
+
+Create GUI app instance. `wsPort` default = `port + 1`. Returns handle ≥ 1,
+or `-1` on error.
+
+#### `gui.serve(handle, html) → bool`
+
+Set HTML content. The engine **auto-injects** a `<script>` block before
+`</body>` that provides `window.pascak.call(method, argsArray)` returning
+a `Promise`.
+
+#### `gui.bind(handle, name, callback) → bool`
+
+Register a server-side function callable from JS. `callback` receives
+positional args from `window.pascak.call(name, [...])`.
+
+#### `gui.start(handle) → bool`
+
+Bind HTTP port + WS port. Non-blocking — HTTP accept loop driven by
+engine's event loop timer (20ms poll), WS uses event-driven
+`Native_WS_ListenAsync`.
+
+#### `gui.open(handle) → bool`
+
+Spawn browser via `termux-open-url` / `xdg-open`. Requires exec
+whitelist:
+
+    sys.execWhitelist(["termux-open-url", "xdg-open", "open"]);
+
+Returns `false` if spawn failed (open URL manually).
+
+#### `gui.run(handle)`
+
+Blocking event loop — run until `gui.close` or `sys.exit`. Use
+`setTimeout` + `gui.close` for graceful shutdown.
+
+#### `gui.close(handle) → bool`
+
+Stop HTTP + WS listeners, cancel poll timer, free app state.
+Cleans up process cleanly (no hang from leftover timers).
+
+### Example
+
+See `examples/hello_gui.pas` — full counter demo with server-side
+state, HTML buttons, JS↔Pascal RPC.
+
+### Limitations (v1)
+
+| Feature | Status |
+|---------|--------|
+| HTTP + WS RPC | yes |
+| Auto JS injection | yes |
+| Browser spawn | yes (with exec whitelist) |
+| HTTPS | no (localhost only) |
+| Multi-window | no (one GUI per process) |
+| Native window | no (browser only) |
+
+---
+
 ## Embedding (In-Process)
 
 **Library-level** embedding: host Pascal code `uses pascak_engine` to

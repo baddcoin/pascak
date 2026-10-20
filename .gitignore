@@ -175,3 +175,15 @@ examples/*.ppu
 docs/*.pre_embed
 docs/*.preb7b*
 docs/*.prelif*
+*.pregu1
+*.pregu2a
+*.pregu2b
+*.pregu2c
+*.pregu2d
+*.pregu2e
+*.pregu2f
+
+# GUI example binaries
+examples/hello_gui
+examples/hello_gui.o
+examples/hello_gui.ppu
