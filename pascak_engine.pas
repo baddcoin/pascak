@@ -36699,6 +36699,8 @@ type
 
   TGuiTextureMap = specialize TFPGMap<Integer, TGuiTextureEntry>;
 
+  TGuiSoundMap = specialize TFPGMap<Integer, Pointer>;
+
   TGuiSDLState = class
   public
     LibHandle: TLibHandle;
@@ -36713,6 +36715,11 @@ type
     ImageHandle: TLibHandle;
     Textures: TGuiTextureMap;
     NextTexID: Integer;
+    MixerHandle: TLibHandle;
+    IsMixerInit: Boolean;
+    CurrentMusic: Pointer;
+    SoundMap: TGuiSoundMap;
+    NextSoundID: Integer;
     IsInit: Boolean;
     IsClosed: Boolean;
     LastError: string;
@@ -36737,6 +36744,18 @@ type
     pGetMouseState: function(x, y: PInt32): UInt32; cdecl;
     pIMG_Load: function(fpath: PAnsiChar): Pointer; cdecl;
     pQueryTexture: function(tex: Pointer; fmt, access, w, h: Pointer): Int32; cdecl;
+    pSDL_RWFromFile: function(fpath, mode: PAnsiChar): Pointer; cdecl;
+    pMix_OpenAudio: function(freq: Int32; fmt: UInt16; channels, chunksize: Int32): Int32; cdecl;
+    pMix_CloseAudio: procedure(); cdecl;
+    pMix_LoadMUS: function(fpath: PAnsiChar): Pointer; cdecl;
+    pMix_PlayMusic: function(music: Pointer; loops: Int32): Int32; cdecl;
+    pMix_PauseMusic: procedure(); cdecl;
+    pMix_ResumeMusic: procedure(); cdecl;
+    pMix_HaltMusic: function(): Int32; cdecl;
+    pMix_FreeMusic: procedure(music: Pointer); cdecl;
+    pMix_LoadWAV_RW: function(src: Pointer; freesrc: Int32): Pointer; cdecl;
+    pMix_PlayChannel: function(channel: Int32; chunk: Pointer; loops: Int32): Int32; cdecl;
+    pMix_FreeChunk: procedure(chunk: Pointer); cdecl;
     pCreateTextureFromSurface: function(ren, surface: Pointer): Pointer; cdecl;
     pRenderCopy: function(ren, tex, srcrect, dstrect: Pointer): Int32; cdecl;
     pDestroyTexture: procedure(tex: Pointer); cdecl;
@@ -36801,6 +36820,11 @@ begin
   ImageHandle := NilHandle;
   Textures := TGuiTextureMap.Create;
   NextTexID := 1;
+  MixerHandle := NilHandle;
+  IsMixerInit := False;
+  CurrentMusic := nil;
+  SoundMap := TGuiSoundMap.Create;
+  NextSoundID := 1;
   LastMouseX := 0;
   LastMouseY := 0;
   MouseButtonState := 0;
@@ -36817,6 +36841,29 @@ procedure TGuiSDLState.EnsureCleanup;
 var
   I: Integer;
 begin
+  { Audio cleanup first }
+  if Assigned(pMix_HaltMusic) then try pMix_HaltMusic(); except end;
+  if Assigned(CurrentMusic) and Assigned(pMix_FreeMusic) then
+  begin
+    try pMix_FreeMusic(CurrentMusic); except end;
+    CurrentMusic := nil;
+  end;
+  if Assigned(SoundMap) then
+  begin
+    for I := 0 to SoundMap.Count - 1 do
+    begin
+      if Assigned(SoundMap.Data[I]) and Assigned(pMix_FreeChunk) then
+        try pMix_FreeChunk(SoundMap.Data[I]); except end;
+    end;
+    try SoundMap.Free; except end;
+    SoundMap := nil;
+  end;
+  if IsMixerInit and Assigned(pMix_CloseAudio) then
+  begin
+    try pMix_CloseAudio(); except end;
+    IsMixerInit := False;
+  end;
+  { Texture cleanup }
   if Assigned(Textures) then
   begin
     for I := 0 to Textures.Count - 1 do
@@ -37038,6 +37085,82 @@ begin
       Exit(False);
     end;
   end;
+  Result := True;
+end;
+
+function GuiSDLEnsureMixer: Boolean;
+const
+  MIX_CANDIDATES: array[0..3] of string = (
+    '/data/data/com.termux/files/usr/lib/libSDL2_mixer-2.0.so',
+    '/data/data/com.termux/files/usr/lib/libSDL2_mixer.so',
+    'libSDL2_mixer-2.0.so',
+    'libSDL2_mixer.so'
+  );
+var
+  I: Integer;
+begin
+  Result := False;
+  if not Assigned(GGuiSDL) then Exit;
+  if GGuiSDL.IsMixerInit then Exit(True);
+
+  { Ensure base SDL2 loaded }
+  if GGuiSDL.LibHandle = NilHandle then Exit;
+
+  { Load SDL_RWFromFile from main lib (needed for Mix_LoadWAV_RW) }
+  if not Assigned(GGuiSDL.pSDL_RWFromFile) then
+  begin
+    Pointer(GGuiSDL.pSDL_RWFromFile) := GetProcAddress(GGuiSDL.LibHandle, 'SDL_RWFromFile');
+    if not Assigned(GGuiSDL.pSDL_RWFromFile) then
+    begin
+      GGuiSDL.LastError := 'SDL2 missing SDL_RWFromFile';
+      Exit(False);
+    end;
+  end;
+
+  { Load libSDL2_mixer }
+  if GGuiSDL.MixerHandle = NilHandle then
+  begin
+    for I := 0 to High(MIX_CANDIDATES) do
+    begin
+      GGuiSDL.MixerHandle := LoadLibrary(MIX_CANDIDATES[I]);
+      if GGuiSDL.MixerHandle <> NilHandle then Break;
+    end;
+    if GGuiSDL.MixerHandle = NilHandle then
+    begin
+      GGuiSDL.LastError := 'failed to load libSDL2_mixer';
+      Exit(False);
+    end;
+    Pointer(GGuiSDL.pMix_OpenAudio)      := GetProcAddress(GGuiSDL.MixerHandle, 'Mix_OpenAudio');
+    Pointer(GGuiSDL.pMix_CloseAudio)     := GetProcAddress(GGuiSDL.MixerHandle, 'Mix_CloseAudio');
+    Pointer(GGuiSDL.pMix_LoadMUS)        := GetProcAddress(GGuiSDL.MixerHandle, 'Mix_LoadMUS');
+    Pointer(GGuiSDL.pMix_PlayMusic)      := GetProcAddress(GGuiSDL.MixerHandle, 'Mix_PlayMusic');
+    Pointer(GGuiSDL.pMix_PauseMusic)     := GetProcAddress(GGuiSDL.MixerHandle, 'Mix_PauseMusic');
+    Pointer(GGuiSDL.pMix_ResumeMusic)    := GetProcAddress(GGuiSDL.MixerHandle, 'Mix_ResumeMusic');
+    Pointer(GGuiSDL.pMix_HaltMusic)      := GetProcAddress(GGuiSDL.MixerHandle, 'Mix_HaltMusic');
+    Pointer(GGuiSDL.pMix_FreeMusic)      := GetProcAddress(GGuiSDL.MixerHandle, 'Mix_FreeMusic');
+    Pointer(GGuiSDL.pMix_LoadWAV_RW)     := GetProcAddress(GGuiSDL.MixerHandle, 'Mix_LoadWAV_RW');
+    Pointer(GGuiSDL.pMix_PlayChannel)    := GetProcAddress(GGuiSDL.MixerHandle, 'Mix_PlayChannel');
+    Pointer(GGuiSDL.pMix_FreeChunk)      := GetProcAddress(GGuiSDL.MixerHandle, 'Mix_FreeChunk');
+    if not (Assigned(GGuiSDL.pMix_OpenAudio) and
+            Assigned(GGuiSDL.pMix_LoadMUS) and
+            Assigned(GGuiSDL.pMix_LoadWAV_RW) and
+            Assigned(GGuiSDL.pMix_PlayChannel)) then
+    begin
+      UnloadLibrary(GGuiSDL.MixerHandle);
+      GGuiSDL.MixerHandle := NilHandle;
+      GGuiSDL.LastError := 'SDL2_mixer missing core functions';
+      Exit(False);
+    end;
+  end;
+
+  { Open audio: 44100 Hz, AUDIO_S16LSB ($8010), stereo, 2048 chunk }
+  if GGuiSDL.pMix_OpenAudio(44100, UInt16($8010), 2, 2048) <> 0 then
+  begin
+    GGuiSDL.LastError := 'Mix_OpenAudio failed (set SDL_AUDIODRIVER=dummy for headless)';
+    Exit(False);
+  end;
+
+  GGuiSDL.IsMixerInit := True;
   Result := True;
 end;
 
@@ -37668,6 +37791,159 @@ begin
       try GGuiSDL.pDestroyTexture(Entry.Tex); except end;
     Entry.Free;
   end;
+  Result := TValue.CreateBool(True);
+end;
+
+function Native_Gui2_LoadMusic(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  Path, SafePath: string;
+begin
+  Result := TValue.CreateNum(0);
+  if (Args.Count <> 1) or (TValue(Args[0]).DataType <> dtString) then Exit;
+  if not Assigned(GGuiSDL) then Exit;
+  if GGuiSDL.LibHandle = NilHandle then Exit;
+  if not GuiSDLEnsureMixer then Exit;
+  Path := TValue(Args[0]).StrVal;
+  if (Length(Path) > 0) and (Path[1] = '/') then
+    SafePath := Path
+  else
+  begin
+    try SafePath := GetSafeSandboxedPath(Path);
+    except Exit; end;
+  end;
+  if Assigned(GGuiSDL.CurrentMusic) then
+  begin
+    if Assigned(GGuiSDL.pMix_HaltMusic) then try GGuiSDL.pMix_HaltMusic(); except end;
+    if Assigned(GGuiSDL.pMix_FreeMusic) then
+      try GGuiSDL.pMix_FreeMusic(GGuiSDL.CurrentMusic); except end;
+    GGuiSDL.CurrentMusic := nil;
+  end;
+  GGuiSDL.CurrentMusic := GGuiSDL.pMix_LoadMUS(PAnsiChar(AnsiString(SafePath)));
+  if not Assigned(GGuiSDL.CurrentMusic) then Exit;
+  Result := TValue.CreateNum(1);
+end;
+
+function Native_Gui2_PlayMusic(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  Loops: Integer;
+  R: Int32;
+begin
+  Result := TValue.CreateBool(False);
+  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.CurrentMusic)) then Exit;
+  if not Assigned(GGuiSDL.pMix_PlayMusic) then Exit;
+  Loops := 0;
+  if (Args.Count >= 1) and (TValue(Args[0]).DataType = dtNumeric) then
+    Loops := Trunc(TValue(Args[0]).NumVal);
+  R := GGuiSDL.pMix_PlayMusic(GGuiSDL.CurrentMusic, Loops);
+  Result := TValue.CreateBool(R = 0);
+end;
+
+function Native_Gui2_PauseMusic(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+begin
+  Result := TValue.CreateBool(False);
+  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.pMix_PauseMusic)) then Exit;
+  GGuiSDL.pMix_PauseMusic();
+  Result := TValue.CreateBool(True);
+end;
+
+function Native_Gui2_ResumeMusic(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+begin
+  Result := TValue.CreateBool(False);
+  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.pMix_ResumeMusic)) then Exit;
+  GGuiSDL.pMix_ResumeMusic();
+  Result := TValue.CreateBool(True);
+end;
+
+function Native_Gui2_StopMusic(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  R: Int32;
+begin
+  Result := TValue.CreateBool(False);
+  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.pMix_HaltMusic)) then Exit;
+  R := GGuiSDL.pMix_HaltMusic();
+  Result := TValue.CreateBool(R = 0);
+end;
+
+function Native_Gui2_FreeMusic(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+begin
+  Result := TValue.CreateBool(False);
+  if not Assigned(GGuiSDL) then Exit;
+  if Assigned(GGuiSDL.pMix_HaltMusic) then try GGuiSDL.pMix_HaltMusic(); except end;
+  if Assigned(GGuiSDL.CurrentMusic) and Assigned(GGuiSDL.pMix_FreeMusic) then
+  begin
+    try GGuiSDL.pMix_FreeMusic(GGuiSDL.CurrentMusic); except end;
+    GGuiSDL.CurrentMusic := nil;
+    Result := TValue.CreateBool(True);
+  end;
+end;
+
+function Native_Gui2_LoadSound(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  Path, SafePath: string;
+  RW: Pointer;
+  Chunk: Pointer;
+  NewID: Integer;
+begin
+  Result := TValue.CreateNum(0);
+  if (Args.Count <> 1) or (TValue(Args[0]).DataType <> dtString) then Exit;
+  if not Assigned(GGuiSDL) then Exit;
+  if GGuiSDL.LibHandle = NilHandle then Exit;
+  if not GuiSDLEnsureMixer then Exit;
+  if (not Assigned(GGuiSDL.SoundMap)) or (not Assigned(GGuiSDL.pSDL_RWFromFile)) then Exit;
+  Path := TValue(Args[0]).StrVal;
+  if (Length(Path) > 0) and (Path[1] = '/') then
+    SafePath := Path
+  else
+  begin
+    try SafePath := GetSafeSandboxedPath(Path);
+    except Exit; end;
+  end;
+  RW := GGuiSDL.pSDL_RWFromFile(PAnsiChar(AnsiString(SafePath)), 'rb');
+  if not Assigned(RW) then Exit;
+  Chunk := GGuiSDL.pMix_LoadWAV_RW(RW, 1);
+  if not Assigned(Chunk) then Exit;
+  NewID := GGuiSDL.NextSoundID;
+  Inc(GGuiSDL.NextSoundID);
+  GGuiSDL.SoundMap.Add(NewID, Chunk);
+  Result := TValue.CreateNum(NewID);
+end;
+
+function Native_Gui2_PlaySound(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  ID, Idx, Loops: Integer;
+  Chunk: Pointer;
+  R: Int32;
+begin
+  Result := TValue.CreateBool(False);
+  if (Args.Count < 1) or (not Assigned(GGuiSDL)) then Exit;
+  if (not Assigned(GGuiSDL.SoundMap)) or (not Assigned(GGuiSDL.pMix_PlayChannel)) then Exit;
+  ID := Trunc(TValue(Args[0]).NumVal);
+  Loops := 0;
+  if (Args.Count >= 2) and (TValue(Args[1]).DataType = dtNumeric) then
+    Loops := Trunc(TValue(Args[1]).NumVal);
+  Idx := GGuiSDL.SoundMap.IndexOf(ID);
+  if Idx < 0 then Exit;
+  Chunk := GGuiSDL.SoundMap.Data[Idx];
+  if not Assigned(Chunk) then Exit;
+  R := GGuiSDL.pMix_PlayChannel(-1, Chunk, Loops);
+  Result := TValue.CreateBool(R >= 0);
+end;
+
+function Native_Gui2_FreeSound(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  ID, Idx: Integer;
+  Chunk: Pointer;
+begin
+  Result := TValue.CreateBool(False);
+  if (Args.Count <> 1) or (not Assigned(GGuiSDL)) then Exit;
+  if not Assigned(GGuiSDL.SoundMap) then Exit;
+  ID := Trunc(TValue(Args[0]).NumVal);
+  Idx := GGuiSDL.SoundMap.IndexOf(ID);
+  if Idx < 0 then Exit;
+  Chunk := GGuiSDL.SoundMap.Data[Idx];
+  GGuiSDL.SoundMap.Delete(Idx);
+  if Assigned(Chunk) and Assigned(GGuiSDL.pMix_FreeChunk) then
+    try GGuiSDL.pMix_FreeChunk(Chunk); except end;
   Result := TValue.CreateBool(True);
 end;
 
@@ -38597,6 +38873,15 @@ begin
   Gui2Def.Methods.Add('drawTexture', TVMFunction.Create);
   Gui2Def.Methods.Add('drawTextureScaled', TVMFunction.Create);
   Gui2Def.Methods.Add('freeTexture', TVMFunction.Create);
+  Gui2Def.Methods.Add('loadMusic', TVMFunction.Create);
+  Gui2Def.Methods.Add('playMusic', TVMFunction.Create);
+  Gui2Def.Methods.Add('pauseMusic', TVMFunction.Create);
+  Gui2Def.Methods.Add('resumeMusic', TVMFunction.Create);
+  Gui2Def.Methods.Add('stopMusic', TVMFunction.Create);
+  Gui2Def.Methods.Add('freeMusic', TVMFunction.Create);
+  Gui2Def.Methods.Add('loadSound', TVMFunction.Create);
+  Gui2Def.Methods.Add('playSound', TVMFunction.Create);
+  Gui2Def.Methods.Add('freeSound', TVMFunction.Create);
   Gui2Inst := TInstanceValue.Create(Gui2Def);
   Gui2Inst.Members.DefineVar('init', TValue.CreateNative(@Native_Gui2_Init));
   Gui2Inst.Members.DefineVar('window', TValue.CreateNative(@Native_Gui2_Window));
@@ -38626,6 +38911,15 @@ begin
   Gui2Inst.Members.DefineVar('drawTexture', TValue.CreateNative(@Native_Gui2_DrawTexture));
   Gui2Inst.Members.DefineVar('drawTextureScaled', TValue.CreateNative(@Native_Gui2_DrawTextureScaled));
   Gui2Inst.Members.DefineVar('freeTexture', TValue.CreateNative(@Native_Gui2_FreeTexture));
+  Gui2Inst.Members.DefineVar('loadMusic', TValue.CreateNative(@Native_Gui2_LoadMusic));
+  Gui2Inst.Members.DefineVar('playMusic', TValue.CreateNative(@Native_Gui2_PlayMusic));
+  Gui2Inst.Members.DefineVar('pauseMusic', TValue.CreateNative(@Native_Gui2_PauseMusic));
+  Gui2Inst.Members.DefineVar('resumeMusic', TValue.CreateNative(@Native_Gui2_ResumeMusic));
+  Gui2Inst.Members.DefineVar('stopMusic', TValue.CreateNative(@Native_Gui2_StopMusic));
+  Gui2Inst.Members.DefineVar('freeMusic', TValue.CreateNative(@Native_Gui2_FreeMusic));
+  Gui2Inst.Members.DefineVar('loadSound', TValue.CreateNative(@Native_Gui2_LoadSound));
+  Gui2Inst.Members.DefineVar('playSound', TValue.CreateNative(@Native_Gui2_PlaySound));
+  Gui2Inst.Members.DefineVar('freeSound', TValue.CreateNative(@Native_Gui2_FreeSound));
   GEnvv.DefineVar('gui2', TValue.CreateObj(Gui2Inst));
   MathDef := TTypeDefinition.Create('MathLib', tkClass);
   MathDef.Methods.Add('random', TVMFunction.Create);
