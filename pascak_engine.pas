@@ -36684,12 +36684,22 @@ type
     x, y, w, h: Int32;
   end;
 
+  PSDL_Color = ^TSDL_Color;
+  TSDL_Color = record
+    r, g, b, a: UInt8;
+  end;
+
   TGuiSDLState = class
   public
     LibHandle: TLibHandle;
+    TTFHandle: TLibHandle;
     Window: Pointer;
     Renderer: Pointer;
     EventBuf: Pointer;
+    Font: Pointer;
+    FontSize: Integer;
+    FontPath: string;
+    IsTTFInit: Boolean;
     IsInit: Boolean;
     IsClosed: Boolean;
     LastError: string;
@@ -36712,6 +36722,16 @@ type
     pRenderDrawRect: function(ren: Pointer; rect: Pointer): Int32; cdecl;
     pRenderFillRect: function(ren: Pointer; rect: Pointer): Int32; cdecl;
     pGetMouseState: function(x, y: PInt32): UInt32; cdecl;
+    pCreateTextureFromSurface: function(ren, surface: Pointer): Pointer; cdecl;
+    pRenderCopy: function(ren, tex, srcrect, dstrect: Pointer): Int32; cdecl;
+    pDestroyTexture: procedure(tex: Pointer); cdecl;
+    pFreeSurface: procedure(surface: Pointer); cdecl;
+    pTTF_Init: function(): Int32; cdecl;
+    pTTF_Quit: procedure(); cdecl;
+    pTTF_OpenFont: function(fpath: PAnsiChar; ptsize: Int32): Pointer; cdecl;
+    pTTF_CloseFont: procedure(font: Pointer); cdecl;
+    pTTF_RenderText_Blended: function(font: Pointer; text: PAnsiChar; color: TSDL_Color): Pointer; cdecl;
+    pTTF_SizeText: function(font: Pointer; text: PAnsiChar; w, h: PInt32): Int32; cdecl;
     LastMouseX: Integer;
     LastMouseY: Integer;
     MouseButtonState: UInt32;
@@ -36751,6 +36771,11 @@ begin
   IsInit := False;
   IsClosed := False;
   LastError := '';
+  TTFHandle := NilHandle;
+  Font := nil;
+  FontSize := 0;
+  FontPath := '';
+  IsTTFInit := False;
   LastMouseX := 0;
   LastMouseY := 0;
   MouseButtonState := 0;
@@ -36765,6 +36790,16 @@ end;
 
 procedure TGuiSDLState.EnsureCleanup;
 begin
+  if Assigned(Font) and Assigned(pTTF_CloseFont) then
+  begin
+    try pTTF_CloseFont(Font); except end;
+    Font := nil;
+  end;
+  if IsTTFInit and Assigned(pTTF_Quit) then
+  begin
+    try pTTF_Quit(); except end;
+    IsTTFInit := False;
+  end;
   if Assigned(Renderer) and Assigned(pDestroyRenderer) then
   begin
     try pDestroyRenderer(Renderer); except end;
@@ -36833,6 +36868,70 @@ begin
     State.LibHandle := NilHandle;
     Exit(False);
   end;
+  Result := True;
+end;
+
+function GuiSDLEnsureTTF: Boolean;
+const
+  TTF_CANDIDATES: array[0..3] of string = (
+    '/data/data/com.termux/files/usr/lib/libSDL2_ttf.so',
+    '/data/data/com.termux/files/usr/lib/libSDL2_ttf-2.0.so.0',
+    'libSDL2_ttf.so',
+    'libSDL2_ttf-2.0.so.0'
+  );
+var
+  I: Integer;
+begin
+  Result := False;
+  if not Assigned(GGuiSDL) then Exit;
+  if GGuiSDL.IsTTFInit then Exit(True);
+  if GGuiSDL.TTFHandle = NilHandle then
+  begin
+    for I := 0 to High(TTF_CANDIDATES) do
+    begin
+      GGuiSDL.TTFHandle := LoadLibrary(TTF_CANDIDATES[I]);
+      if GGuiSDL.TTFHandle <> NilHandle then Break;
+    end;
+    if GGuiSDL.TTFHandle = NilHandle then
+    begin
+      GGuiSDL.LastError := 'failed to load libSDL2_ttf';
+      Exit(False);
+    end;
+    Pointer(GGuiSDL.pTTF_Init) := GetProcAddress(GGuiSDL.TTFHandle, 'TTF_Init');
+    Pointer(GGuiSDL.pTTF_Quit) := GetProcAddress(GGuiSDL.TTFHandle, 'TTF_Quit');
+    Pointer(GGuiSDL.pTTF_OpenFont) := GetProcAddress(GGuiSDL.TTFHandle, 'TTF_OpenFont');
+    Pointer(GGuiSDL.pTTF_CloseFont) := GetProcAddress(GGuiSDL.TTFHandle, 'TTF_CloseFont');
+    Pointer(GGuiSDL.pTTF_RenderText_Blended) := GetProcAddress(GGuiSDL.TTFHandle, 'TTF_RenderText_Blended');
+    Pointer(GGuiSDL.pTTF_SizeText) := GetProcAddress(GGuiSDL.TTFHandle, 'TTF_SizeText');
+    if not (Assigned(GGuiSDL.pTTF_Init) and Assigned(GGuiSDL.pTTF_OpenFont)) then
+    begin
+      UnloadLibrary(GGuiSDL.TTFHandle);
+      GGuiSDL.TTFHandle := NilHandle;
+      GGuiSDL.LastError := 'SDL_ttf missing functions';
+      Exit(False);
+    end;
+  end;
+  if not Assigned(GGuiSDL.pCreateTextureFromSurface) then
+  begin
+    Pointer(GGuiSDL.pCreateTextureFromSurface) := GetProcAddress(GGuiSDL.LibHandle, 'SDL_CreateTextureFromSurface');
+    Pointer(GGuiSDL.pRenderCopy) := GetProcAddress(GGuiSDL.LibHandle, 'SDL_RenderCopy');
+    Pointer(GGuiSDL.pDestroyTexture) := GetProcAddress(GGuiSDL.LibHandle, 'SDL_DestroyTexture');
+    Pointer(GGuiSDL.pFreeSurface) := GetProcAddress(GGuiSDL.LibHandle, 'SDL_FreeSurface');
+    if not (Assigned(GGuiSDL.pCreateTextureFromSurface) and
+            Assigned(GGuiSDL.pRenderCopy) and
+            Assigned(GGuiSDL.pDestroyTexture) and
+            Assigned(GGuiSDL.pFreeSurface)) then
+    begin
+      GGuiSDL.LastError := 'SDL2 missing texture functions';
+      Exit(False);
+    end;
+  end;
+  if GGuiSDL.pTTF_Init() <> 0 then
+  begin
+    GGuiSDL.LastError := 'TTF_Init failed';
+    Exit(False);
+  end;
+  GGuiSDL.IsTTFInit := True;
   Result := True;
 end;
 
@@ -37224,6 +37323,116 @@ begin
     Exit(TValue.CreateStr(''));
   Code := Trunc(TValue(Args[0]).NumVal);
   Result := TValue.CreateStr(GuiKeyName(Code));
+end;
+
+function Native_Gui2_SetFont(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  Path, SafePath: string;
+  Size: Integer;
+begin
+  Result := TValue.CreateBool(False);
+  if (Args.Count < 1) or (Args.Count > 2) or
+     (TValue(Args[0]).DataType <> dtString) then Exit;
+  Path := TValue(Args[0]).StrVal;
+  Size := 16;
+  if (Args.Count = 2) and (TValue(Args[1]).DataType = dtNumeric) then
+    Size := Trunc(TValue(Args[1]).NumVal);
+  if Size <= 0 then Size := 16;
+  if not GuiSDLEnsureInit then Exit;
+  if not GuiSDLEnsureTTF then Exit;
+  if (Length(Path) > 0) and (Path[1] = '/') then
+    SafePath := Path
+  else
+  begin
+    try SafePath := GetSafeSandboxedPath(Path);
+    except Exit; end;
+  end;
+  if Assigned(GGuiSDL.Font) and Assigned(GGuiSDL.pTTF_CloseFont) then
+  begin
+    try GGuiSDL.pTTF_CloseFont(GGuiSDL.Font); except end;
+    GGuiSDL.Font := nil;
+  end;
+  GGuiSDL.Font := GGuiSDL.pTTF_OpenFont(
+    PAnsiChar(AnsiString(SafePath)), Int32(Size));
+  if not Assigned(GGuiSDL.Font) then
+  begin
+    GGuiSDL.LastError := 'TTF_OpenFont: ' + SafePath;
+    Exit(TValue.CreateBool(False));
+  end;
+  GGuiSDL.FontPath := SafePath;
+  GGuiSDL.FontSize := Size;
+  Result := TValue.CreateBool(True);
+end;
+
+function Native_Gui2_Text(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  X, Y, R, G, B: Integer;
+  TextStr: string;
+  Surf, Tex: Pointer;
+  Color: TSDL_Color;
+  SrcRect, DstRect: TSDL_Rect;
+  TexW, TexH: Int32;
+begin
+  Result := TValue.CreateBool(False);
+  if (Args.Count < 6) or (not Assigned(GGuiSDL)) then Exit;
+  if (not Assigned(GGuiSDL.Renderer)) or (not Assigned(GGuiSDL.Font)) then Exit;
+  if not Assigned(GGuiSDL.pTTF_RenderText_Blended) then Exit;
+  if TValue(Args[2]).DataType <> dtString then Exit;
+  X := Trunc(TValue(Args[0]).NumVal);
+  Y := Trunc(TValue(Args[1]).NumVal);
+  TextStr := TValue(Args[2]).StrVal;
+  R := Trunc(TValue(Args[3]).NumVal);
+  G := Trunc(TValue(Args[4]).NumVal);
+  B := Trunc(TValue(Args[5]).NumVal);
+  if TextStr = '' then Exit(TValue.CreateBool(True));
+  Color.r := UInt8(R); Color.g := UInt8(G); Color.b := UInt8(B); Color.a := 255;
+  Surf := GGuiSDL.pTTF_RenderText_Blended(GGuiSDL.Font,
+    PAnsiChar(AnsiString(TextStr)), Color);
+  if not Assigned(Surf) then Exit;
+  try
+    TexW := 0; TexH := 0;
+    if Assigned(GGuiSDL.pTTF_SizeText) then
+      GGuiSDL.pTTF_SizeText(GGuiSDL.Font, PAnsiChar(AnsiString(TextStr)), @TexW, @TexH);
+    if (TexW <= 0) or (TexH <= 0) then Exit;
+    Tex := GGuiSDL.pCreateTextureFromSurface(GGuiSDL.Renderer, Surf);
+    if Assigned(Tex) then
+    begin
+      try
+        SrcRect.x := 0; SrcRect.y := 0; SrcRect.w := TexW; SrcRect.h := TexH;
+        DstRect.x := X; DstRect.y := Y; DstRect.w := TexW; DstRect.h := TexH;
+        GGuiSDL.pRenderCopy(GGuiSDL.Renderer, Tex, @SrcRect, @DstRect);
+        Result := TValue.CreateBool(True);
+      finally
+        GGuiSDL.pDestroyTexture(Tex);
+      end;
+    end;
+  finally
+    GGuiSDL.pFreeSurface(Surf);
+  end;
+end;
+
+function Native_Gui2_MeasureText(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  TextStr: string;
+  W, H: Int32;
+  D: TDictValue;
+begin
+  Result := TValue.CreateNull;
+  if (Args.Count <> 1) or (TValue(Args[0]).DataType <> dtString) then Exit;
+  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Font)) then Exit;
+  if not Assigned(GGuiSDL.pTTF_SizeText) then Exit;
+  TextStr := TValue(Args[0]).StrVal;
+  W := 0; H := 0;
+  GGuiSDL.pTTF_SizeText(GGuiSDL.Font, PAnsiChar(AnsiString(TextStr)), @W, @H);
+  D := TDictValue.Create;
+  try
+    D.SetValue('w', TValue.CreateNum(W));
+    D.SetValue('h', TValue.CreateNum(H));
+    Result := TValue.CreateDict(D);
+  except
+    D.Free;
+    raise;
+  end;
 end;
 
 { ═══ END GUI Path D ═══ }
@@ -38144,6 +38353,9 @@ begin
   Gui2Def.Methods.Add('mouseButton', TVMFunction.Create);
   Gui2Def.Methods.Add('keyMod', TVMFunction.Create);
   Gui2Def.Methods.Add('keyName', TVMFunction.Create);
+  Gui2Def.Methods.Add('setFont', TVMFunction.Create);
+  Gui2Def.Methods.Add('text', TVMFunction.Create);
+  Gui2Def.Methods.Add('measureText', TVMFunction.Create);
   Gui2Inst := TInstanceValue.Create(Gui2Def);
   Gui2Inst.Members.DefineVar('init', TValue.CreateNative(@Native_Gui2_Init));
   Gui2Inst.Members.DefineVar('window', TValue.CreateNative(@Native_Gui2_Window));
@@ -38165,6 +38377,9 @@ begin
   Gui2Inst.Members.DefineVar('mouseButton', TValue.CreateNative(@Native_Gui2_MouseButton));
   Gui2Inst.Members.DefineVar('keyMod', TValue.CreateNative(@Native_Gui2_KeyMod));
   Gui2Inst.Members.DefineVar('keyName', TValue.CreateNative(@Native_Gui2_KeyName));
+  Gui2Inst.Members.DefineVar('setFont', TValue.CreateNative(@Native_Gui2_SetFont));
+  Gui2Inst.Members.DefineVar('text', TValue.CreateNative(@Native_Gui2_Text));
+  Gui2Inst.Members.DefineVar('measureText', TValue.CreateNative(@Native_Gui2_MeasureText));
   GEnvv.DefineVar('gui2', TValue.CreateObj(Gui2Inst));
   MathDef := TTypeDefinition.Create('MathLib', tkClass);
   MathDef.Methods.Add('random', TVMFunction.Create);
