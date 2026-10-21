@@ -36,6 +36,7 @@ di folder project.
 25. [Timer & JSON Path](#25-timer--json-path)
 26. [Embedding In-Process](#bab-26--embedding-in-process)
 27. [GUI Browser-Based](#bab-27--gui-browser-based)
+28. [Native GUI (SDL2)](#bab-28--native-gui-sdl2)
 ```
 
 ## 1. Setup & Hello World
@@ -3745,6 +3746,379 @@ Untuk production deployment GUI ke **banyak device**, rekomendasi: pakai **mkcer
     var cert := sys.env("HOME") + "/server.crt";
     var key  := sys.env("HOME") + "/server.key";
     var h := gui.createTLS(8080, cert, key, 8081, "App");
+
+
+---
+
+## Bab 28 — Native GUI (SDL2)
+
+Bab 27 sudah bahas browser-based GUI. Bab ini bahas **native GUI** — window desktop real via SDL2 FFI, tanpa browser.
+
+### 28.1 — Konsep: Native vs Browser
+
+Pascak punya dua GUI stack yang bisa dipakai bersamaan:
+
+| Aspek | `gui` (browser) | `gui2` (native SDL2) |
+|-------|-----------------|----------------------|
+| Render | HTML/CSS di browser | Pixel via SDL_Renderer |
+| API call | `window.pascak.call()` | `gui2.text()`, `gui2.rect()` |
+| Transport | HTTP + WebSocket | X11/Wayland display |
+| Cross-platform | Universal | Linux/Windows/macOS/Termux:X11 |
+| Latency per-call | ~1–5 ms (WS RPC) | ~0.1 ms (frame loop) |
+| Game/realtime | Terbatas | Full 60+ FPS |
+| Distribution | Browser included | Butuh SDL2 runtime |
+| Distribution size | 0 KB (browser) | ~3–5 MB (SDL2 libs) |
+
+**Kapan pakai `gui2`** — game, realtime UI, tool native, embed di host app, dashboard low-latency, live chart.
+**Kapan pakai `gui`** — dashboard admin, CRUD form, app universal (mobile web), deployment zero-dependency.
+
+Keduanya bisa dipakai di satu script — `gui` untuk admin panel di port 8080, `gui2` untuk overlay native di monitor lokal.
+
+### 28.2 — Prerequisites Termux
+
+Install SDL2 + display server:
+
+    pkg install sdl2 sdl2-ttf x11-repo termux-x11-nightly x11-utils
+
+Install **Termux:X11 APK** dari https://github.com/termux/termux-x11/releases/tag/nightly (pilih `termux-x11-universal-debug.apk`).
+
+Setup:
+
+    # Terminal 1 — start X11 server (biarkan foreground)
+    termux-x11 :0 -ac
+
+    # Terminal 2 — set display
+    export DISPLAY=:0
+    xdpyinfo | head -3
+
+Buka **app Termux:X11** dari home screen Android → connect ke `:0`.
+
+Verify: `xdpyinfo` harus print `name of display: :0` dan `X.Org version`.
+
+Fonts (untuk text rendering):
+
+    pkg install ttf-dejavu
+    # atau pakai /system/fonts/Roboto-Regular.ttf
+
+### 28.3 — Quick Start: Hello Window
+
+    begin
+      if not gui2.init() then sys.exit(1);
+      if not gui2.window("Hello", 640, 480) then sys.exit(1);
+
+      while gui2.isOpen() do begin
+        var ev := gui2.poll();
+        if ev == "quit" or ev == "key:ESC" then break;
+        gui2.clear(50, 50, 150);   { dark blue }
+        gui2.present();
+        gui2.delay(16);            { ~60 FPS }
+      end;
+
+      gui2.close();
+      gui2.quit();
+    end.
+
+Run:
+
+    PASCAK_EXEC_POLICY=allow-all ./pascak_noASTnet --dev hello.pas
+
+Window 640×480 biru muncul. ESC atau klik X → close.
+
+**Struktur minimal**:
+1. `init` — SDL_Init(VIDEO) + load libSDL2
+2. `window` — create window + renderer
+3. Loop: `poll` → `clear` → draw → `present` → `delay`
+4. `close` + `quit` — cleanup
+
+
+### 28.4 — Window Lifecycle
+
+| API | Return | Deskripsi |
+|-----|--------|-----------|
+| `gui2.init()` | bool | SDL_Init(VIDEO). Idempotent. |
+| `gui2.window(title, w, h)` | bool | Create window + renderer. |
+| `gui2.isOpen()` | bool | True jika window masih terbuka. |
+| `gui2.close()` | bool | Destroy window + renderer (SDL tetap init). |
+| `gui2.quit()` | bool | Destroy semua + SDL_Quit. |
+
+Contoh satu window seumur script:
+
+    if not gui2.init() then sys.exit(1);
+    if not gui2.window("App", 800, 600) then sys.exit(1);
+    { ... event loop ... }
+    gui2.close();
+    gui2.quit();
+
+**Catatan**: `gui2.window` hanya bisa dipanggil sekali sampai `close`. Kalau butuh multiple window, tutup dulu lalu buka window baru (v1 limit).
+
+### 28.5 — Rendering Loop
+
+| API | Deskripsi |
+|-----|-----------|
+| `gui2.clear(r, g, b, [a])` | Set draw color + clear renderer. `a` default 255. |
+| `gui2.present()` | Flip back buffer ke screen. |
+| `gui2.delay(ms)` | SDL_Delay, biasanya 16 ms (60 FPS) atau 33 ms (30 FPS). |
+| `gui2.getTicks()` | Milliseconds sejak SDL_Init. Untuk timing, FPS counter, auto-close timer. |
+| `gui2.setTitle(title)` | Ubah window title saat runtime. |
+
+Pola frame loop standar:
+
+    var start := gui2.getTicks();
+    while gui2.isOpen() do begin
+      if (gui2.getTicks() - start) > 10000 then break;   { auto-close 10s }
+      { ... poll + draw ... }
+      gui2.present();
+      gui2.delay(16);
+    end;
+
+### 28.6 — Drawing Primitives
+
+| API | Backing SDL2 |
+|-----|--------------|
+| `gui2.rect(x, y, w, h, r, g, b)` | `SDL_RenderFillRect` |
+| `gui2.outlineRect(x, y, w, h, r, g, b)` | `SDL_RenderDrawRect` |
+| `gui2.line(x1, y1, x2, y2, r, g, b)` | `SDL_RenderDrawLine` |
+| `gui2.point(x, y, r, g, b)` | `SDL_RenderDrawPoint` |
+
+Contoh layout 3 kotak:
+
+    gui2.clear(30, 40, 80);
+    gui2.rect(50, 50, 200, 100, 200, 60, 60);           { filled red }
+    gui2.outlineRect(300, 50, 200, 100, 60, 200, 60);   { green border }
+    gui2.line(50, 200, 750, 550, 250, 250, 100);        { yellow diagonal }
+    var i := 0;
+    while i < 100 do begin
+      gui2.point(100 + i, 300 + i, 250, 80, 250);
+      i := i + 2;
+    end;
+    gui2.present();
+
+**Warna**: `r, g, b` clamp 0–255. Tidak ada alpha via `rect` (selalu 255) — untuk transparansi, gunakan `clear(r, g, b, alpha)` background.
+
+### 28.7 — Input Events
+
+| API | Return | Deskripsi |
+|-----|--------|-----------|
+| `gui2.poll()` | string | Ambil 1 event, non-blocking. |
+| `gui2.mouseX()` / `gui2.mouseY()` | int | Live cursor position. |
+| `gui2.mouseButton(n)` | bool | `n`=1 left, 2 middle, 3 right. |
+| `gui2.keyMod(name)` | bool | `"SHIFT"`, `"CTRL"`, `"ALT"`. |
+| `gui2.keyName(code)` | string | Konversi numeric → `"ESC"`, `"A"`, `"UP"`. |
+
+**Format return `poll()`**:
+
+| String | Event |
+|--------|-------|
+| `"none"` | Tidak ada event |
+| `"quit"` | Window closed (X button) |
+| `"key:ESC"` / `"key:A"` / `"key:UP"` | Keydown |
+| `"keyup:ESC"` | Keyup |
+| `"mousedown:1"` / `"mousedown:3"` | Mouse button pressed |
+| `"mouseup:1"` | Mouse button released |
+| `"mousemove"` | Cursor moved |
+
+Contoh event handling:
+
+    var ev := gui2.poll();
+    if ev == "quit" or ev == "key:ESC" then break;
+
+    if ev == "mousedown:1" then begin
+      var mx := gui2.mouseX();
+      var my := gui2.mouseY();
+      if mx >= 100 and mx < 200 and my >= 100 and my < 150 then
+        println("Click in button!");
+    end;
+
+    if ev == "mousemove" and gui2.mouseButton(1) then
+      println("Drag at " + str(gui2.mouseX()) + "," + str(gui2.mouseY()));
+
+**Key codes umum** (`gui2.keyName`): `ESC`, `ENTER`, `SPACE`, `BACKSPACE`, `TAB`, `DELETE`, `UP`, `DOWN`, `LEFT`, `RIGHT`, `F1`–`F12`, `LCTRL`, `LSHIFT`, `LALT`, `A`–`Z`, `0`–`9`.
+
+### 28.8 — Text Rendering (SDL_ttf)
+
+Prereq: `pkg install sdl2-ttf`.
+
+| API | Deskripsi |
+|-----|-----------|
+| `gui2.setFont(path, [size])` | Load TTF, size default 16. Path absolute atau sandbox-relative. |
+| `gui2.text(x, y, str, r, g, b)` | Render string di posisi. |
+| `gui2.measureText(str)` | Return `{w, h}` untuk layout. |
+
+Contoh text + centering:
+
+    var ok := gui2.setFont("/system/fonts/Roboto-Regular.ttf", 24);
+    if not ok then begin
+      println("font load failed");
+      sys.exit(1);
+    end;
+
+    gui2.clear(30, 40, 80);
+    gui2.text(50, 50, "Hello, Pascak!", 250, 250, 100);
+
+    { Center text }
+    var m := gui2.measureText("Centered");
+    var cx := toInteger((800 - toInteger(m["w"])) / 2);
+    gui2.text(cx, 400, "Centered", 250, 250, 250);
+
+**Font fallback** (tutorial pattern):
+
+    var loaded := false;
+    if not loaded then loaded := gui2.setFont("/system/fonts/Roboto-Regular.ttf", 24);
+    if not loaded then loaded := gui2.setFont(
+      "/data/data/com.termux/files/usr/share/fonts/TTF/DejaVuSans-Bold.ttf", 24);
+    if not loaded then begin println("no font"); sys.exit(1); end;
+
+
+### 28.9 — Contoh: Counter Interaktif
+
+Gabungan window + text + button + mouse:
+
+    var COUNT := 0;
+
+    function pointInRect(px, py, rx, ry, rw, rh) begin
+      return px >= rx and px < rx + rw and py >= ry and py < ry + rh;
+    end;
+
+    begin
+      if not gui2.init() then sys.exit(1);
+      if not gui2.window("Counter", 800, 600) then sys.exit(1);
+
+      var loaded := false;
+      if not loaded then loaded := gui2.setFont(
+        "/system/fonts/Roboto-Regular.ttf", 40);
+
+      while gui2.isOpen() do begin
+        var ev := gui2.poll();
+        if ev == "quit" or ev == "key:ESC" then break;
+
+        if ev == "mousedown:1" then begin
+          var mx := gui2.mouseX();
+          var my := gui2.mouseY();
+          if pointInRect(mx, my, 200, 400, 150, 80) then
+            COUNT := COUNT - 1
+          else if pointInRect(mx, my, 450, 400, 150, 80) then
+            COUNT := COUNT + 1
+          else if pointInRect(mx, my, 325, 500, 150, 60) then
+            COUNT := 0;
+        end;
+
+        gui2.clear(40, 50, 90);
+        gui2.text(30, 30, "Counter Demo", 250, 250, 200);
+
+        var countStr := str(COUNT);
+        var m := gui2.measureText(countStr);
+        var cx := toInteger((800 - toInteger(m["w"])) / 2);
+        gui2.text(cx, 150, countStr, 250, 250, 100);
+
+        gui2.rect(200, 400, 150, 80, 180, 60, 60);
+        gui2.text(250, 415, "-", 255, 255, 255);
+        gui2.rect(450, 400, 150, 80, 60, 180, 60);
+        gui2.text(510, 415, "+", 255, 255, 255);
+        gui2.rect(325, 500, 150, 60, 80, 80, 180);
+        gui2.text(340, 515, "RESET", 255, 255, 255);
+
+        gui2.present();
+        gui2.delay(16);
+      end;
+
+      gui2.close();
+      gui2.quit();
+    end.
+
+**File lengkap**: `examples/gui2_counter.pas` (~68 lines).
+
+### 28.10 — Contoh: Mouse Paint
+
+Canvas drawing dengan stroke replay:
+
+    var STROKES := [];
+    var COLORS := [
+      {"r": 220, "g": 60,  "b": 60},
+      {"r": 60,  "g": 220, "b": 60},
+      {"r": 60,  "g": 60,  "b": 220}
+    ];
+    var colorIdx := 0;
+    var lastX := -1;
+    var lastY := -1;
+    var drawing := false;
+
+    { ... dalam loop ... }
+    var ev := gui2.poll();
+    var mx := gui2.mouseX();
+    var my := gui2.mouseY();
+
+    if ev == "mousedown:1" and my < 540 then begin
+      drawing := true;
+      lastX := mx;
+      lastY := my;
+    end;
+
+    if ev == "mouseup:1" then begin
+      drawing := false;
+      lastX := -1;
+    end;
+
+    if ev == "mousemove" and drawing then begin
+      var col := COLORS[colorIdx];
+      push(STROKES, {"x1": lastX, "y1": lastY, "x2": mx, "y2": my,
+                     "r": col["r"], "g": col["g"], "b": col["b"]});
+      lastX := mx;
+      lastY := my;
+    end;
+
+    { Replay all strokes }
+    gui2.clear(30, 30, 40);
+    var i := 0;
+    while i < len(STROKES) do begin
+      var s := STROKES[i];
+      gui2.line(s["x1"], s["y1"], s["x2"], s["y2"],
+                s["r"], s["g"], s["b"]);
+      i := i + 1;
+    end;
+    gui2.present();
+
+**File lengkap**: `examples/gui2_paint.pas` (~100 lines).
+
+### 28.11 — Limitations v1
+
+| Fitur | Status |
+|-------|--------|
+| Window + render loop | ✅ |
+| Drawing (4 primitives) | ✅ |
+| Keyboard + mouse | ✅ |
+| Text (TTF) | ✅ |
+| Multiple windows | ❌ (1 window per process) |
+| Alpha blending (rect) | ❌ (hanya background) |
+| Texture loading (PNG/JPG) | ❌ (butuh SDL_image) |
+| Audio | ❌ (butuh SDL_mixer) |
+| Native menu/dialog | ❌ |
+| HiDPI scaling | ⚠️ manual |
+| GPU acceleration | ⚠️ software fallback di Termux:X11 |
+
+**Untuk kebutuhan lebih**: load langsung via `dll.load("libSDL2_image.so")` dan pakai `native.struct` untuk surface — sama seperti FFI patterns di Bab 10-12.
+
+### 28.12 — Ringkasan API
+
+| Kategori | Fungsi |
+|----------|--------|
+| **Window** | `init`, `window`, `isOpen`, `close`, `quit`, `setTitle` |
+| **Render** | `clear`, `present`, `delay`, `getTicks` |
+| **Draw** | `rect`, `outlineRect`, `line`, `point` |
+| **Input** | `poll`, `mouseX`, `mouseY`, `mouseButton`, `keyMod`, `keyName` |
+| **Text** | `setFont`, `text`, `measureText` |
+
+**19 fungsi** — cukup untuk build dashboard, form, game sederhana, tool native.
+
+**Examples siap-pakai**:
+- `examples/hello_gui2.pas` — window minimal
+- `examples/drawing_demo_gui2.pas` — grid + shapes
+- `examples/input_demo_gui2.pas` — crosshair + click + keyboard log
+- `examples/text_demo_gui2.pas` — colored text + measureText
+- `examples/gui2_counter.pas` — click counter
+- `examples/gui2_paint.pas` — mouse drawing
+
+**Untuk browser-based GUI** (HTTP + WS), lihat Bab 27.
+**Untuk HTTP/2 client**, lihat Bonus chapter.
 
 ## Bonus — HTTP/2 Client
 
