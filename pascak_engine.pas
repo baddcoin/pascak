@@ -36679,6 +36679,11 @@ end;//end native Signal Handling
 { ═══ GUI Path D — Native SDL2 (Session 1: window lifecycle) ═══ }
 
 type
+  PSDL_Rect = ^TSDL_Rect;
+  TSDL_Rect = record
+    x, y, w, h: Int32;
+  end;
+
   TGuiSDLState = class
   public
     LibHandle: TLibHandle;
@@ -36702,6 +36707,10 @@ type
     pSetRenderDrawColor: function(ren: Pointer; r, g, b, a: UInt8): Int32; cdecl;
     pRenderClear: function(ren: Pointer): Int32; cdecl;
     pRenderPresent: procedure(ren: Pointer); cdecl;
+    pRenderDrawPoint: function(ren: Pointer; x, y: Int32): Int32; cdecl;
+    pRenderDrawLine: function(ren: Pointer; x1, y1, x2, y2: Int32): Int32; cdecl;
+    pRenderDrawRect: function(ren: Pointer; rect: Pointer): Int32; cdecl;
+    pRenderFillRect: function(ren: Pointer; rect: Pointer): Int32; cdecl;
     constructor Create;
     destructor Destroy; override;
     procedure EnsureCleanup;
@@ -36796,6 +36805,10 @@ begin
   Pointer(State.pSetRenderDrawColor) := GetProcAddress(State.LibHandle, 'SDL_SetRenderDrawColor');
   Pointer(State.pRenderClear)        := GetProcAddress(State.LibHandle, 'SDL_RenderClear');
   Pointer(State.pRenderPresent)      := GetProcAddress(State.LibHandle, 'SDL_RenderPresent');
+  Pointer(State.pRenderDrawPoint)    := GetProcAddress(State.LibHandle, 'SDL_RenderDrawPoint');
+  Pointer(State.pRenderDrawLine)     := GetProcAddress(State.LibHandle, 'SDL_RenderDrawLine');
+  Pointer(State.pRenderDrawRect)     := GetProcAddress(State.LibHandle, 'SDL_RenderDrawRect');
+  Pointer(State.pRenderFillRect)     := GetProcAddress(State.LibHandle, 'SDL_RenderFillRect');
   if not (Assigned(State.pInit) and Assigned(State.pQuit) and
           Assigned(State.pCreateWindow) and Assigned(State.pPollEvent)) then
   begin
@@ -36974,6 +36987,80 @@ begin
     GGuiSDL.EnsureCleanup;
     FreeAndNil(GGuiSDL);
   end;
+  Result := TValue.CreateBool(True);
+end;
+
+function Native_Gui2_Rect(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  X, Y, W, H, R, G, B: Integer;
+  Rect: TSDL_Rect;
+begin
+  Result := TValue.CreateBool(False);
+  if (Args.Count < 7) or (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Renderer)) then Exit;
+  X := Trunc(TValue(Args[0]).NumVal);
+  Y := Trunc(TValue(Args[1]).NumVal);
+  W := Trunc(TValue(Args[2]).NumVal);
+  H := Trunc(TValue(Args[3]).NumVal);
+  R := Trunc(TValue(Args[4]).NumVal);
+  G := Trunc(TValue(Args[5]).NumVal);
+  B := Trunc(TValue(Args[6]).NumVal);
+  GGuiSDL.pSetRenderDrawColor(GGuiSDL.Renderer, UInt8(R), UInt8(G), UInt8(B), 255);
+  Rect.x := X; Rect.y := Y; Rect.w := W; Rect.h := H;
+  GGuiSDL.pRenderFillRect(GGuiSDL.Renderer, @Rect);
+  Result := TValue.CreateBool(True);
+end;
+
+function Native_Gui2_OutlineRect(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  X, Y, W, H, R, G, B: Integer;
+  Rect: TSDL_Rect;
+begin
+  Result := TValue.CreateBool(False);
+  if (Args.Count < 7) or (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Renderer)) then Exit;
+  X := Trunc(TValue(Args[0]).NumVal);
+  Y := Trunc(TValue(Args[1]).NumVal);
+  W := Trunc(TValue(Args[2]).NumVal);
+  H := Trunc(TValue(Args[3]).NumVal);
+  R := Trunc(TValue(Args[4]).NumVal);
+  G := Trunc(TValue(Args[5]).NumVal);
+  B := Trunc(TValue(Args[6]).NumVal);
+  GGuiSDL.pSetRenderDrawColor(GGuiSDL.Renderer, UInt8(R), UInt8(G), UInt8(B), 255);
+  Rect.x := X; Rect.y := Y; Rect.w := W; Rect.h := H;
+  GGuiSDL.pRenderDrawRect(GGuiSDL.Renderer, @Rect);
+  Result := TValue.CreateBool(True);
+end;
+
+function Native_Gui2_Line(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  X1, Y1, X2, Y2, R, G, B: Integer;
+begin
+  Result := TValue.CreateBool(False);
+  if (Args.Count < 7) or (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Renderer)) then Exit;
+  X1 := Trunc(TValue(Args[0]).NumVal);
+  Y1 := Trunc(TValue(Args[1]).NumVal);
+  X2 := Trunc(TValue(Args[2]).NumVal);
+  Y2 := Trunc(TValue(Args[3]).NumVal);
+  R := Trunc(TValue(Args[4]).NumVal);
+  G := Trunc(TValue(Args[5]).NumVal);
+  B := Trunc(TValue(Args[6]).NumVal);
+  GGuiSDL.pSetRenderDrawColor(GGuiSDL.Renderer, UInt8(R), UInt8(G), UInt8(B), 255);
+  GGuiSDL.pRenderDrawLine(GGuiSDL.Renderer, X1, Y1, X2, Y2);
+  Result := TValue.CreateBool(True);
+end;
+
+function Native_Gui2_Point(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  X, Y, R, G, B: Integer;
+begin
+  Result := TValue.CreateBool(False);
+  if (Args.Count < 5) or (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Renderer)) then Exit;
+  X := Trunc(TValue(Args[0]).NumVal);
+  Y := Trunc(TValue(Args[1]).NumVal);
+  R := Trunc(TValue(Args[2]).NumVal);
+  G := Trunc(TValue(Args[3]).NumVal);
+  B := Trunc(TValue(Args[4]).NumVal);
+  GGuiSDL.pSetRenderDrawColor(GGuiSDL.Renderer, UInt8(R), UInt8(G), UInt8(B), 255);
+  GGuiSDL.pRenderDrawPoint(GGuiSDL.Renderer, X, Y);
   Result := TValue.CreateBool(True);
 end;
 
@@ -37886,6 +37973,10 @@ begin
   Gui2Def.Methods.Add('getTicks', TVMFunction.Create);
   Gui2Def.Methods.Add('close', TVMFunction.Create);
   Gui2Def.Methods.Add('quit', TVMFunction.Create);
+  Gui2Def.Methods.Add('rect', TVMFunction.Create);
+  Gui2Def.Methods.Add('outlineRect', TVMFunction.Create);
+  Gui2Def.Methods.Add('line', TVMFunction.Create);
+  Gui2Def.Methods.Add('point', TVMFunction.Create);
   Gui2Inst := TInstanceValue.Create(Gui2Def);
   Gui2Inst.Members.DefineVar('init', TValue.CreateNative(@Native_Gui2_Init));
   Gui2Inst.Members.DefineVar('window', TValue.CreateNative(@Native_Gui2_Window));
@@ -37898,6 +37989,10 @@ begin
   Gui2Inst.Members.DefineVar('getTicks', TValue.CreateNative(@Native_Gui2_GetTicks));
   Gui2Inst.Members.DefineVar('close', TValue.CreateNative(@Native_Gui2_Close));
   Gui2Inst.Members.DefineVar('quit', TValue.CreateNative(@Native_Gui2_Quit));
+  Gui2Inst.Members.DefineVar('rect', TValue.CreateNative(@Native_Gui2_Rect));
+  Gui2Inst.Members.DefineVar('outlineRect', TValue.CreateNative(@Native_Gui2_OutlineRect));
+  Gui2Inst.Members.DefineVar('line', TValue.CreateNative(@Native_Gui2_Line));
+  Gui2Inst.Members.DefineVar('point', TValue.CreateNative(@Native_Gui2_Point));
   GEnvv.DefineVar('gui2', TValue.CreateObj(Gui2Inst));
   MathDef := TTypeDefinition.Create('MathLib', tkClass);
   MathDef.Methods.Add('random', TVMFunction.Create);
