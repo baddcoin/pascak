@@ -36676,6 +36676,309 @@ end;//end native Signal Handling
 //native main=============
 //========================
 
+{ ═══ GUI Path D — Native SDL2 (Session 1: window lifecycle) ═══ }
+
+type
+  TGuiSDLState = class
+  public
+    LibHandle: TLibHandle;
+    Window: Pointer;
+    Renderer: Pointer;
+    EventBuf: Pointer;
+    IsInit: Boolean;
+    IsClosed: Boolean;
+    LastError: string;
+    pInit: function(flags: UInt32): Int32; cdecl;
+    pQuit: procedure(); cdecl;
+    pCreateWindow: function(title: PAnsiChar; x, y, w, h: Int32; flags: UInt32): Pointer; cdecl;
+    pDestroyWindow: procedure(win: Pointer); cdecl;
+    pGetError: function(): PAnsiChar; cdecl;
+    pPollEvent: function(event: Pointer): Int32; cdecl;
+    pSetWindowTitle: procedure(win: Pointer; title: PAnsiChar); cdecl;
+    pGetTicks: function(): UInt32; cdecl;
+    pDelay: procedure(ms: UInt32); cdecl;
+    pCreateRenderer: function(win: Pointer; index: Int32; flags: UInt32): Pointer; cdecl;
+    pDestroyRenderer: procedure(ren: Pointer); cdecl;
+    pSetRenderDrawColor: function(ren: Pointer; r, g, b, a: UInt8): Int32; cdecl;
+    pRenderClear: function(ren: Pointer): Int32; cdecl;
+    pRenderPresent: procedure(ren: Pointer); cdecl;
+    constructor Create;
+    destructor Destroy; override;
+    procedure EnsureCleanup;
+  end;
+
+var
+  GGuiSDL: TGuiSDLState = nil;
+
+const
+  SDL_INIT_VIDEO            = $20;
+  SDL_WINDOWPOS_UNDEFINED   = $1FFF0000;
+  SDL_WINDOW_SHOWN          = $4;
+  SDL_RENDERER_ACCELERATED  = $2;
+  SDL_RENDERER_PRESENTVSYNC = $4;
+  SDL_QUIT_EVENT            = $100;
+  SDL_KEYDOWN               = $300;
+  SDLK_ESCAPE               = 27;
+
+constructor TGuiSDLState.Create;
+begin
+  inherited;
+  LibHandle := NilHandle;
+  Window := nil;
+  Renderer := nil;
+  EventBuf := nil;
+  IsInit := False;
+  IsClosed := False;
+  LastError := '';
+end;
+
+destructor TGuiSDLState.Destroy;
+begin
+  EnsureCleanup;
+  inherited;
+end;
+
+procedure TGuiSDLState.EnsureCleanup;
+begin
+  if Assigned(Renderer) and Assigned(pDestroyRenderer) then
+  begin
+    try pDestroyRenderer(Renderer); except end;
+    Renderer := nil;
+  end;
+  if Assigned(Window) and Assigned(pDestroyWindow) then
+  begin
+    try pDestroyWindow(Window); except end;
+    Window := nil;
+  end;
+  if IsInit and Assigned(pQuit) then
+  begin
+    try pQuit(); except end;
+    IsInit := False;
+  end;
+  if Assigned(EventBuf) then
+  begin
+    FreeMem(EventBuf);
+    EventBuf := nil;
+  end;
+end;
+
+function GuiSDLLoadLib(State: TGuiSDLState): Boolean;
+const
+  CANDIDATES: array[0..4] of string = (
+    '/data/data/com.termux/files/usr/lib/libSDL2-2.0.so',
+    '/data/data/com.termux/files/usr/lib/libSDL2.so',
+    'libSDL2-2.0.so',
+    'libSDL2.so',
+    'libSDL2-2.0.so.0'
+  );
+var
+  I: Integer;
+begin
+  Result := False;
+  if State.LibHandle <> NilHandle then Exit(True);
+  for I := 0 to High(CANDIDATES) do
+  begin
+    State.LibHandle := LoadLibrary(CANDIDATES[I]);
+    if State.LibHandle <> NilHandle then Break;
+  end;
+  if State.LibHandle = NilHandle then Exit;
+  Pointer(State.pInit)               := GetProcAddress(State.LibHandle, 'SDL_Init');
+  Pointer(State.pQuit)               := GetProcAddress(State.LibHandle, 'SDL_Quit');
+  Pointer(State.pCreateWindow)       := GetProcAddress(State.LibHandle, 'SDL_CreateWindow');
+  Pointer(State.pDestroyWindow)      := GetProcAddress(State.LibHandle, 'SDL_DestroyWindow');
+  Pointer(State.pGetError)           := GetProcAddress(State.LibHandle, 'SDL_GetError');
+  Pointer(State.pPollEvent)          := GetProcAddress(State.LibHandle, 'SDL_PollEvent');
+  Pointer(State.pSetWindowTitle)     := GetProcAddress(State.LibHandle, 'SDL_SetWindowTitle');
+  Pointer(State.pGetTicks)           := GetProcAddress(State.LibHandle, 'SDL_GetTicks');
+  Pointer(State.pDelay)              := GetProcAddress(State.LibHandle, 'SDL_Delay');
+  Pointer(State.pCreateRenderer)     := GetProcAddress(State.LibHandle, 'SDL_CreateRenderer');
+  Pointer(State.pDestroyRenderer)    := GetProcAddress(State.LibHandle, 'SDL_DestroyRenderer');
+  Pointer(State.pSetRenderDrawColor) := GetProcAddress(State.LibHandle, 'SDL_SetRenderDrawColor');
+  Pointer(State.pRenderClear)        := GetProcAddress(State.LibHandle, 'SDL_RenderClear');
+  Pointer(State.pRenderPresent)      := GetProcAddress(State.LibHandle, 'SDL_RenderPresent');
+  if not (Assigned(State.pInit) and Assigned(State.pQuit) and
+          Assigned(State.pCreateWindow) and Assigned(State.pPollEvent)) then
+  begin
+    UnloadLibrary(State.LibHandle);
+    State.LibHandle := NilHandle;
+    Exit(False);
+  end;
+  Result := True;
+end;
+
+function GuiSDLEnsureInit: Boolean;
+begin
+  Result := False;
+  if not Assigned(GGuiSDL) then GGuiSDL := TGuiSDLState.Create;
+  if GGuiSDL.IsInit then Exit(True);
+  if not GuiSDLLoadLib(GGuiSDL) then
+  begin
+    GGuiSDL.LastError := 'failed to load libSDL2';
+    Exit(False);
+  end;
+  if GGuiSDL.pInit(SDL_INIT_VIDEO) <> 0 then
+  begin
+    GGuiSDL.LastError := 'SDL_Init: ' + string(AnsiString(GGuiSDL.pGetError()));
+    Exit(False);
+  end;
+  GGuiSDL.IsInit := True;
+  GGuiSDL.IsClosed := False;
+  Exit(True);
+end;
+
+function Native_Gui2_Init(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+begin
+  if not GuiSDLEnsureInit then
+  begin
+    errMSG.callerror(144, 'gui2.init: ' + GGuiSDL.LastError,
+                     errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateBool(False));
+  end;
+  Result := TValue.CreateBool(True);
+end;
+
+function Native_Gui2_Window(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  W, H: Integer;
+begin
+  if (Args.Count <> 3) or (TValue(Args[0]).DataType <> dtString) or
+     (TValue(Args[1]).DataType <> dtNumeric) or (TValue(Args[2]).DataType <> dtNumeric) then
+  begin
+    errMSG.callerror(140, 'gui2.window(title, width, height)',
+                     errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateBool(False));
+  end;
+  if not GuiSDLEnsureInit then Exit(TValue.CreateBool(False));
+  if Assigned(GGuiSDL.Window) then
+  begin
+    errMSG.callerror(144, 'gui2.window: window already exists',
+                     errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateBool(False));
+  end;
+  W := Trunc(TValue(Args[1]).NumVal);
+  H := Trunc(TValue(Args[2]).NumVal);
+  GGuiSDL.Window := GGuiSDL.pCreateWindow(
+    PAnsiChar(AnsiString(TValue(Args[0]).StrVal)),
+    SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+    Int32(W), Int32(H), SDL_WINDOW_SHOWN);
+  if not Assigned(GGuiSDL.Window) then
+  begin
+    errMSG.callerror(144, 'gui2.window: ' + string(AnsiString(GGuiSDL.pGetError())),
+                     errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateBool(False));
+  end;
+  GGuiSDL.Renderer := GGuiSDL.pCreateRenderer(GGuiSDL.Window, -1,
+    SDL_RENDERER_ACCELERATED or SDL_RENDERER_PRESENTVSYNC);
+  GetMem(GGuiSDL.EventBuf, 64);
+  FillChar(GGuiSDL.EventBuf^, 64, 0);
+  GGuiSDL.IsClosed := False;
+  Result := TValue.CreateBool(True);
+end;
+
+function Native_Gui2_Poll(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  HasEvent: Int32;
+  EvType: UInt32;
+  KeyCode: Int32;
+begin
+  Result := TValue.CreateStr('none');
+  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.EventBuf)) then Exit;
+  if GGuiSDL.IsClosed then Exit(TValue.CreateStr('quit'));
+  HasEvent := GGuiSDL.pPollEvent(GGuiSDL.EventBuf);
+  if HasEvent = 0 then Exit;
+  EvType := PUInt32(GGuiSDL.EventBuf)^;
+  if EvType = SDL_QUIT_EVENT then
+    Exit(TValue.CreateStr('quit'));
+  if EvType = SDL_KEYDOWN then
+  begin
+    KeyCode := PInt32(PByte(GGuiSDL.EventBuf) + 20)^;
+    if KeyCode = SDLK_ESCAPE then
+      Exit(TValue.CreateStr('key:ESC'));
+    Exit(TValue.CreateStr('key:' + IntToStr(KeyCode)));
+  end;
+end;
+
+function Native_Gui2_IsOpen(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+begin
+  Result := TValue.CreateBool(
+    Assigned(GGuiSDL) and Assigned(GGuiSDL.Window) and (not GGuiSDL.IsClosed));
+end;
+
+function Native_Gui2_Clear(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  R, G, B, A: Integer;
+begin
+  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Renderer)) then
+    Exit(TValue.CreateBool(False));
+  R := 0; G := 0; B := 0; A := 255;
+  if Args.Count >= 3 then
+  begin
+    R := Trunc(TValue(Args[0]).NumVal);
+    G := Trunc(TValue(Args[1]).NumVal);
+    B := Trunc(TValue(Args[2]).NumVal);
+  end;
+  if Args.Count >= 4 then A := Trunc(TValue(Args[3]).NumVal);
+  GGuiSDL.pSetRenderDrawColor(GGuiSDL.Renderer,
+    UInt8(R), UInt8(G), UInt8(B), UInt8(A));
+  GGuiSDL.pRenderClear(GGuiSDL.Renderer);
+  Result := TValue.CreateBool(True);
+end;
+
+function Native_Gui2_Present(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+begin
+  if Assigned(GGuiSDL) and Assigned(GGuiSDL.Renderer) then
+    GGuiSDL.pRenderPresent(GGuiSDL.Renderer);
+  Result := TValue.CreateBool(True);
+end;
+
+function Native_Gui2_SetTitle(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+begin
+  if (Args.Count <> 1) or (TValue(Args[0]).DataType <> dtString) then
+    Exit(TValue.CreateBool(False));
+  if Assigned(GGuiSDL) and Assigned(GGuiSDL.Window) then
+    GGuiSDL.pSetWindowTitle(GGuiSDL.Window,
+      PAnsiChar(AnsiString(TValue(Args[0]).StrVal)));
+  Result := TValue.CreateBool(True);
+end;
+
+function Native_Gui2_Delay(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+begin
+  if (Args.Count <> 1) or (TValue(Args[0]).DataType <> dtNumeric) then
+    Exit(TValue.CreateBool(False));
+  if Assigned(GGuiSDL) and Assigned(GGuiSDL.pDelay) then
+    GGuiSDL.pDelay(UInt32(Trunc(TValue(Args[0]).NumVal)));
+  Result := TValue.CreateBool(True);
+end;
+
+function Native_Gui2_GetTicks(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+begin
+  if Assigned(GGuiSDL) and Assigned(GGuiSDL.pGetTicks) then
+    Exit(TValue.CreateNum(GGuiSDL.pGetTicks()));
+  Result := TValue.CreateNum(0);
+end;
+
+function Native_Gui2_Close(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+begin
+  if Assigned(GGuiSDL) then
+  begin
+    GGuiSDL.EnsureCleanup;
+    GGuiSDL.IsClosed := True;
+  end;
+  Result := TValue.CreateBool(True);
+end;
+
+function Native_Gui2_Quit(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+begin
+  if Assigned(GGuiSDL) then
+  begin
+    GGuiSDL.EnsureCleanup;
+    FreeAndNil(GGuiSDL);
+  end;
+  Result := TValue.CreateBool(True);
+end;
+
+{ ═══ END GUI Path D ═══ }
+
 { ═══ GUI Path C — browser-based GUI (S2a: class + simple natives) ═══ }
 
 type
@@ -37422,13 +37725,13 @@ var
   CryptoDef, NetDef, HTTPDef, FSDef,
   DLLDef, TLSDef, NativeLibDef, 
   WSDef, PkgDef, LogDef, ConfigDef,
-  GuiDef, SignalDef, MetricsDef, HealthDef : TTypeDefinition; 
+  GuiDef, Gui2Def, SignalDef, MetricsDef, HealthDef : TTypeDefinition; 
   
   MathInst, HardInst, TimeInst, SysInst, 
   CryptoInst, NetInst, HTTPInst, FSInst,
   DLLInst, TLSInst, NativeLibInst, 
   WSInst, PkgInst, LogInst, ConfigInst,
-  GuiInst, SignalInst, MetricsInst, HealthInst: TInstanceValue; 
+  GuiInst, Gui2Inst, SignalInst, MetricsInst, HealthInst: TInstanceValue; 
 
 begin
   SignalDef := TTypeDefinition.Create('SignalLib', tkClass);
@@ -37569,6 +37872,33 @@ begin
   GuiInst.Members.DefineVar('run',    TValue.CreateNative(@Native_GUI_Run));
   GuiInst.Members.DefineVar('close',  TValue.CreateNative(@Native_GUI_Close));
   GEnvv.DefineVar('gui', TValue.CreateObj(GuiInst));
+
+  // GUI Path D — Native SDL2
+  Gui2Def := TTypeDefinition.Create('Gui2Lib', tkClass);
+  Gui2Def.Methods.Add('init', TVMFunction.Create);
+  Gui2Def.Methods.Add('window', TVMFunction.Create);
+  Gui2Def.Methods.Add('poll', TVMFunction.Create);
+  Gui2Def.Methods.Add('isOpen', TVMFunction.Create);
+  Gui2Def.Methods.Add('clear', TVMFunction.Create);
+  Gui2Def.Methods.Add('present', TVMFunction.Create);
+  Gui2Def.Methods.Add('setTitle', TVMFunction.Create);
+  Gui2Def.Methods.Add('delay', TVMFunction.Create);
+  Gui2Def.Methods.Add('getTicks', TVMFunction.Create);
+  Gui2Def.Methods.Add('close', TVMFunction.Create);
+  Gui2Def.Methods.Add('quit', TVMFunction.Create);
+  Gui2Inst := TInstanceValue.Create(Gui2Def);
+  Gui2Inst.Members.DefineVar('init', TValue.CreateNative(@Native_Gui2_Init));
+  Gui2Inst.Members.DefineVar('window', TValue.CreateNative(@Native_Gui2_Window));
+  Gui2Inst.Members.DefineVar('poll', TValue.CreateNative(@Native_Gui2_Poll));
+  Gui2Inst.Members.DefineVar('isOpen', TValue.CreateNative(@Native_Gui2_IsOpen));
+  Gui2Inst.Members.DefineVar('clear', TValue.CreateNative(@Native_Gui2_Clear));
+  Gui2Inst.Members.DefineVar('present', TValue.CreateNative(@Native_Gui2_Present));
+  Gui2Inst.Members.DefineVar('setTitle', TValue.CreateNative(@Native_Gui2_SetTitle));
+  Gui2Inst.Members.DefineVar('delay', TValue.CreateNative(@Native_Gui2_Delay));
+  Gui2Inst.Members.DefineVar('getTicks', TValue.CreateNative(@Native_Gui2_GetTicks));
+  Gui2Inst.Members.DefineVar('close', TValue.CreateNative(@Native_Gui2_Close));
+  Gui2Inst.Members.DefineVar('quit', TValue.CreateNative(@Native_Gui2_Quit));
+  GEnvv.DefineVar('gui2', TValue.CreateObj(Gui2Inst));
   MathDef := TTypeDefinition.Create('MathLib', tkClass);
   MathDef.Methods.Add('random', TVMFunction.Create);
   MathDef.Methods.Add('sin', TVMFunction.Create);

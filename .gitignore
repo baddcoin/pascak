@@ -196,3 +196,4 @@ examples/todo_gui.ppu
 examples/chat_gui
 examples/chat_gui.o
 examples/chat_gui.ppu
+termux-x11/
