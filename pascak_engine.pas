@@ -36689,6 +36689,16 @@ type
     r, g, b, a: UInt8;
   end;
 
+  TGuiTextureEntry = class
+  public
+    Tex: Pointer;
+    Width: Integer;
+    Height: Integer;
+    constructor Create(ATex: Pointer; AW, AH: Integer);
+  end;
+
+  TGuiTextureMap = specialize TFPGMap<Integer, TGuiTextureEntry>;
+
   TGuiSDLState = class
   public
     LibHandle: TLibHandle;
@@ -36700,6 +36710,9 @@ type
     FontSize: Integer;
     FontPath: string;
     IsTTFInit: Boolean;
+    ImageHandle: TLibHandle;
+    Textures: TGuiTextureMap;
+    NextTexID: Integer;
     IsInit: Boolean;
     IsClosed: Boolean;
     LastError: string;
@@ -36722,6 +36735,8 @@ type
     pRenderDrawRect: function(ren: Pointer; rect: Pointer): Int32; cdecl;
     pRenderFillRect: function(ren: Pointer; rect: Pointer): Int32; cdecl;
     pGetMouseState: function(x, y: PInt32): UInt32; cdecl;
+    pIMG_Load: function(fpath: PAnsiChar): Pointer; cdecl;
+    pQueryTexture: function(tex: Pointer; fmt, access, w, h: Pointer): Int32; cdecl;
     pCreateTextureFromSurface: function(ren, surface: Pointer): Pointer; cdecl;
     pRenderCopy: function(ren, tex, srcrect, dstrect: Pointer): Int32; cdecl;
     pDestroyTexture: procedure(tex: Pointer); cdecl;
@@ -36761,6 +36776,13 @@ const
   KMOD_CTRL                 = $00C0;
   KMOD_ALT                  = $0300;
 
+constructor TGuiTextureEntry.Create(ATex: Pointer; AW, AH: Integer);
+begin
+  Tex := ATex;
+  Width := AW;
+  Height := AH;
+end;
+
 constructor TGuiSDLState.Create;
 begin
   inherited;
@@ -36776,6 +36798,9 @@ begin
   FontSize := 0;
   FontPath := '';
   IsTTFInit := False;
+  ImageHandle := NilHandle;
+  Textures := TGuiTextureMap.Create;
+  NextTexID := 1;
   LastMouseX := 0;
   LastMouseY := 0;
   MouseButtonState := 0;
@@ -36789,7 +36814,23 @@ begin
 end;
 
 procedure TGuiSDLState.EnsureCleanup;
+var
+  I: Integer;
 begin
+  if Assigned(Textures) then
+  begin
+    for I := 0 to Textures.Count - 1 do
+    begin
+      if Assigned(Textures.Data[I]) then
+      begin
+        if Assigned(Textures.Data[I].Tex) and Assigned(pDestroyTexture) then
+          try pDestroyTexture(Textures.Data[I].Tex); except end;
+        try Textures.Data[I].Free; except end;
+      end;
+    end;
+    try Textures.Free; except end;
+    Textures := nil;
+  end;
   if Assigned(Font) and Assigned(pTTF_CloseFont) then
   begin
     try pTTF_CloseFont(Font); except end;
@@ -36932,6 +36973,71 @@ begin
     Exit(False);
   end;
   GGuiSDL.IsTTFInit := True;
+  Result := True;
+end;
+
+function GuiSDLEnsureImage: Boolean;
+const
+  IMG_CANDIDATES: array[0..3] of string = (
+    '/data/data/com.termux/files/usr/lib/libSDL2_image-2.0.so',
+    '/data/data/com.termux/files/usr/lib/libSDL2_image.so',
+    'libSDL2_image-2.0.so',
+    'libSDL2_image.so'
+  );
+var
+  I: Integer;
+begin
+  Result := False;
+  if not Assigned(GGuiSDL) then Exit;
+
+  { SDL2 texture functions (idempotent — needed by loadTexture, drawTexture) }
+  if not Assigned(GGuiSDL.pCreateTextureFromSurface) then
+  begin
+    Pointer(GGuiSDL.pCreateTextureFromSurface) := GetProcAddress(GGuiSDL.LibHandle, 'SDL_CreateTextureFromSurface');
+    Pointer(GGuiSDL.pRenderCopy) := GetProcAddress(GGuiSDL.LibHandle, 'SDL_RenderCopy');
+    Pointer(GGuiSDL.pDestroyTexture) := GetProcAddress(GGuiSDL.LibHandle, 'SDL_DestroyTexture');
+    Pointer(GGuiSDL.pFreeSurface) := GetProcAddress(GGuiSDL.LibHandle, 'SDL_FreeSurface');
+    if not (Assigned(GGuiSDL.pCreateTextureFromSurface) and
+            Assigned(GGuiSDL.pRenderCopy) and
+            Assigned(GGuiSDL.pDestroyTexture) and
+            Assigned(GGuiSDL.pFreeSurface)) then
+    begin
+      GGuiSDL.LastError := 'SDL2 missing texture functions';
+      Exit(False);
+    end;
+  end;
+
+  if Assigned(GGuiSDL.pIMG_Load) then Exit(True);
+  if GGuiSDL.ImageHandle = NilHandle then
+  begin
+    for I := 0 to High(IMG_CANDIDATES) do
+    begin
+      GGuiSDL.ImageHandle := LoadLibrary(IMG_CANDIDATES[I]);
+      if GGuiSDL.ImageHandle <> NilHandle then Break;
+    end;
+    if GGuiSDL.ImageHandle = NilHandle then
+    begin
+      GGuiSDL.LastError := 'failed to load libSDL2_image';
+      Exit(False);
+    end;
+    Pointer(GGuiSDL.pIMG_Load) := GetProcAddress(GGuiSDL.ImageHandle, 'IMG_Load');
+    if not Assigned(GGuiSDL.pIMG_Load) then
+    begin
+      UnloadLibrary(GGuiSDL.ImageHandle);
+      GGuiSDL.ImageHandle := NilHandle;
+      GGuiSDL.LastError := 'SDL2_image missing IMG_Load';
+      Exit(False);
+    end;
+  end;
+  if not Assigned(GGuiSDL.pQueryTexture) then
+  begin
+    Pointer(GGuiSDL.pQueryTexture) := GetProcAddress(GGuiSDL.LibHandle, 'SDL_QueryTexture');
+    if not Assigned(GGuiSDL.pQueryTexture) then
+    begin
+      GGuiSDL.LastError := 'SDL2 missing SDL_QueryTexture';
+      Exit(False);
+    end;
+  end;
   Result := True;
 end;
 
@@ -37433,6 +37539,136 @@ begin
     D.Free;
     raise;
   end;
+end;
+
+function Native_Gui2_LoadTexture(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  Path, SafePath: string;
+  Surf, Tex: Pointer;
+  W, H: Int32;
+  Entry: TGuiTextureEntry;
+  NewID: Integer;
+begin
+  Result := TValue.CreateNum(0);
+  if (Args.Count <> 1) or (TValue(Args[0]).DataType <> dtString) then Exit;
+  if not GuiSDLEnsureInit then Exit;
+  if not GuiSDLEnsureImage then Exit;
+  if not Assigned(GGuiSDL.Renderer) then Exit;
+  if not Assigned(GGuiSDL.pCreateTextureFromSurface) then Exit;
+  Path := TValue(Args[0]).StrVal;
+  if (Length(Path) > 0) and (Path[1] = '/') then
+    SafePath := Path
+  else
+  begin
+    try SafePath := GetSafeSandboxedPath(Path);
+    except Exit; end;
+  end;
+  Surf := GGuiSDL.pIMG_Load(PAnsiChar(AnsiString(SafePath)));
+  if not Assigned(Surf) then Exit;
+  try
+    Tex := GGuiSDL.pCreateTextureFromSurface(GGuiSDL.Renderer, Surf);
+    if not Assigned(Tex) then Exit;
+    W := 0; H := 0;
+    GGuiSDL.pQueryTexture(Tex, nil, nil, @W, @H);
+    Entry := TGuiTextureEntry.Create(Tex, W, H);
+    NewID := GGuiSDL.NextTexID;
+    Inc(GGuiSDL.NextTexID);
+    GGuiSDL.Textures.Add(NewID, Entry);
+    Result := TValue.CreateNum(NewID);
+  finally
+    GGuiSDL.pFreeSurface(Surf);
+  end;
+end;
+
+function Native_Gui2_TexSize(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  ID, Idx: Integer;
+  Entry: TGuiTextureEntry;
+  D: TDictValue;
+begin
+  Result := TValue.CreateNull;
+  if (Args.Count <> 1) or (TValue(Args[0]).DataType <> dtNumeric) then Exit;
+  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Textures)) then Exit;
+  ID := Trunc(TValue(Args[0]).NumVal);
+  Idx := GGuiSDL.Textures.IndexOf(ID);
+  if Idx < 0 then Exit;
+  Entry := GGuiSDL.Textures.Data[Idx];
+  D := TDictValue.Create;
+  try
+    D.SetValue('w', TValue.CreateNum(Entry.Width));
+    D.SetValue('h', TValue.CreateNum(Entry.Height));
+    Result := TValue.CreateDict(D);
+  except
+    D.Free;
+    raise;
+  end;
+end;
+
+function Native_Gui2_DrawTexture(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  ID, Idx, X, Y: Integer;
+  Entry: TGuiTextureEntry;
+  DstRect: TSDL_Rect;
+begin
+  Result := TValue.CreateBool(False);
+  if (Args.Count < 3) or (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Renderer)) then Exit;
+  if (not Assigned(GGuiSDL.Textures)) or (not Assigned(GGuiSDL.pRenderCopy)) then Exit;
+  ID := Trunc(TValue(Args[0]).NumVal);
+  X := Trunc(TValue(Args[1]).NumVal);
+  Y := Trunc(TValue(Args[2]).NumVal);
+  Idx := GGuiSDL.Textures.IndexOf(ID);
+  if Idx < 0 then Exit;
+  Entry := GGuiSDL.Textures.Data[Idx];
+  if not Assigned(Entry.Tex) then Exit;
+  DstRect.x := X; DstRect.y := Y;
+  DstRect.w := Entry.Width; DstRect.h := Entry.Height;
+  GGuiSDL.pRenderCopy(GGuiSDL.Renderer, Entry.Tex, nil, @DstRect);
+  Result := TValue.CreateBool(True);
+end;
+
+function Native_Gui2_DrawTextureScaled(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  ID, Idx, X, Y, W, H: Integer;
+  Entry: TGuiTextureEntry;
+  DstRect: TSDL_Rect;
+begin
+  Result := TValue.CreateBool(False);
+  if (Args.Count < 5) or (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Renderer)) then Exit;
+  if (not Assigned(GGuiSDL.Textures)) or (not Assigned(GGuiSDL.pRenderCopy)) then Exit;
+  ID := Trunc(TValue(Args[0]).NumVal);
+  X := Trunc(TValue(Args[1]).NumVal);
+  Y := Trunc(TValue(Args[2]).NumVal);
+  W := Trunc(TValue(Args[3]).NumVal);
+  H := Trunc(TValue(Args[4]).NumVal);
+  Idx := GGuiSDL.Textures.IndexOf(ID);
+  if Idx < 0 then Exit;
+  Entry := GGuiSDL.Textures.Data[Idx];
+  if not Assigned(Entry.Tex) then Exit;
+  DstRect.x := X; DstRect.y := Y; DstRect.w := W; DstRect.h := H;
+  GGuiSDL.pRenderCopy(GGuiSDL.Renderer, Entry.Tex, nil, @DstRect);
+  Result := TValue.CreateBool(True);
+end;
+
+function Native_Gui2_FreeTexture(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  ID, Idx: Integer;
+  Entry: TGuiTextureEntry;
+begin
+  Result := TValue.CreateBool(False);
+  if (Args.Count <> 1) or (TValue(Args[0]).DataType <> dtNumeric) then Exit;
+  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Textures)) then Exit;
+  ID := Trunc(TValue(Args[0]).NumVal);
+  Idx := GGuiSDL.Textures.IndexOf(ID);
+  if Idx < 0 then Exit;
+  Entry := GGuiSDL.Textures.Data[Idx];
+  GGuiSDL.Textures.Delete(Idx);
+  if Assigned(Entry) then
+  begin
+    if Assigned(Entry.Tex) and Assigned(GGuiSDL.pDestroyTexture) then
+      try GGuiSDL.pDestroyTexture(Entry.Tex); except end;
+    Entry.Free;
+  end;
+  Result := TValue.CreateBool(True);
 end;
 
 { ═══ END GUI Path D ═══ }
@@ -38356,6 +38592,11 @@ begin
   Gui2Def.Methods.Add('setFont', TVMFunction.Create);
   Gui2Def.Methods.Add('text', TVMFunction.Create);
   Gui2Def.Methods.Add('measureText', TVMFunction.Create);
+  Gui2Def.Methods.Add('loadTexture', TVMFunction.Create);
+  Gui2Def.Methods.Add('texSize', TVMFunction.Create);
+  Gui2Def.Methods.Add('drawTexture', TVMFunction.Create);
+  Gui2Def.Methods.Add('drawTextureScaled', TVMFunction.Create);
+  Gui2Def.Methods.Add('freeTexture', TVMFunction.Create);
   Gui2Inst := TInstanceValue.Create(Gui2Def);
   Gui2Inst.Members.DefineVar('init', TValue.CreateNative(@Native_Gui2_Init));
   Gui2Inst.Members.DefineVar('window', TValue.CreateNative(@Native_Gui2_Window));
@@ -38380,6 +38621,11 @@ begin
   Gui2Inst.Members.DefineVar('setFont', TValue.CreateNative(@Native_Gui2_SetFont));
   Gui2Inst.Members.DefineVar('text', TValue.CreateNative(@Native_Gui2_Text));
   Gui2Inst.Members.DefineVar('measureText', TValue.CreateNative(@Native_Gui2_MeasureText));
+  Gui2Inst.Members.DefineVar('loadTexture', TValue.CreateNative(@Native_Gui2_LoadTexture));
+  Gui2Inst.Members.DefineVar('texSize', TValue.CreateNative(@Native_Gui2_TexSize));
+  Gui2Inst.Members.DefineVar('drawTexture', TValue.CreateNative(@Native_Gui2_DrawTexture));
+  Gui2Inst.Members.DefineVar('drawTextureScaled', TValue.CreateNative(@Native_Gui2_DrawTextureScaled));
+  Gui2Inst.Members.DefineVar('freeTexture', TValue.CreateNative(@Native_Gui2_FreeTexture));
   GEnvv.DefineVar('gui2', TValue.CreateObj(Gui2Inst));
   MathDef := TTypeDefinition.Create('MathLib', tkClass);
   MathDef.Methods.Add('random', TVMFunction.Create);
