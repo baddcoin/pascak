@@ -16129,6 +16129,8 @@ var
   LookupItem: PHashItem;
 
   ThrownVal : TValue; Handled : Boolean;
+  ReRaiseErr : EScriptRuntimeError;
+  ReRaiseBanner : string;
   
   function VM_SafeDivide(A, B: Double): Double; inline;
   begin
@@ -18602,29 +18604,11 @@ begin
             ThrownVal := nil;
           end;
           
-          if TThread.CurrentThread = nil then
-          begin
-            IOLock.Acquire;
-            try
-              if (E is EScriptRuntimeError) 
-                 and (EScriptRuntimeError(E).FormattedBanner <> '') then
-              begin
-                Writeln(EScriptRuntimeError(E).FormattedBanner);
-                Writeln; Writeln(STrace);
-              end
-              else if Pos('Interpreter Halted:', E.Message) = 0 then
-              begin
-                Writeln(#10'=== RUNTIME EXCEPTION ==='#10, E.Message);
-                Writeln; Writeln(STrace); 
-              end
-              else
-              begin
-                Writeln; Writeln(STrace);
-              end;
-            finally 
-              IOLock.Release; 
-            end;
-          end;
+          // Print deferred to outer handler (runScript). Re-raised exception
+          // always carries FormattedBanner (built below) so error is visible
+          // regardless of caller (CLI or embed). Previously the banner was
+          // dropped during re-raise, causing silent exit 1 for errors that
+          // originated from errMSG.callerror (e.g. sandbox violations).
           
           while FLockDepth > 0 do 
           begin 
@@ -18661,10 +18645,26 @@ begin
           FState := vmDead; 
           LoopActive := False;
           
-          if Pos('Interpreter Halted:', E.Message) > 0 then
-            raise EScriptRuntimeError.Create(E.Message)
+          // Re-raise with FormattedBanner preserved (or built if missing)
+          // + STrace appended. Outer handler (runScript) prints once.
+          if E is EScriptRuntimeError then
+            ReRaiseBanner := EScriptRuntimeError(E).FormattedBanner
           else
-            raise EScriptRuntimeError.Create('Interpreter Halted: ' + E.Message);
+            ReRaiseBanner := '';
+
+          if ReRaiseBanner = '' then
+            ReRaiseBanner := #10'=== RUNTIME EXCEPTION ==='#10 + E.Message;
+
+          if STrace <> '' then
+            ReRaiseBanner := ReRaiseBanner + #10#10 + STrace;
+
+          if Pos('Interpreter Halted:', E.Message) > 0 then
+            ReRaiseErr := EScriptRuntimeError.Create(E.Message)
+          else
+            ReRaiseErr := EScriptRuntimeError.Create('Interpreter Halted: ' + E.Message);
+
+          ReRaiseErr.FormattedBanner := ReRaiseBanner;
+          raise ReRaiseErr;
         
         end;
       end;
