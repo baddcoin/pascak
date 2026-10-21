@@ -36711,6 +36711,11 @@ type
     pRenderDrawLine: function(ren: Pointer; x1, y1, x2, y2: Int32): Int32; cdecl;
     pRenderDrawRect: function(ren: Pointer; rect: Pointer): Int32; cdecl;
     pRenderFillRect: function(ren: Pointer; rect: Pointer): Int32; cdecl;
+    pGetMouseState: function(x, y: PInt32): UInt32; cdecl;
+    LastMouseX: Integer;
+    LastMouseY: Integer;
+    MouseButtonState: UInt32;
+    ModState: UInt16;
     constructor Create;
     destructor Destroy; override;
     procedure EnsureCleanup;
@@ -36727,7 +36732,14 @@ const
   SDL_RENDERER_PRESENTVSYNC = $4;
   SDL_QUIT_EVENT            = $100;
   SDL_KEYDOWN               = $300;
+  SDL_KEYUP                 = $301;
+  SDL_MOUSEMOTION           = $400;
+  SDL_MOUSEBUTTONDOWN       = $401;
+  SDL_MOUSEBUTTONUP         = $402;
   SDLK_ESCAPE               = 27;
+  KMOD_SHIFT                = $0003;
+  KMOD_CTRL                 = $00C0;
+  KMOD_ALT                  = $0300;
 
 constructor TGuiSDLState.Create;
 begin
@@ -36739,6 +36751,10 @@ begin
   IsInit := False;
   IsClosed := False;
   LastError := '';
+  LastMouseX := 0;
+  LastMouseY := 0;
+  MouseButtonState := 0;
+  ModState := 0;
 end;
 
 destructor TGuiSDLState.Destroy;
@@ -36809,6 +36825,7 @@ begin
   Pointer(State.pRenderDrawLine)     := GetProcAddress(State.LibHandle, 'SDL_RenderDrawLine');
   Pointer(State.pRenderDrawRect)     := GetProcAddress(State.LibHandle, 'SDL_RenderDrawRect');
   Pointer(State.pRenderFillRect)     := GetProcAddress(State.LibHandle, 'SDL_RenderFillRect');
+  Pointer(State.pGetMouseState)      := GetProcAddress(State.LibHandle, 'SDL_GetMouseState');
   if not (Assigned(State.pInit) and Assigned(State.pQuit) and
           Assigned(State.pCreateWindow) and Assigned(State.pPollEvent)) then
   begin
@@ -36888,11 +36905,52 @@ begin
   Result := TValue.CreateBool(True);
 end;
 
+function GuiKeyName(KeyCode: Int32): string;
+begin
+  case KeyCode of
+    27:         Result := 'ESC';
+    13:         Result := 'ENTER';
+    32:         Result := 'SPACE';
+    8:          Result := 'BACKSPACE';
+    9:          Result := 'TAB';
+    127:        Result := 'DELETE';
+    1073741906: Result := 'UP';
+    1073741905: Result := 'DOWN';
+    1073741904: Result := 'LEFT';
+    1073741903: Result := 'RIGHT';
+    1073741882: Result := 'F1';
+    1073741883: Result := 'F2';
+    1073741884: Result := 'F3';
+    1073741885: Result := 'F4';
+    1073741886: Result := 'F5';
+    1073741887: Result := 'F6';
+    1073741888: Result := 'F7';
+    1073741889: Result := 'F8';
+    1073741890: Result := 'F9';
+    1073741891: Result := 'F10';
+    1073741892: Result := 'F11';
+    1073741893: Result := 'F12';
+    1073742048: Result := 'LCTRL';
+    1073742049: Result := 'LSHIFT';
+    1073742050: Result := 'LALT';
+  else
+    if (KeyCode >= 97) and (KeyCode <= 122) then
+      Result := UpperCase(Chr(KeyCode))
+    else if (KeyCode >= 48) and (KeyCode <= 57) then
+      Result := Chr(KeyCode)
+    else
+      Result := 'unknown:' + IntToStr(KeyCode);
+  end;
+end;
+
 function Native_Gui2_Poll(Args: TObjectList; CallEnv: TSymbolTable): TValue;
 var
   HasEvent: Int32;
   EvType: UInt32;
   KeyCode: Int32;
+  ModBits: UInt16;
+  MouseBtn: UInt8;
+  MX, MY: Int32;
 begin
   Result := TValue.CreateStr('none');
   if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.EventBuf)) then Exit;
@@ -36900,14 +36958,49 @@ begin
   HasEvent := GGuiSDL.pPollEvent(GGuiSDL.EventBuf);
   if HasEvent = 0 then Exit;
   EvType := PUInt32(GGuiSDL.EventBuf)^;
-  if EvType = SDL_QUIT_EVENT then
-    Exit(TValue.CreateStr('quit'));
-  if EvType = SDL_KEYDOWN then
-  begin
-    KeyCode := PInt32(PByte(GGuiSDL.EventBuf) + 20)^;
-    if KeyCode = SDLK_ESCAPE then
-      Exit(TValue.CreateStr('key:ESC'));
-    Exit(TValue.CreateStr('key:' + IntToStr(KeyCode)));
+  case EvType of
+    SDL_QUIT_EVENT:
+      Exit(TValue.CreateStr('quit'));
+    SDL_KEYDOWN:
+      begin
+        KeyCode := PInt32(PByte(GGuiSDL.EventBuf) + 20)^;
+        ModBits := PUInt16(PByte(GGuiSDL.EventBuf) + 24)^;
+        GGuiSDL.ModState := ModBits;
+        Exit(TValue.CreateStr('key:' + GuiKeyName(KeyCode)));
+      end;
+    SDL_KEYUP:
+      begin
+        KeyCode := PInt32(PByte(GGuiSDL.EventBuf) + 20)^;
+        ModBits := PUInt16(PByte(GGuiSDL.EventBuf) + 24)^;
+        GGuiSDL.ModState := ModBits;
+        Exit(TValue.CreateStr('keyup:' + GuiKeyName(KeyCode)));
+      end;
+    SDL_MOUSEMOTION:
+      begin
+        MX := PInt32(PByte(GGuiSDL.EventBuf) + 20)^;
+        MY := PInt32(PByte(GGuiSDL.EventBuf) + 24)^;
+        GGuiSDL.LastMouseX := MX;
+        GGuiSDL.LastMouseY := MY;
+        Exit(TValue.CreateStr('mousemove'));
+      end;
+    SDL_MOUSEBUTTONDOWN:
+      begin
+        MouseBtn := PUInt8(PByte(GGuiSDL.EventBuf) + 16)^;
+        if (MouseBtn >= 1) and (MouseBtn <= 3) then
+          GGuiSDL.MouseButtonState := GGuiSDL.MouseButtonState or (UInt32(1) shl (MouseBtn - 1));
+        MX := PInt32(PByte(GGuiSDL.EventBuf) + 20)^;
+        MY := PInt32(PByte(GGuiSDL.EventBuf) + 24)^;
+        GGuiSDL.LastMouseX := MX;
+        GGuiSDL.LastMouseY := MY;
+        Exit(TValue.CreateStr('mousedown:' + IntToStr(MouseBtn)));
+      end;
+    SDL_MOUSEBUTTONUP:
+      begin
+        MouseBtn := PUInt8(PByte(GGuiSDL.EventBuf) + 16)^;
+        if (MouseBtn >= 1) and (MouseBtn <= 3) then
+          GGuiSDL.MouseButtonState := GGuiSDL.MouseButtonState and not (UInt32(1) shl (MouseBtn - 1));
+        Exit(TValue.CreateStr('mouseup:' + IntToStr(MouseBtn)));
+      end;
   end;
 end;
 
@@ -37062,6 +37155,75 @@ begin
   GGuiSDL.pSetRenderDrawColor(GGuiSDL.Renderer, UInt8(R), UInt8(G), UInt8(B), 255);
   GGuiSDL.pRenderDrawPoint(GGuiSDL.Renderer, X, Y);
   Result := TValue.CreateBool(True);
+end;
+
+function Native_Gui2_MouseX(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var x, y: Int32;
+begin
+  if not Assigned(GGuiSDL) then Exit(TValue.CreateNum(0));
+  if Assigned(GGuiSDL.pGetMouseState) then
+  begin
+    x := 0; y := 0;
+    GGuiSDL.pGetMouseState(@x, @y);
+    Exit(TValue.CreateNum(x));
+  end;
+  Result := TValue.CreateNum(GGuiSDL.LastMouseX);
+end;
+
+function Native_Gui2_MouseY(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var x, y: Int32;
+begin
+  if not Assigned(GGuiSDL) then Exit(TValue.CreateNum(0));
+  if Assigned(GGuiSDL.pGetMouseState) then
+  begin
+    x := 0; y := 0;
+    GGuiSDL.pGetMouseState(@x, @y);
+    Exit(TValue.CreateNum(y));
+  end;
+  Result := TValue.CreateNum(GGuiSDL.LastMouseY);
+end;
+
+function Native_Gui2_MouseButton(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  Btn: Integer;
+  x, y: Int32;
+  St: UInt32;
+begin
+  if (Args.Count <> 1) or (TValue(Args[0]).DataType <> dtNumeric) then
+    Exit(TValue.CreateBool(False));
+  if not Assigned(GGuiSDL) then Exit(TValue.CreateBool(False));
+  Btn := Trunc(TValue(Args[0]).NumVal);
+  if (Btn < 1) or (Btn > 3) then Exit(TValue.CreateBool(False));
+  if Assigned(GGuiSDL.pGetMouseState) then
+  begin
+    x := 0; y := 0;
+    St := GGuiSDL.pGetMouseState(@x, @y);
+    Exit(TValue.CreateBool((St and (UInt32(1) shl (Btn - 1))) <> 0));
+  end;
+  Result := TValue.CreateBool((GGuiSDL.MouseButtonState and (UInt32(1) shl (Btn - 1))) <> 0);
+end;
+
+function Native_Gui2_KeyMod(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var Name: string; Mask: UInt16;
+begin
+  if (Args.Count <> 1) or (TValue(Args[0]).DataType <> dtString) then
+    Exit(TValue.CreateBool(False));
+  if not Assigned(GGuiSDL) then Exit(TValue.CreateBool(False));
+  Name := UpperCase(Trim(TValue(Args[0]).StrVal));
+  if Name = 'SHIFT' then Mask := KMOD_SHIFT
+  else if Name = 'CTRL' then Mask := KMOD_CTRL
+  else if Name = 'ALT' then Mask := KMOD_ALT
+  else Exit(TValue.CreateBool(False));
+  Result := TValue.CreateBool((GGuiSDL.ModState and Mask) <> 0);
+end;
+
+function Native_Gui2_KeyName(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var Code: Integer;
+begin
+  if (Args.Count <> 1) or (TValue(Args[0]).DataType <> dtNumeric) then
+    Exit(TValue.CreateStr(''));
+  Code := Trunc(TValue(Args[0]).NumVal);
+  Result := TValue.CreateStr(GuiKeyName(Code));
 end;
 
 { ═══ END GUI Path D ═══ }
@@ -37977,6 +38139,11 @@ begin
   Gui2Def.Methods.Add('outlineRect', TVMFunction.Create);
   Gui2Def.Methods.Add('line', TVMFunction.Create);
   Gui2Def.Methods.Add('point', TVMFunction.Create);
+  Gui2Def.Methods.Add('mouseX', TVMFunction.Create);
+  Gui2Def.Methods.Add('mouseY', TVMFunction.Create);
+  Gui2Def.Methods.Add('mouseButton', TVMFunction.Create);
+  Gui2Def.Methods.Add('keyMod', TVMFunction.Create);
+  Gui2Def.Methods.Add('keyName', TVMFunction.Create);
   Gui2Inst := TInstanceValue.Create(Gui2Def);
   Gui2Inst.Members.DefineVar('init', TValue.CreateNative(@Native_Gui2_Init));
   Gui2Inst.Members.DefineVar('window', TValue.CreateNative(@Native_Gui2_Window));
@@ -37993,6 +38160,11 @@ begin
   Gui2Inst.Members.DefineVar('outlineRect', TValue.CreateNative(@Native_Gui2_OutlineRect));
   Gui2Inst.Members.DefineVar('line', TValue.CreateNative(@Native_Gui2_Line));
   Gui2Inst.Members.DefineVar('point', TValue.CreateNative(@Native_Gui2_Point));
+  Gui2Inst.Members.DefineVar('mouseX', TValue.CreateNative(@Native_Gui2_MouseX));
+  Gui2Inst.Members.DefineVar('mouseY', TValue.CreateNative(@Native_Gui2_MouseY));
+  Gui2Inst.Members.DefineVar('mouseButton', TValue.CreateNative(@Native_Gui2_MouseButton));
+  Gui2Inst.Members.DefineVar('keyMod', TValue.CreateNative(@Native_Gui2_KeyMod));
+  Gui2Inst.Members.DefineVar('keyName', TValue.CreateNative(@Native_Gui2_KeyName));
   GEnvv.DefineVar('gui2', TValue.CreateObj(Gui2Inst));
   MathDef := TTypeDefinition.Create('MathLib', tkClass);
   MathDef.Methods.Add('random', TVMFunction.Create);
