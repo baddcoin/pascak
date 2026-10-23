@@ -197,3 +197,6 @@ examples/chat_gui
 examples/chat_gui.o
 examples/chat_gui.ppu
 termux-x11/
+test/testMusic.m4a
+test/testMusic.ogg
+test/*.wav

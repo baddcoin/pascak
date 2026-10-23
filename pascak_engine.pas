@@ -36756,6 +36756,12 @@ type
     pMix_LoadWAV_RW: function(src: Pointer; freesrc: Int32): Pointer; cdecl;
     pMix_PlayChannel: function(channel: Int32; chunk: Pointer; loops: Int32): Int32; cdecl;
     pMix_FreeChunk: procedure(chunk: Pointer); cdecl;
+    pMix_GetMusicPosition: function(music: Pointer): Double; cdecl;
+    pMix_MusicDuration: function(music: Pointer): Double; cdecl;
+    pMix_SetMusicPosition: function(position: Double): Int32; cdecl;
+    pMix_VolumeMusic: function(volume: Int32): Int32; cdecl;
+    pMix_PlayingMusic: function(): Int32; cdecl;
+    pMix_PausedMusic: function(): Int32; cdecl;
     pCreateTextureFromSurface: function(ren, surface: Pointer): Pointer; cdecl;
     pRenderCopy: function(ren, tex, srcrect, dstrect: Pointer): Int32; cdecl;
     pDestroyTexture: procedure(tex: Pointer); cdecl;
@@ -37141,6 +37147,12 @@ begin
     Pointer(GGuiSDL.pMix_LoadWAV_RW)     := GetProcAddress(GGuiSDL.MixerHandle, 'Mix_LoadWAV_RW');
     Pointer(GGuiSDL.pMix_PlayChannel)    := GetProcAddress(GGuiSDL.MixerHandle, 'Mix_PlayChannel');
     Pointer(GGuiSDL.pMix_FreeChunk)      := GetProcAddress(GGuiSDL.MixerHandle, 'Mix_FreeChunk');
+    Pointer(GGuiSDL.pMix_GetMusicPosition):= GetProcAddress(GGuiSDL.MixerHandle, 'Mix_GetMusicPosition');
+    Pointer(GGuiSDL.pMix_MusicDuration)  := GetProcAddress(GGuiSDL.MixerHandle, 'Mix_MusicDuration');
+    Pointer(GGuiSDL.pMix_SetMusicPosition):= GetProcAddress(GGuiSDL.MixerHandle, 'Mix_SetMusicPosition');
+    Pointer(GGuiSDL.pMix_VolumeMusic)    := GetProcAddress(GGuiSDL.MixerHandle, 'Mix_VolumeMusic');
+    Pointer(GGuiSDL.pMix_PlayingMusic)   := GetProcAddress(GGuiSDL.MixerHandle, 'Mix_PlayingMusic');
+    Pointer(GGuiSDL.pMix_PausedMusic)    := GetProcAddress(GGuiSDL.MixerHandle, 'Mix_PausedMusic');
     if not (Assigned(GGuiSDL.pMix_OpenAudio) and
             Assigned(GGuiSDL.pMix_LoadMUS) and
             Assigned(GGuiSDL.pMix_LoadWAV_RW) and
@@ -37945,6 +37957,76 @@ begin
   if Assigned(Chunk) and Assigned(GGuiSDL.pMix_FreeChunk) then
     try GGuiSDL.pMix_FreeChunk(Chunk); except end;
   Result := TValue.CreateBool(True);
+end;
+
+function Native_Gui2_MusicPos(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var R: Double;
+begin
+  Result := TValue.CreateNum(0);
+  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.pMix_GetMusicPosition)) then Exit;
+  R := GGuiSDL.pMix_GetMusicPosition(nil);
+  if R < 0 then R := 0;
+  Result := TValue.CreateNum(R);
+end;
+
+function Native_Gui2_MusicDuration(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var R: Double;
+begin
+  Result := TValue.CreateNum(0);
+  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.CurrentMusic)) then Exit;
+  if not Assigned(GGuiSDL.pMix_MusicDuration) then Exit;
+  R := GGuiSDL.pMix_MusicDuration(GGuiSDL.CurrentMusic);
+  if R < 0 then R := 0;
+  Result := TValue.CreateNum(R);
+end;
+
+function Native_Gui2_SeekMusic(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var Pos: Double; R: Int32;
+begin
+  Result := TValue.CreateBool(False);
+  if (Args.Count <> 1) or (TValue(Args[0]).DataType <> dtNumeric) then Exit;
+  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.pMix_SetMusicPosition)) then Exit;
+  Pos := TValue(Args[0]).NumVal;
+  if Pos < 0 then Pos := 0;
+  R := GGuiSDL.pMix_SetMusicPosition(Pos);
+  Result := TValue.CreateBool(R = 0);
+end;
+
+function Native_Gui2_MusicVolume(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var Vol, R: Integer;
+begin
+  Result := TValue.CreateNum(128);
+  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.pMix_VolumeMusic)) then Exit;
+  if (Args.Count < 1) or (TValue(Args[0]).DataType <> dtNumeric) then
+  begin
+    R := GGuiSDL.pMix_VolumeMusic(-1);
+    if R < 0 then R := 0;
+    Exit(TValue.CreateNum(R));
+  end;
+  Vol := Trunc(TValue(Args[0]).NumVal);
+  if Vol < 0 then Vol := 0;
+  if Vol > 128 then Vol := 128;
+  R := GGuiSDL.pMix_VolumeMusic(Vol);
+  if R < 0 then R := 0;
+  Result := TValue.CreateNum(R);
+end;
+
+function Native_Gui2_IsMusicPlaying(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var R: Int32;
+begin
+  Result := TValue.CreateBool(False);
+  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.pMix_PlayingMusic)) then Exit;
+  R := GGuiSDL.pMix_PlayingMusic();
+  Result := TValue.CreateBool(R = 1);
+end;
+
+function Native_Gui2_IsMusicPaused(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var R: Int32;
+begin
+  Result := TValue.CreateBool(False);
+  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.pMix_PausedMusic)) then Exit;
+  R := GGuiSDL.pMix_PausedMusic();
+  Result := TValue.CreateBool(R = 1);
 end;
 
 { ═══ END GUI Path D ═══ }
@@ -38882,6 +38964,12 @@ begin
   Gui2Def.Methods.Add('loadSound', TVMFunction.Create);
   Gui2Def.Methods.Add('playSound', TVMFunction.Create);
   Gui2Def.Methods.Add('freeSound', TVMFunction.Create);
+  Gui2Def.Methods.Add('musicPos', TVMFunction.Create);
+  Gui2Def.Methods.Add('musicDuration', TVMFunction.Create);
+  Gui2Def.Methods.Add('seekMusic', TVMFunction.Create);
+  Gui2Def.Methods.Add('musicVolume', TVMFunction.Create);
+  Gui2Def.Methods.Add('isMusicPlaying', TVMFunction.Create);
+  Gui2Def.Methods.Add('isMusicPaused', TVMFunction.Create);
   Gui2Inst := TInstanceValue.Create(Gui2Def);
   Gui2Inst.Members.DefineVar('init', TValue.CreateNative(@Native_Gui2_Init));
   Gui2Inst.Members.DefineVar('window', TValue.CreateNative(@Native_Gui2_Window));
@@ -38920,6 +39008,12 @@ begin
   Gui2Inst.Members.DefineVar('loadSound', TValue.CreateNative(@Native_Gui2_LoadSound));
   Gui2Inst.Members.DefineVar('playSound', TValue.CreateNative(@Native_Gui2_PlaySound));
   Gui2Inst.Members.DefineVar('freeSound', TValue.CreateNative(@Native_Gui2_FreeSound));
+  Gui2Inst.Members.DefineVar('musicPos', TValue.CreateNative(@Native_Gui2_MusicPos));
+  Gui2Inst.Members.DefineVar('musicDuration', TValue.CreateNative(@Native_Gui2_MusicDuration));
+  Gui2Inst.Members.DefineVar('seekMusic', TValue.CreateNative(@Native_Gui2_SeekMusic));
+  Gui2Inst.Members.DefineVar('musicVolume', TValue.CreateNative(@Native_Gui2_MusicVolume));
+  Gui2Inst.Members.DefineVar('isMusicPlaying', TValue.CreateNative(@Native_Gui2_IsMusicPlaying));
+  Gui2Inst.Members.DefineVar('isMusicPaused', TValue.CreateNative(@Native_Gui2_IsMusicPaused));
   GEnvv.DefineVar('gui2', TValue.CreateObj(Gui2Inst));
   MathDef := TTypeDefinition.Create('MathLib', tkClass);
   MathDef.Methods.Add('random', TVMFunction.Create);
