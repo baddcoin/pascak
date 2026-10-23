@@ -36701,6 +36701,20 @@ type
 
   TGuiSoundMap = specialize TFPGMap<Integer, Pointer>;
 
+  TGuiSDLWindow = class
+  public
+    Window: Pointer;
+    Renderer: Pointer;
+    EventBuf: Pointer;
+    Width, Height: Integer;
+    Title: string;
+    IsClosed: Boolean;
+    constructor Create(AWin, ARen: Pointer; AW, AH: Integer; const AT: string);
+    destructor Destroy; override;
+  end;
+
+  TGuiWindowMap = specialize TFPGMap<Integer, TGuiSDLWindow>;
+
   TGuiSDLState = class
   public
     LibHandle: TLibHandle;
@@ -36715,6 +36729,9 @@ type
     ImageHandle: TLibHandle;
     Textures: TGuiTextureMap;
     NextTexID: Integer;
+    Windows: TGuiWindowMap;
+    NextWindowID: Integer;
+    FocusedWindowID: Integer;
     MixerHandle: TLibHandle;
     IsMixerInit: Boolean;
     CurrentMusic: Pointer;
@@ -36801,6 +36818,27 @@ const
   KMOD_CTRL                 = $00C0;
   KMOD_ALT                  = $0300;
 
+constructor TGuiSDLWindow.Create(AWin, ARen: Pointer; AW, AH: Integer; const AT: string);
+begin
+  Window := AWin;
+  Renderer := ARen;
+  EventBuf := nil;
+  Width := AW;
+  Height := AH;
+  Title := AT;
+  IsClosed := False;
+end;
+
+destructor TGuiSDLWindow.Destroy;
+begin
+  if Assigned(EventBuf) then
+  begin
+    try FreeMem(EventBuf); except end;
+    EventBuf := nil;
+  end;
+  inherited;
+end;
+
 constructor TGuiTextureEntry.Create(ATex: Pointer; AW, AH: Integer);
 begin
   Tex := ATex;
@@ -36831,6 +36869,9 @@ begin
   CurrentMusic := nil;
   SoundMap := TGuiSoundMap.Create;
   NextSoundID := 1;
+  Windows := TGuiWindowMap.Create;
+  NextWindowID := 1;
+  FocusedWindowID := 0;
   LastMouseX := 0;
   LastMouseY := 0;
   MouseButtonState := 0;
@@ -36869,6 +36910,26 @@ begin
     try pMix_CloseAudio(); except end;
     IsMixerInit := False;
   end;
+  { Window map cleanup }
+  if Assigned(Windows) then
+  begin
+    for I := 0 to Windows.Count - 1 do
+    begin
+      if Assigned(Windows.Data[I]) then
+      begin
+        if Assigned(Windows.Data[I].Renderer) and Assigned(pDestroyRenderer) then
+          try pDestroyRenderer(Windows.Data[I].Renderer); except end;
+        if Assigned(Windows.Data[I].Window) and Assigned(pDestroyWindow) then
+          try pDestroyWindow(Windows.Data[I].Window); except end;
+        try Windows.Data[I].Free; except end;
+      end;
+    end;
+    try Windows.Free; except end;
+    Windows := nil;
+  end;
+  Window := nil;
+  Renderer := nil;
+  EventBuf := nil;
   { Texture cleanup }
   if Assigned(Textures) then
   begin
@@ -37207,42 +37268,163 @@ begin
   Result := TValue.CreateBool(True);
 end;
 
-function Native_Gui2_Window(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+procedure GuiFocusWindowByID(ID: Integer);
 var
-  W, H: Integer;
+  Idx: Integer;
+  W: TGuiSDLWindow;
 begin
-  if (Args.Count <> 3) or (TValue(Args[0]).DataType <> dtString) or
-     (TValue(Args[1]).DataType <> dtNumeric) or (TValue(Args[2]).DataType <> dtNumeric) then
+  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Windows)) then Exit;
+  Idx := GGuiSDL.Windows.IndexOf(ID);
+  if Idx < 0 then Exit;
+  W := GGuiSDL.Windows.Data[Idx];
+  if not Assigned(W) then Exit;
+  GGuiSDL.FocusedWindowID := ID;
+  GGuiSDL.Window := W.Window;
+  GGuiSDL.Renderer := W.Renderer;
+  GGuiSDL.EventBuf := W.EventBuf;
+end;
+
+function GuiCurrentWindow: TGuiSDLWindow;
+var Idx: Integer;
+begin
+  Result := nil;
+  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Windows)) then Exit;
+  Idx := GGuiSDL.Windows.IndexOf(GGuiSDL.FocusedWindowID);
+  if Idx < 0 then Exit;
+  Result := GGuiSDL.Windows.Data[Idx];
+end;
+
+function Native_Gui2_NewWindow(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  Title: string;
+  W, H, ID: Integer;
+  NewWin, NewRen: Pointer;
+  Entry: TGuiSDLWindow;
+begin
+  Result := TValue.CreateNum(0);
+  if (Args.Count < 1) or (Args.Count > 3) then Exit;
+  if TValue(Args[0]).DataType <> dtString then Exit;
+  if not GuiSDLEnsureInit then Exit;
+  if not Assigned(GGuiSDL) or not Assigned(GGuiSDL.Windows) then Exit;
+  Title := TValue(Args[0]).StrVal;
+  W := 800; H := 600;
+  if (Args.Count >= 2) and (TValue(Args[1]).DataType = dtNumeric) then
+    W := Trunc(TValue(Args[1]).NumVal);
+  if (Args.Count >= 3) and (TValue(Args[2]).DataType = dtNumeric) then
+    H := Trunc(TValue(Args[2]).NumVal);
+  if W <= 0 then W := 800;
+  if H <= 0 then H := 600;
+  NewWin := GGuiSDL.pCreateWindow(PAnsiChar(AnsiString(Title)),
+    SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+    Int32(W), Int32(H), SDL_WINDOW_SHOWN);
+  if not Assigned(NewWin) then Exit;
+  NewRen := GGuiSDL.pCreateRenderer(NewWin, -1,
+    SDL_RENDERER_ACCELERATED or SDL_RENDERER_PRESENTVSYNC);
+  if not Assigned(NewRen) then
+  begin
+    try GGuiSDL.pDestroyWindow(NewWin); except end;
+    Exit;
+  end;
+  Entry := TGuiSDLWindow.Create(NewWin, NewRen, W, H, Title);
+  GetMem(Entry.EventBuf, 64);
+  FillChar(Entry.EventBuf^, 64, 0);
+  ID := GGuiSDL.NextWindowID;
+  Inc(GGuiSDL.NextWindowID);
+  GGuiSDL.Windows.Add(ID, Entry);
+  GuiFocusWindowByID(ID);
+  Result := TValue.CreateNum(ID);
+end;
+
+function Native_Gui2_FocusWindow(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var ID, Idx: Integer;
+begin
+  Result := TValue.CreateBool(False);
+  if (Args.Count <> 1) or (TValue(Args[0]).DataType <> dtNumeric) then Exit;
+  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Windows)) then Exit;
+  ID := Trunc(TValue(Args[0]).NumVal);
+  Idx := GGuiSDL.Windows.IndexOf(ID);
+  if Idx < 0 then Exit;
+  if GGuiSDL.Windows.Data[Idx].IsClosed then Exit;
+  GuiFocusWindowByID(ID);
+  Result := TValue.CreateBool(True);
+end;
+
+function Native_Gui2_CloseWindow(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var ID, Idx: Integer; W: TGuiSDLWindow;
+begin
+  Result := TValue.CreateBool(False);
+  if (Args.Count <> 1) or (TValue(Args[0]).DataType <> dtNumeric) then Exit;
+  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Windows)) then Exit;
+  ID := Trunc(TValue(Args[0]).NumVal);
+  Idx := GGuiSDL.Windows.IndexOf(ID);
+  if Idx < 0 then Exit;
+  W := GGuiSDL.Windows.Data[Idx];
+  GGuiSDL.Windows.Delete(Idx);
+  if Assigned(W) then
+  begin
+    if Assigned(W.Renderer) and Assigned(GGuiSDL.pDestroyRenderer) then
+      try GGuiSDL.pDestroyRenderer(W.Renderer); except end;
+    if Assigned(W.Window) and Assigned(GGuiSDL.pDestroyWindow) then
+      try GGuiSDL.pDestroyWindow(W.Window); except end;
+    W.Free;
+  end;
+  if GGuiSDL.FocusedWindowID = ID then
+  begin
+    GGuiSDL.FocusedWindowID := 0;
+    GGuiSDL.Window := nil;
+    GGuiSDL.Renderer := nil;
+    GGuiSDL.EventBuf := nil;
+    if GGuiSDL.Windows.Count > 0 then
+      GuiFocusWindowByID(GGuiSDL.Windows.Keys[0]);
+  end;
+  Result := TValue.CreateBool(True);
+end;
+
+function Native_Gui2_ListWindows(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var Arr: TValueList; I: Integer;
+begin
+  Arr := TValueList.Create(True);
+  try
+    if Assigned(GGuiSDL) and Assigned(GGuiSDL.Windows) then
+      for I := 0 to GGuiSDL.Windows.Count - 1 do
+        Arr.Add(TValue.CreateNum(GGuiSDL.Windows.Keys[I]));
+    Result := TValue.CreateArray(Arr);
+  except
+    Arr.Free;
+    raise;
+  end;
+end;
+
+function Native_Gui2_GetFocusedWindow(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+begin
+  if not Assigned(GGuiSDL) then Exit(TValue.CreateNum(0));
+  Result := TValue.CreateNum(GGuiSDL.FocusedWindowID);
+end;
+
+function Native_Gui2_Window(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+{ Backward-compat: creates primary window. Uses NewWindow internally. }
+var InnerRet: TValue;
+begin
+  Result := TValue.CreateBool(False);
+  if (Args.Count <> 3) then
   begin
     errMSG.callerror(140, 'gui2.window(title, width, height)',
                      errMSG.xrow, errMSG.xcol);
-    Exit(TValue.CreateBool(False));
+    Exit;
   end;
-  if not GuiSDLEnsureInit then Exit(TValue.CreateBool(False));
-  if Assigned(GGuiSDL.Window) then
+  if Assigned(GGuiSDL) and Assigned(GGuiSDL.Windows) and (GGuiSDL.Windows.Count > 0) then
   begin
-    errMSG.callerror(144, 'gui2.window: window already exists',
-                     errMSG.xrow, errMSG.xcol);
-    Exit(TValue.CreateBool(False));
+    errMSG.callerror(144,
+      'gui2.window: window already exists (use gui2.newWindow for additional)',
+      errMSG.xrow, errMSG.xcol);
+    Exit;
   end;
-  W := Trunc(TValue(Args[1]).NumVal);
-  H := Trunc(TValue(Args[2]).NumVal);
-  GGuiSDL.Window := GGuiSDL.pCreateWindow(
-    PAnsiChar(AnsiString(TValue(Args[0]).StrVal)),
-    SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
-    Int32(W), Int32(H), SDL_WINDOW_SHOWN);
-  if not Assigned(GGuiSDL.Window) then
-  begin
-    errMSG.callerror(144, 'gui2.window: ' + string(AnsiString(GGuiSDL.pGetError())),
-                     errMSG.xrow, errMSG.xcol);
-    Exit(TValue.CreateBool(False));
+  InnerRet := Native_Gui2_NewWindow(Args, CallEnv);
+  try
+    Result := TValue.CreateBool(InnerRet.NumVal > 0);
+  finally
+    InnerRet.Free;
   end;
-  GGuiSDL.Renderer := GGuiSDL.pCreateRenderer(GGuiSDL.Window, -1,
-    SDL_RENDERER_ACCELERATED or SDL_RENDERER_PRESENTVSYNC);
-  GetMem(GGuiSDL.EventBuf, 64);
-  FillChar(GGuiSDL.EventBuf^, 64, 0);
-  GGuiSDL.IsClosed := False;
-  Result := TValue.CreateBool(True);
 end;
 
 function GuiKeyName(KeyCode: Int32): string;
@@ -37345,9 +37527,11 @@ begin
 end;
 
 function Native_Gui2_IsOpen(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiSDLWindow;
 begin
+  W := GuiCurrentWindow;
   Result := TValue.CreateBool(
-    Assigned(GGuiSDL) and Assigned(GGuiSDL.Window) and (not GGuiSDL.IsClosed));
+    Assigned(W) and Assigned(W.Window) and (not W.IsClosed));
 end;
 
 function Native_Gui2_Clear(Args: TObjectList; CallEnv: TSymbolTable): TValue;
@@ -37404,11 +37588,28 @@ begin
 end;
 
 function Native_Gui2_Close(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+{ Close all windows, keep SDL initialized. }
+var I: Integer; W: TGuiSDLWindow;
 begin
-  if Assigned(GGuiSDL) then
+  if Assigned(GGuiSDL) and Assigned(GGuiSDL.Windows) then
   begin
-    GGuiSDL.EnsureCleanup;
-    GGuiSDL.IsClosed := True;
+    for I := 0 to GGuiSDL.Windows.Count - 1 do
+    begin
+      W := GGuiSDL.Windows.Data[I];
+      if Assigned(W) then
+      begin
+        if Assigned(W.Renderer) and Assigned(GGuiSDL.pDestroyRenderer) then
+          try GGuiSDL.pDestroyRenderer(W.Renderer); except end;
+        if Assigned(W.Window) and Assigned(GGuiSDL.pDestroyWindow) then
+          try GGuiSDL.pDestroyWindow(W.Window); except end;
+        W.Free;
+      end;
+    end;
+    GGuiSDL.Windows.Clear;
+    GGuiSDL.FocusedWindowID := 0;
+    GGuiSDL.Window := nil;
+    GGuiSDL.Renderer := nil;
+    GGuiSDL.EventBuf := nil;
   end;
   Result := TValue.CreateBool(True);
 end;
@@ -38970,6 +39171,11 @@ begin
   Gui2Def.Methods.Add('musicVolume', TVMFunction.Create);
   Gui2Def.Methods.Add('isMusicPlaying', TVMFunction.Create);
   Gui2Def.Methods.Add('isMusicPaused', TVMFunction.Create);
+  Gui2Def.Methods.Add('newWindow', TVMFunction.Create);
+  Gui2Def.Methods.Add('focusWindow', TVMFunction.Create);
+  Gui2Def.Methods.Add('closeWindow', TVMFunction.Create);
+  Gui2Def.Methods.Add('listWindows', TVMFunction.Create);
+  Gui2Def.Methods.Add('getFocusedWindow', TVMFunction.Create);
   Gui2Inst := TInstanceValue.Create(Gui2Def);
   Gui2Inst.Members.DefineVar('init', TValue.CreateNative(@Native_Gui2_Init));
   Gui2Inst.Members.DefineVar('window', TValue.CreateNative(@Native_Gui2_Window));
@@ -39014,6 +39220,11 @@ begin
   Gui2Inst.Members.DefineVar('musicVolume', TValue.CreateNative(@Native_Gui2_MusicVolume));
   Gui2Inst.Members.DefineVar('isMusicPlaying', TValue.CreateNative(@Native_Gui2_IsMusicPlaying));
   Gui2Inst.Members.DefineVar('isMusicPaused', TValue.CreateNative(@Native_Gui2_IsMusicPaused));
+  Gui2Inst.Members.DefineVar('newWindow', TValue.CreateNative(@Native_Gui2_NewWindow));
+  Gui2Inst.Members.DefineVar('focusWindow', TValue.CreateNative(@Native_Gui2_FocusWindow));
+  Gui2Inst.Members.DefineVar('closeWindow', TValue.CreateNative(@Native_Gui2_CloseWindow));
+  Gui2Inst.Members.DefineVar('listWindows', TValue.CreateNative(@Native_Gui2_ListWindows));
+  Gui2Inst.Members.DefineVar('getFocusedWindow', TValue.CreateNative(@Native_Gui2_GetFocusedWindow));
   GEnvv.DefineVar('gui2', TValue.CreateObj(Gui2Inst));
   MathDef := TTypeDefinition.Create('MathLib', tkClass);
   MathDef.Methods.Add('random', TVMFunction.Create);
