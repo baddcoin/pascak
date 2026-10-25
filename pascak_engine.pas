@@ -13728,7 +13728,8 @@ begin
       begin
         if not IsDead[i] then
         begin
-          if Code[i].OpCode in [opcJump, opcJumpIfFalse, opcTryBegin] then
+          if Code[i].OpCode in [opcJump, opcJumpIfFalse, opcTryBegin,
+                             opcJumpIfNull, opcJumpIfNotNull] then
           begin
             TargetIP := i + 1 + Code[i].Operand;
             if (TargetIP >= 0) and (TargetIP <= CodeCount) then
@@ -13999,7 +14000,8 @@ begin
         begin
           if not IsDead[i] then
           begin
-            if Code[i].OpCode in [opcJump, opcJumpIfFalse, opcTryBegin] then
+            if Code[i].OpCode in [opcJump, opcJumpIfFalse, opcTryBegin,
+                             opcJumpIfNull, opcJumpIfNotNull] then
             begin
               // ... (biarkan logika lama, tetap remap Operand) ...
               TargetIP := i + 1 + Code[i].Operand;
