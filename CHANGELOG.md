@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.1.0] - 2026-10-25
+
+### Added
+- **Optional chaining `?.`** — `user?.name`, `cfg?.db?.host`
+- **Null-coalescing `??`** — `null ?? 42` = 42, `0 ?? 42` = 0
+- **Enum** — `enum Color { Red, Green, Blue }` (auto-numbered 0..N-1, immutable)
+- **Destructuring** — `var {a,b} = obj`, `var [x,y] = arr` (top-level + statement)
+
+### Fixed
+- Stack underflow on `null?.name` — stale `opcJumpIfNull` operand after optimizer dead-code removal
+- Dict property access on missing key returns null (nil-safe)
+- VM nil-safe guards on `opcJumpIfNull` / `opcJumpIfNotNull`
+
+
 Semua perubahan penting pada Pascak VM dicatat di sini.
 
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
