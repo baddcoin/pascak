@@ -500,7 +500,7 @@ type
   );
   
   TTokenType = (
-    ttEOF, ttId, ttNum, ttStr, ttVar, ttConst,
+    ttEOF, ttId, ttNum, ttStr, ttVar, ttConst, ttEnum,
     ttFunction, ttClass, ttNew, ttAssign,ttEqual, ttLess, 
     ttGreater, ttLessEqual, ttGreaterEqual, ttNotEqual,ttPlus, 
     ttMinus, ttMul, ttDiv, ttMod, ttLParen, ttRParen, ttLBracket,  
@@ -10830,6 +10830,7 @@ begin
     'end':      Result.Typ := ttEnd;
     'var':      Result.Typ := ttVar;
     'const':    Result.Typ := ttConst;
+    'enum':     Result.Typ := ttEnum;
     'function', 'method': Result.Typ := ttFunction;
     'class':    Result.Typ := ttClass;
     'record':   Result.Typ := ttRecord;
@@ -12703,12 +12704,39 @@ var
   ObjName: string;
   DeclNode,s: TNode;
   StartLine: Integer;
+  EnumName: string;
+  EnumDict: TDictLiteralNode;
+  EnumIdx: Integer;
 begin
   B := TBlockNode.Create(False); 
   try
-    while FCurrToken.Typ in [ttVar, ttConst, ttClass, ttRecord, ttFunction] do
+    while FCurrToken.Typ in [ttVar, ttConst, ttEnum, ttClass, ttRecord, ttFunction] do
     begin
       StartLine := FCurrToken.Line;
+
+      if FCurrToken.Typ = ttEnum then
+      begin
+        // v1.1.0 Phase 2: enum Color { Red, Green, Blue }
+        // Desugars to: const Color = {Red:0, Green:1, Blue:2}
+        Eat(ttEnum);
+        EnumName := FCurrToken.Str;
+        Eat(ttId);
+        Eat(ttLBrace);
+        EnumDict := TDictLiteralNode.Create;
+        EnumIdx := 0;
+        repeat
+          EnumDict.FKeys.Add(FCurrToken.Str);
+          EnumDict.FValues.Add(TLiteralNode.Create(TValue.CreateNum(EnumIdx)));
+          Eat(ttId);
+          Inc(EnumIdx);
+          if FCurrToken.Typ = ttComma then Eat(ttComma) else Break;
+        until False;
+        Eat(ttRBrace);
+        if FCurrToken.Typ = ttSemiColon then Eat(ttSemiColon);
+        DeclNode := TVarDeclNode.Create(EnumName, EnumDict, True);
+        DeclNode.Line := StartLine;
+        B.Statements.Add(DeclNode);
+      end else
 
       if (FCurrToken.Typ = ttVar) or (FCurrToken.Typ = ttConst) then
       begin
