@@ -4120,6 +4120,206 @@ Canvas drawing dengan stroke replay:
 **Untuk browser-based GUI** (HTTP + WS), lihat Bab 27.
 **Untuk HTTP/2 client**, lihat Bonus chapter.
 
+
+### 28.13 — Multi-Window (v1.0.0)
+
+Sejak v1.0.0, `gui2` mendukung **multi-window** — lebih dari satu
+window aktif bersamaan, masing-masing dengan renderer independen.
+
+Backward compatible: script single-window (`gui2.window()`) tetap
+jalan tanpa perubahan.
+
+#### 28.13.1 — Kapan Butuh Multi-Window
+
+Single window cukup untuk 90% app. Multi-window cocok untuk:
+
+| Use case | Contoh |
+|----------|--------|
+| IDE / editor | Editor + preview + console |
+| Dashboard | Main panel + detail sidebar |
+| Media app | Library + player |
+| Debug tool | App + log viewer |
+| Multi-monitor setup | Main + auxiliary |
+
+**Cost**: lebih banyak RAM (tiap window = renderer context sendiri),
+event handling lebih kompleks.
+
+#### 28.13.2 — API Overview
+
+| API | Return | Deskripsi |
+|-----|--------|-----------|
+| `gui2.newWindow(title, w, h)` | int ID (0=error) | Buat window baru, auto-focus |
+| `gui2.focusWindow(id)` | bool | Set target draw berikutnya |
+| `gui2.closeWindow(id)` | bool | Destroy window tertentu |
+| `gui2.listWindows()` | array of int | Semua window ID aktif |
+| `gui2.getFocusedWindow()` | int | Window ID yang sedang focus |
+
+`gui2.window(title, w, h)` (single-window legacy) tetap bekerja —
+internally panggil `newWindow`, return bool (bukan ID).
+
+#### 28.13.3 — Quick Start: 2 Windows
+
+    begin
+      if not gui2.init() then sys.exit(1);
+
+      var w1 := gui2.newWindow("Editor", 600, 400);
+      var w2 := gui2.newWindow("Preview", 600, 400);
+      if w1 == 0 or w2 == 0 then begin
+        println("failed to create window");
+        gui2.quit();
+        sys.exit(1);
+      end;
+
+      var fontOK := false;
+      if not fontOK then
+        fontOK := gui2.setFont("/system/fonts/Roboto-Regular.ttf", 20);
+
+      while gui2.isOpen() do begin
+        var ev := gui2.poll();
+        if ev == "quit" or ev == "key:ESC" then break;
+
+        // Render W1 (editor)
+        gui2.focusWindow(w1);
+        gui2.clear(30, 40, 60);
+        if fontOK then gui2.text(30, 30, "Editor", 240, 240, 100);
+        gui2.present();
+
+        // Render W2 (preview)
+        gui2.focusWindow(w2);
+        gui2.clear(40, 50, 70);
+        if fontOK then gui2.text(30, 30, "Preview", 100, 240, 100);
+        gui2.present();
+
+        gui2.delay(16);
+      end;
+
+      gui2.close();
+      gui2.quit();
+    end.
+
+Kedua window render independen per frame. Panggil `focusWindow`
+sebelum draw untuk switch target.
+
+#### 28.13.4 — Focus Model
+
+**Konsep kunci**: semua draw function (`rect`, `text`, `clear`,
+`present`, `drawTexture`, dll) **target ke focused window**.
+
+    gui2.focusWindow(w1);
+    gui2.text(10, 10, "Hello", 255, 255, 255);  // → muncul di w1
+
+    gui2.focusWindow(w2);
+    gui2.text(10, 10, "Hello", 255, 255, 255);  // → muncul di w2
+
+**Default focus**: window terakhir dibuat (`newWindow` auto-focus).
+
+**Query current**: `gui2.getFocusedWindow()` → ID int.
+
+#### 28.13.5 — Input Events
+
+`gui2.poll()` mengembalikan event dari **focused window** saja. Untuk
+switch, panggil `focusWindow`:
+
+    var ev := gui2.poll();
+    if ev == "key:1" then gui2.focusWindow(w1);
+    if ev == "key:2" then gui2.focusWindow(w2);
+
+**Format event**: sama seperti single-window (`key:ESC`, `mousedown:1`,
+`mousemove`, `quit`, dll).
+
+**Catatan**: `quit` event muncul saat window yang di-focus ditutup OS
+(klik X).
+
+#### 28.13.6 — Cleanup Patterns
+
+**Tutup satu window**:
+
+    gui2.closeWindow(w2);   // w2 destroyed, focus auto-switch ke w1
+
+**Tutup semua, SDL tetap init**:
+
+    gui2.close();           // semua window destroyed, SDL masih ready
+
+**Full shutdown**:
+
+    gui2.quit();            // semua destroyed + SDL_Quit
+
+`closeWindow` pada focused window auto-focus ke window pertama yang
+tersisa di list.
+
+#### 28.13.7 — Backward Compatibility
+
+`gui2.window(title, w, h)` (legacy single-window) internally:
+1. Cek belum ada window lain
+2. Panggil `newWindow`
+3. Return `bool` (bukan ID)
+
+Existing script (`examples/hello_gui2.pas`, dll) jalan tanpa perubahan.
+Kalau butuh ID untuk multi-window, pakai `gui2.newWindow()`.
+
+#### 28.13.8 — Contoh: Editor + Preview
+
+Pola IDE-like app (kirim data antara window):
+
+    var EDITOR := 0;
+    var PREVIEW := 0;
+    var CONTENT := "Hello, world";
+
+    begin
+      if not gui2.init() then sys.exit(1);
+      EDITOR := gui2.newWindow("Editor", 600, 400);
+      PREVIEW := gui2.newWindow("Preview", 600, 400);
+
+      gui2.setFont("/system/fonts/Roboto-Regular.ttf", 20);
+
+      while gui2.isOpen() do begin
+        var ev := gui2.poll();
+        if ev == "quit" or ev == "key:ESC" then break;
+
+        // Editor window
+        gui2.focusWindow(EDITOR);
+        gui2.clear(30, 30, 50);
+        gui2.text(20, 20, "Editor: " + CONTENT, 240, 240, 100);
+        gui2.present();
+
+        // Preview window
+        gui2.focusWindow(PREVIEW);
+        gui2.clear(50, 40, 30);
+        gui2.text(20, 20, CONTENT, 100, 240, 100);
+        gui2.present();
+
+        gui2.delay(16);
+      end;
+
+      gui2.close();
+      gui2.quit();
+    end.
+
+**File lengkap**: `examples/gui2_multi_window.pas` (73 lines, keys
+1/2 untuk switch focus).
+
+#### 28.13.9 — Limitations (v1.0.0)
+
+| Feature | Status |
+|---------|--------|
+| Multiple concurrent windows | ✅ |
+| Focus switching | ✅ |
+| Independent draw per window | ✅ |
+| Per-window textures | ⚠️ shared renderer context |
+| Per-window font | ⚠️ shared (satu font aktif) |
+| Per-window audio | ✅ global (music + SFX) |
+| Window position | ❌ auto-positioned |
+| Window resize | ❌ fixed at creation |
+| Modal dialogs | ❌ separate feature |
+| Drag-and-drop | ❌ |
+
+**Untuk production multi-window app**: keep ukuran window konsisten,
+pakai focus untuk switching, cache konten yang di-draw per window
+kalau performance critical.
+
+**Lihat juga**: `examples/gui2_multi_window.pas` — demo 2 window
+dengan warna distinct (merah/hijau) + keyboard focus switch.
+
 ## Bonus — HTTP/2 Client
 
 Pascak juga mendukung HTTP/2 client via ALPN negotiation (RFC 7301).
