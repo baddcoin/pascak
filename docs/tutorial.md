@@ -4320,6 +4320,259 @@ kalau performance critical.
 **Lihat juga**: `examples/gui2_multi_window.pas` — demo 2 window
 dengan warna distinct (merah/hijau) + keyboard focus switch.
 
+## Bab 29 — Optional Chaining & Null-Coalescing
+
+Access property dari value yang mungkin `null` adalah source of crash di banyak bahasa. Pascak v1.1.0 tambah dua operator untuk handle ini dengan elegan.
+
+### 29.1 — The Problem
+
+Tanpa kedua operator ini, navigasi dict nested rawan:
+
+    begin
+      var cfg := {"db": null};
+      var host := cfg["db"]["host"];  // RUNTIME ERROR: null has no [key]
+    end.
+
+Cek manual di setiap level — verbose dan error-prone:
+
+    begin
+      var cfg := {"db": null};
+      var host := null;
+      if cfg <> null and cfg["db"] <> null then
+        host := cfg["db"]["host"];
+    end.
+
+### 29.2 — Optional Chaining `?.`
+
+`?.` short-circuit kalau target `null`. Kalau `null`, expression return `null` (tidak error):
+
+    begin
+      var u := {"name": "Alice"};
+      println(u?.name);       // "Alice"
+
+      var n := null;
+      println(n?.name);       // null (bukan crash)
+
+      var cfg := {"db": null};
+      println(cfg?.db?.host); // null (short-circuit di ?.db)
+    end.
+
+Chain `?.` aman untuk kedalaman berapa pun — begitu salah satu level `null`, semua sisa chain di-skip dan hasil akhir `null`.
+
+### 29.3 — Null-Coalescing `??`
+
+`a ?? b` return `a` kalau `a` bukan `null`, selain itu return `b`:
+
+    begin
+      println(null ?? 42);    // 42
+      println(0 ?? 42);       // 0    (0 bukan null)
+      println("" ?? "def");   // ""   (empty string bukan null)
+      println(false ?? 42);   // false (false bukan null)
+    end.
+
+**Penting**: `??` **hanya** cek `null`, bukan falsy value. `0`, `""`, `false` semua considered valid (return as-is). Untuk fallback pada falsy juga, pakai ternary `?:`:
+
+    begin
+      var val := 0;
+      var safe := val ?: 42;  // 42 karena 0 falsy (ternary, bukan ??)
+    end.
+
+### 29.4 — Combining `?.` + `??`
+
+Pattern paling umum: safe access + fallback default:
+
+    begin
+      var cfg := {"db": null};
+      var host := cfg?.db?.host ?? "localhost";
+      println(host);          // "localhost"
+
+      var cfg2 := {"db": {"host": "prod.example.com"}};
+      var host2 := cfg2?.db?.host ?? "localhost";
+      println(host2);         // "prod.example.com"
+    end.
+
+### 29.5 — Pitfalls
+
+**1. `?.` di assignment tidak support**:
+
+    u?.name := "Bob";   // SYNTAX ERROR
+
+Pakai `if` explicit kalau perlu assign:
+
+    if u <> null then
+      u.name := "Bob";
+
+**2. Precedence `??` lebih rendah dari `or`** — hati-hati chaining boolean:
+
+    var x := a or b ?? c;   // parse sebagai a or (b ?? c)
+
+Pakai parenthesis kalau ragu:
+
+    var x := (a or b) ?? c;
+
+**3. `?.` di method call tidak support (v1.1.0)**:
+
+    u?.getName();       // SYNTAX ERROR
+
+Workaround: extract property dulu, kemudian cek.
+
+**File lengkap**: `examples/lang_v110.pas` — demo semua fitur v1.1.0.
+
+---
+
+## Bab 30 — Enum
+
+Enum = symbolic constant dengan numeric auto-assign. Cocok untuk state machine, kategori, mode.
+
+### 30.1 — Syntax
+
+    enum Color { Red, Green, Blue }
+
+    begin
+      println(Color.Red);     // 0
+      println(Color.Green);   // 1
+      println(Color.Blue);    // 2
+    end.
+
+### 30.2 — Numeric Values
+
+Member auto-numbered 0..N-1 (Pascal-like). Tidak bisa custom value di v1.1.0:
+
+    enum Status { Pending, Active, Inactive }
+    // Pending=0, Active=1, Inactive=2
+
+### 30.3 — Accessing Members
+
+Dua cara akses:
+
+    // 1. Direct member access
+    var c := Color.Green;
+    println(c);             // 1
+
+    // 2. Treat enum sebagai dict
+    var all := Color;       // dict {Red:0, Green:1, Blue:2}
+    println(all["Red"]);    // 0
+    println(len(all));      // 3
+
+### 30.4 — Immutable
+
+Enum dideclare sebagai `const` — reassign akan error compile-time:
+
+    Color := {"X": 99};     // COMPILE ERROR: Color is const
+
+Tapi value yang di-extract **bisa** di-reassign (biasa untuk tipe numerik):
+
+    var c := Color.Red;
+    c := 99;                // OK — c adalah local var numeric
+
+### 30.5 — Practical Patterns
+
+**State machine**:
+
+    enum State { Idle, Running, Done }
+
+    var state := State.Idle;
+    // ... proses ...
+    state := State.Running;
+    // ...
+    state := State.Done;
+
+**Iteration** (v1.1.0 belum support `for/in` untuk enum — pakai dict):
+
+    for kv in Color do
+      println(kv.key, " = ", kv.value);
+    // Red = 0
+    // Green = 1
+    // Blue = 2
+
+**File lengkap**: `examples/lang_v110.pas`.
+
+---
+
+## Bab 31 — Destructuring
+
+Destructure dict atau array ke multiple variable dalam satu baris.
+
+### 31.1 — Object Destructuring
+
+    var {name, age} = {"name": "Alice", "age": 30};
+    println(name);          // "Alice"
+    println(age);           // 30
+
+Parser desugar ke tiga deklarasi: satu temp `__pascak_dt_N` + dua variable `name` dan `age` (extract via `__pascak_dt_N.name` / `.age`). Zero overhead runtime — bytecode ekuivalen dengan manual.
+
+### 31.2 — Array Destructuring
+
+    var [x, y, z] = [10, 20, 30];
+    println(x);             // 10
+    println(y);             // 20
+    println(z);             // 30
+
+    // Partial — hanya ambil 2 dari 3 elemen (elemen ke-3 di-ignore)
+    var [first, second] = [1, 2, 3];
+    println(first);         // 1
+    println(second);        // 2
+
+### 31.3 — Top-level vs Statement Scope
+
+Keduanya support:
+
+    // Top-level (sebelum begin)
+    var {cfg_host, cfg_port} = {"cfg_host": "localhost", "cfg_port": 8080};
+
+    begin
+      println(cfg_host);    // "localhost"
+
+      // Statement-scope (di dalam begin)
+      var {name, age} = {"name": "Bob", "age": 25};
+      println(name);        // "Bob"
+    end.
+
+### 31.4 — Common Patterns
+
+**Function return multiple values** (via dict):
+
+    function getUser() begin
+      return {"name": "Alice", "age": 30};
+    end;
+
+    var {name, age} = getUser();
+    println(name, " is ", age);  // Alice is 30
+
+**Extract nested dict** (kombinasi dengan `?.`):
+
+    var cfg := {"db": {"host": "localhost", "port": 5432}};
+    var {db} = cfg;              // db = {"host":"localhost","port":5432}
+    println(db?.host);           // "localhost"
+
+**Const destructuring**:
+
+    const {PI} = {"PI": 3.14159};
+    // PI tidak bisa di-reassign
+
+**Missing key → null** (defensive):
+
+    var {missing} = {"other": 1};
+    println(missing);            // null (bukan crash)
+
+### 31.5 — Limitations (v1.1.0)
+
+| Feature | Status |
+|---------|--------|
+| Object destructuring `var {a,b} = obj` | ✅ |
+| Array destructuring `var [x,y] = arr` | ✅ |
+| Top-level + statement scope | ✅ |
+| Const destructuring | ✅ |
+| Missing key → `null` (defensive) | ✅ |
+| Extra elements (ignored) | ✅ |
+| Nested `var {a: {b}} = obj` | ❌ v1.1.1+ |
+| Rest `var {a, ...rest} = obj` | ❌ v1.1.1+ |
+| Default `var {a = 10} = obj` | ❌ v1.1.1+ |
+
+**File lengkap**: `examples/lang_v110.pas`.
+
+---
+
 ## Bonus — HTTP/2 Client
 
 Pascak juga mendukung HTTP/2 client via ALPN negotiation (RFC 7301).

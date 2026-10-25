@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.1] - 2026-10-26
+
+### Fixed
+- **Optimizer hardening** — `TChunk.OptimizeBytecode` now recognizes `opcJumpIfNull`/`opcJumpIfNotNull` as jump opcodes in both jump-target marking and operand-remap phases. Prevents stack underflow recurrence if future features emit dead code that triggers useless-jump removal. Synergistic with Fix A (v1.1.0) which prevents the trigger, this Fix B hardens the optimizer for any future recurrence.
+
+### Regression
+- 21/21 tests PASS (Phase 1: 8, Phase 2: 5, Phase 3: 8) — zero behavior change for existing features.
+
 ## [1.1.0] - 2026-10-25
 
 ### Added

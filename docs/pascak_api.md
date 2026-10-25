@@ -32,6 +32,75 @@ Dokumentasi lengkap API standard library Pascak VM.
 20. [Sandbox](#sandbox)
 21. [Error Handling](#error-handling)
 22. [Platform Notes](#platform-notes)
+23. [Language Reference](#language-reference)
+---
+
+## Language Reference
+
+Ringkasan sintaks dan operator inti Pascak. Untuk tutorial lengkap, lihat `docs/tutorial.md`.
+
+### Operator Precedence (v1.1.0)
+
+Dari lowest ke highest:
+
+| Level | Operator | Keterangan |
+|-------|----------|------------|
+| 1 | `??` | null-coalescing |
+| 2 | `or` | logical OR |
+| 3 | `and` | logical AND |
+| 4 | `==` `!=` `<` `>` `<=` `>=` `in` | comparison |
+| 5 | `+` `-` | additive |
+| 6 | `*` `/` `%` | multiplicative |
+| 7 | `unary -` `not` | unary |
+| 8 | `?.` `[]` `.` `()` | postfix |
+
+### Optional Chaining `?.`
+
+`a?.b` return `a.b` kalau `a` bukan null, selain itu `null`.
+
+    var x := obj?.name;              // null-safe access
+    var y := cfg?.db?.host;          // deep chain (short-circuit)
+
+Tidak support: `obj?.method()` dan `obj?.prop := value`.
+
+### Null-Coalescing `??`
+
+`a ?? b` return `a` kalau `a` bukan `null`, selain itu `b`.
+
+    var port := user_port ?? 8080;
+    println(null ?? 42);    // 42
+    println(0 ?? 42);       // 0 (0 bukan null)
+    println(false ?? 42);   // false
+
+Hanya cek `null`, bukan falsy value.
+
+### Enum
+
+    enum Color { Red, Green, Blue }
+
+Desugar ke `const Color = {Red:0, Green:1, Blue:2}`. Auto-numbered 0..N-1. Top-level only.
+
+Akses: `Color.Red` atau `Color["Red"]`.
+
+### Destructuring
+
+    var {name, age} = {"name": "Alice", "age": 30};
+    var [x, y]    = [10, 20];
+    const {PI}    = {"PI": 3.14159};
+
+Top-level dan statement-scope. Nested/rest/default: belum support (v1.1.1+).
+
+### Syntax Quirks
+
+- `=` = assignment, `==` = comparison
+- Type annotation hanya di `var`: `var x = 42` (bukan `var x: int = 42`)
+- `for..to`/`downto` untuk numeric, `for..in` untuk iterable
+- `div` bukan keyword — pakai `toInteger(a / b)`
+- Lambda: `|x| x * 2`
+- Ternary: `cond ? a : b`
+
+Untuk tutorial lengkap: `docs/tutorial.md` Bab 1-31.
+
 ---
 
 ## Modul Global
