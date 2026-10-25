@@ -260,7 +260,7 @@ type
     opcForLoopCondDown, // Operand: i, Operand2: end, Operand3: jump → for..downto
     opcReturnNull,      // Return null tanpa push stack
     opcThrow,
-    opcDefineOrReplaceGlobal
+    opcDefineOrReplaceGlobal, opcJumpIfNull, opcJumpIfNotNull
   );
 
 
@@ -496,7 +496,7 @@ type
   TOpKind = (
     opAdd, opSub, opMul, opDiv, opMod, 
     opEq, opNotEq, opLess, opGreater, opLessEq, opGreaterEq,
-    opAnd, opOr, opIn, opAssign
+    opAnd, opOr, opIn, opAssign, opNullCoalesce
   );
   
   TTokenType = (
@@ -513,7 +513,7 @@ type
     ttRecord, ttColon, ttLBrace, ttRBrace, ttFString, ttLambda,
     ttPlusAssign, ttMinusAssign, ttMulAssign, ttDivAssign, 
     ttModAssign, ttLock, ttCase, ttOf, ttQuestion,
-    ttYield,ttDefer,ttSpread,ttDownto, ttStep, ttThrow
+    ttYield,ttDefer,ttSpread,ttDownto, ttStep, ttThrow, ttOptionalDot, ttNullCoalesce
     
   );
   
@@ -1500,7 +1500,8 @@ type
   public
     Target: TNode;       
     MemberName: string;
-    constructor Create(ATarget: TNode; AMem: string);
+    IsOptional: Boolean;
+    constructor Create(ATarget: TNode; AMem: string; AIsOptional: Boolean = False);
     destructor Destroy; override;
   end;
 
@@ -1605,6 +1606,7 @@ type
     procedure Eat(ATyp: TTokenType);
     function ParseComparison: TNode; 
     function ParseLogicalAnd: TNode; // FIX: Pemisahan level prioritas
+    function ParseNullCoalesce: TNode; // ?? null-coalescing
     function ParseLogicalOr: TNode;  // FIX: Pemisahan level prioritas
     function ParseExpression: TNode;
     function ParseMathExpr: TNode;
@@ -3462,6 +3464,9 @@ begin
   begin
     // ✅ FIX P1.5: GetValueClone — sudah aman untuk caller
     Result := ObjValV.DictVal.GetValueClone(MemberName);
+    // 🔧 v1.1.0: wrap nil (missing key) — chain ?. must not AV
+    if not Assigned(Result) then
+      Result := TValue.CreateNull;
     Exit;
   end else
   if (ObjValV.DataType = dtObject) and Assigned(ObjValV.ObjVal) then 
@@ -10624,10 +10629,11 @@ begin
     inherited;
 end;
 
-constructor TMemberAccessNode.Create(ATarget: TNode; AMem: string); 
+constructor TMemberAccessNode.Create(ATarget: TNode; AMem: string; AIsOptional: Boolean = False); 
 begin 
     Target := ATarget; 
     MemberName := AMem; 
+    IsOptional := AIsOptional;
 end;
 
 destructor TMemberAccessNode.Destroy; 
@@ -11095,7 +11101,26 @@ begin
     ',': Result.Typ := ttComma;
     '{': Result.Typ := ttLBrace;
     '}': Result.Typ := ttRBrace;
-    '?': begin Result.Typ := ttQuestion; Result.Str := '?'; end;
+    '?': 
+      begin
+        if Peek = '.' then
+        begin
+          Advance;
+          Result.Typ := ttOptionalDot;
+          Result.Str := '?.';
+        end
+        else if Peek = '?' then
+        begin
+          Advance;
+          Result.Typ := ttNullCoalesce;
+          Result.Str := '??';
+        end
+        else
+        begin
+          Result.Typ := ttQuestion;
+          Result.Str := '?';
+        end;
+      end;
     ':': if Peek = '=' then 
          begin 
             Advance; 
@@ -11631,7 +11656,7 @@ begin
       errMSG.callerror(68,'TParser.ParseFactor;'+FCurrToken.Str,FCurrToken.Line, FCurrToken.Col); 
   
     // --- FASE 2: POSTFIX CHAINING (Berlaku untuk semua tipe LHS) ---
-    while FCurrToken.Typ in [ttDot, ttLBracket, ttLParen] do
+    while FCurrToken.Typ in [ttDot, ttOptionalDot, ttLBracket, ttLParen] do
     begin
       if FCurrToken.Typ = ttLParen then 
       begin
@@ -11687,6 +11712,17 @@ begin
         begin
           LHS := TMemberAccessNode.Create(LHS, Mem); 
         end;
+      end else
+
+      if FCurrToken.Typ = ttOptionalDot then
+      begin
+        Eat(ttOptionalDot);
+        Mem := FCurrToken.Str;
+        Eat(ttId);
+        if FCurrToken.Typ = ttLParen then
+          errMSG.callerror(25, 'TParser.ParseFactor: ?.() not supported',
+                           FCurrToken.Line, FCurrToken.Col);
+        LHS := TMemberAccessNode.Create(LHS, Mem, True);
       end else
 
       if FCurrToken.Typ = ttLBracket then 
@@ -11859,10 +11895,34 @@ begin
   end;
 end;
 
+function TParser.ParseNullCoalesce: TNode;
+var
+  N, RightNode: TNode;
+begin
+  N := ParseLogicalAnd;
+  try
+    while FCurrToken.Typ = ttNullCoalesce do
+    begin
+      Eat(ttNullCoalesce);
+      RightNode := ParseLogicalAnd;
+      try
+        N := TBinaryOpNode.Create(N, opNullCoalesce, RightNode);
+      except
+        RightNode.Free;
+        raise;
+      end;
+    end;
+    Result := N;
+  except
+    if Assigned(N) then N.Free;
+    raise;
+  end;
+end;
+
 function TParser.ParseLogicalOr: TNode;
 var N, RightNode: TNode; 
 begin
-  N := ParseLogicalAnd; 
+  N := ParseNullCoalesce; 
   try
     while FCurrToken.Typ = ttOr do
     begin
@@ -14668,6 +14728,15 @@ begin
       // --- COMPILASI BINARY OPERATION & SHORT-CIRCUIT ---
       else if Node is TBinaryOpNode then
       begin
+        if TBinaryOpNode(Node).Op = opNullCoalesce then
+        begin
+          Compile(TBinaryOpNode(Node).Left, False);
+          JumpIfFalseIdx := FChunk.AddInstruction(opcJumpIfNotNull, 0);
+          FChunk.AddInstruction(opcPop);
+          Compile(TBinaryOpNode(Node).Right, False);
+          FChunk.Code[JumpIfFalseIdx].Operand :=
+            FChunk.CodeCount - JumpIfFalseIdx - 1;
+        end else
         if TBinaryOpNode(Node).Op = opAnd then
         begin
           Compile(TBinaryOpNode(Node).Left, False);
@@ -15445,11 +15514,21 @@ begin
         PushedValue := True; 
       end
     
-      // --- COMPILASI PROPERTY ACCESS ---
+      // --- COMPILASI PROPERTY ACCESS (with optional chaining) ---
       else if Node is TMemberAccessNode then
       begin
-        Compile(TMemberAccessNode(Node).Target, False); 
-        FChunk.AddInstruction(opcGetProp, FChunk.AddConstant(TValue.CreateStr(TMemberAccessNode(Node).MemberName)));
+        Compile(TMemberAccessNode(Node).Target, False);
+        if TMemberAccessNode(Node).IsOptional then
+        begin
+          JumpIfFalseIdx := FChunk.AddInstruction(opcJumpIfNull, 0);
+          FChunk.AddInstruction(opcGetProp,
+            FChunk.AddConstant(TValue.CreateStr(TMemberAccessNode(Node).MemberName)));
+          FChunk.Code[JumpIfFalseIdx].Operand :=
+            FChunk.CodeCount - JumpIfFalseIdx - 1;
+        end
+        else
+          FChunk.AddInstruction(opcGetProp,
+            FChunk.AddConstant(TValue.CreateStr(TMemberAccessNode(Node).MemberName)));
       end
     
       // --- COMPILASI PROPERTY ASSIGNMENT ---
@@ -17853,8 +17932,37 @@ begin
               try
                 raise EScriptUserThrow.Create(a);
               except
-                // Ownership sudah pindah ke exception object — jangan Free a
                 raise;
+              end;
+            end;
+
+          opcJumpIfNull:
+            begin
+              if FTop < 1 then
+                errMSG.callerror(94, 'opcJumpIfNull: stack underflow',
+                                 CurrentLine, CurrentCol);
+              if (FStack[FTop - 1] = nil) or (FStack[FTop - 1].DataType = dtNull) then
+              begin
+                if (CurrentFrame^.IP + Inst.Operand < 0) or
+                   (CurrentFrame^.IP + Inst.Operand > CurrentFrame^.Chunk.CodeCount) then
+                  errMSG.callerror(108, 'opcJumpIfNull: jump OOB',
+                                   CurrentLine, CurrentCol);
+                Inc(CurrentFrame^.IP, Inst.Operand);
+              end;
+            end;
+
+          opcJumpIfNotNull:
+            begin
+              if FTop < 1 then
+                errMSG.callerror(94, 'opcJumpIfNotNull: stack underflow',
+                                 CurrentLine, CurrentCol);
+              if (FStack[FTop - 1] <> nil) and (FStack[FTop - 1].DataType <> dtNull) then
+              begin
+                if (CurrentFrame^.IP + Inst.Operand < 0) or
+                   (CurrentFrame^.IP + Inst.Operand > CurrentFrame^.Chunk.CodeCount) then
+                  errMSG.callerror(108, 'opcJumpIfNotNull: jump OOB',
+                                   CurrentLine, CurrentCol);
+                Inc(CurrentFrame^.IP, Inst.Operand);
               end;
             end;
   
