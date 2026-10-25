@@ -28648,6 +28648,116 @@ begin
 end;
 
 
+{ H2 Session 3: worker-safe wrapper — unpacks array, calls Native_HTTP_Get2 }
+function Native_HTTPSync2(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  PackedArgs: TValue;
+  ErrDict: TDictValue;
+  RealArgs: TObjectList;
+  I: Integer;
+begin
+  Result := TValue.CreateNull;
+  if (Args.Count < 1) or (not Assigned(Args[0])) or
+     (TValue(Args[0]).DataType <> dtArray) then Exit;
+
+  PackedArgs := TValue(Args[0]);
+  RealArgs := TObjectList.Create(False);
+  try
+    PackedArgs.ArrayVal.FLock.Acquire;
+    try
+      for I := 0 to PackedArgs.ArrayVal.Count - 1 do
+        RealArgs.Add(PackedArgs.ArrayVal[I]);
+    finally
+      PackedArgs.ArrayVal.FLock.Release;
+    end;
+    try
+      Result := Native_HTTP_Get2(RealArgs, CallEnv);
+    except
+      on E: Exception do
+      begin
+        ErrDict := TDictValue.Create;
+        try
+          ErrDict.SetValue('error', TValue.CreateStr(E.Message));
+          ErrDict.SetValue('__worker_crash', TValue.CreateBool(True));
+          ErrDict.SetValue('__worker_kind', TValue.CreateStr(E.ClassName));
+          Result := TValue.CreateDict(ErrDict);
+        except
+          ErrDict.Free;
+          raise;
+        end;
+      end;
+    end;
+  finally
+    RealArgs.Free;
+  end;
+end;
+
+{ H2 Session 3: async enqueue — packs non-callback args, dispatches to worker }
+function Native_HTTP_Get2Async(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  Callback, PackedArgs, FuncVal: TValue;
+  Ctx: TEngineContext;
+  I, NonCbCount: Integer;
+  PackList: TValueList;
+begin
+  Result := TValue.CreateNull;
+  if (Args.Count < 2) or (Args.Count > 4) then
+  begin
+    errMSG.callerror(140,
+      'http.get2Async(url, [headers], [body], callback)',
+      errMSG.xrow, errMSG.xcol);
+    Exit;
+  end;
+
+  if (not Assigned(Args[0])) or (TValue(Args[0]).DataType <> dtString) then
+  begin
+    errMSG.callerror(139, 'http.get2Async: url harus string',
+                     errMSG.xrow, errMSG.xcol);
+    Exit;
+  end;
+
+  Callback := TValue(Args[Args.Count - 1]);
+  if (not Assigned(Callback)) or (Callback.DataType <> dtFunction) then
+  begin
+    errMSG.callerror(140,
+      'http.get2Async: argumen terakhir harus function callback',
+      errMSG.xrow, errMSG.xcol);
+    Exit;
+  end;
+
+  Ctx := GetContextFromEnv(CallEnv);
+  if (not Assigned(Ctx)) or (not Assigned(Ctx.WorkerPool)) then
+  begin
+    errMSG.callerror(144, 'http.get2Async: worker pool tidak tersedia',
+                     errMSG.xrow, errMSG.xcol);
+    Exit;
+  end;
+
+  NonCbCount := Args.Count - 1;
+  PackList := TValueList.Create(True);
+  try
+    for I := 0 to NonCbCount - 1 do
+      if Assigned(Args[I]) then
+        PackList.Add(TValue(Args[I]).Clone)
+      else
+        PackList.Add(TValue.CreateNull);
+    PackedArgs := TValue.CreateArray(PackList);
+  except
+    PackList.Free;
+    raise;
+  end;
+
+  FuncVal := TValue.CreateNative(@Native_HTTPSync2);
+  try
+    Ctx.WorkerPool.EnqueueTask(FuncVal, PackedArgs, Callback);
+  finally
+    FuncVal.Free;
+    PackedArgs.Free;
+  end;
+
+  Result := TValue.CreateNull;
+end;
+
 function Native_HTTP_Get2PoolStats(Args: TObjectList; CallEnv: TSymbolTable): TValue;
 var
   D: TDictValue;
@@ -39401,6 +39511,7 @@ begin
   HTTPDef.Methods.Add('request', TVMFunction.Create);
   HTTPDef.Methods.Add('get', TVMFunction.Create);
   HTTPDef.Methods.Add('get2', TVMFunction.Create);
+  HTTPDef.Methods.Add('get2Async', TVMFunction.Create);
   HTTPDef.Methods.Add('get2PoolStats', TVMFunction.Create);
   HTTPDef.Methods.Add('get2PoolConfig', TVMFunction.Create);
   HTTPDef.Methods.Add('get2PoolClear', TVMFunction.Create);
@@ -39423,6 +39534,7 @@ begin
   HTTPInst.Members.DefineVar('traceRequests', TValue.CreateNative(@Native_HTTP_TraceRequests));
   HTTPInst.Members.DefineVar('get', TValue.CreateNative(@Native_HTTP_Get));
   HTTPInst.Members.DefineVar('get2', TValue.CreateNative(@Native_HTTP_Get2));
+  HTTPInst.Members.DefineVar('get2Async', TValue.CreateNative(@Native_HTTP_Get2Async));
   HTTPInst.Members.DefineVar('get2PoolStats', TValue.CreateNative(@Native_HTTP_Get2PoolStats));
   HTTPInst.Members.DefineVar('get2PoolConfig', TValue.CreateNative(@Native_HTTP_Get2PoolConfig));
   HTTPInst.Members.DefineVar('get2PoolClear', TValue.CreateNative(@Native_HTTP_Get2PoolClear));
