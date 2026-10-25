@@ -28437,6 +28437,7 @@ var
   Slot: TPoolSlot;
   IsCreator: Boolean;
   SlotErrMsg: string;
+  WaitStart: QWord;
 begin
   if (Args.Count < 1) or (Args.Count > 3) or
      (TValue(Args[0]).DataType <> dtString) then
@@ -28559,8 +28560,18 @@ begin
     end
     else if Assigned(Slot) and not IsCreator then
     begin
+      { H2 S4: RTLEventSetEvent = pthread_cond_signal (wakes only 1).
+        With 3+ concurrent waiters, only first wakes — others stuck.
+        Fix: poll Slot.Creating so ALL waiters observe the transition. }
       if Slot.Creating then
-        RTLEventWaitFor(Slot.InitEvent, 30000);
+      begin
+        WaitStart := GetTickCount64;
+        while Slot.Creating do
+        begin
+          if (GetTickCount64 - WaitStart) > 30000 then Break;
+          Sleep(1);
+        end;
+      end;
 
       if Slot.Failed then
       begin

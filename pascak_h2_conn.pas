@@ -620,6 +620,8 @@ var
   SendOK, RemovedFromMap: Boolean;
   Start: QWord;
   WaitMs, ElapsedMs: Integer;
+  StreamAcquired: Boolean;
+  WaitStreamStart: QWord;
 begin
   Result.Status := 0;
   SetLength(Result.Headers, 0);
@@ -634,27 +636,56 @@ begin
     Exit;
   end;
 
-  FStreamLock.Acquire;
-  try
-    if FClosed then
-    begin
-      Result.HasError := True;
-      Result.Error := 'connection closed: ' + FConnectionError;
-      Exit;
+  { H2 S4b: enforce server MAX_CONCURRENT_STREAMS (RFC 7540 §5.1.2).
+    Prevents GOAWAY when client opens more streams than server allows.
+    Limit 0 or >=1000 treated as unlimited (safety cap). }
+  WaitStreamStart := GetTickCount64;
+  StreamAcquired := False;
+  while not StreamAcquired do
+  begin
+    FStreamLock.Acquire;
+    try
+      if FClosed then
+      begin
+        Result.HasError := True;
+        Result.Error := 'connection closed: ' + FConnectionError;
+        Exit;
+      end;
+      if FGoAwayLastStreamID > 0 then
+      begin
+        Result.HasError := True;
+        Result.Error := 'connection GOAWAY received';
+        Exit;
+      end;
+      if (Integer(FServerMaxStreams) > 0) and
+         (Integer(FServerMaxStreams) < 1000) and
+         (FStreams.Count >= Integer(FServerMaxStreams)) then
+      begin
+        { Stream limit reached — wait for one to complete }
+      end
+      else
+      begin
+        SID := FNextStreamID;
+        Inc(FNextStreamID, 2);
+        Stream := TStreamState.Create;
+        FStreams.Add(SID, Stream);
+        Stream.AddRef;
+        StreamAcquired := True;
+      end;
+    finally
+      FStreamLock.Release;
     end;
-    if FGoAwayLastStreamID > 0 then
+    if not StreamAcquired then
     begin
-      Result.HasError := True;
-      Result.Error := 'connection GOAWAY received';
-      Exit;
+      if (GetTickCount64 - WaitStreamStart) > QWord(TimeoutMs) then
+      begin
+        Result.HasError := True;
+        Result.Error := 'timeout waiting for stream slot (limit=' +
+                        IntToStr(FServerMaxStreams) + ')';
+        Exit;
+      end;
+      Sleep(5);
     end;
-    SID := FNextStreamID;
-    Inc(FNextStreamID, 2);
-    Stream := TStreamState.Create;
-    FStreams.Add(SID, Stream);
-    Stream.AddRef;
-  finally
-    FStreamLock.Release;
   end;
 
   try
@@ -959,9 +990,11 @@ begin
   if not Assigned(Slot) then Exit;
   FLock.Acquire;
   try
-    Slot.Creating := False;
+    { H2 S4: set Failed + ErrorMsg BEFORE Creating so waiters that
+      observe Creating=False also see Failed=True atomically }
     Slot.Failed := True;
     Slot.ErrorMsg := ErrMsg;
+    Slot.Creating := False;
     for i := 0 to FSlots.Count - 1 do
       if TPoolSlot(FSlots[i]) = Slot then
       begin
