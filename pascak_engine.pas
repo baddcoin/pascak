@@ -12161,6 +12161,11 @@ var DeclNode,node1, node2, node3: TNode;
     IsConst, IsDownto: Boolean;
     DeclBlock: TBlockNode; 
     StartLine, StartCol: Integer; // FIX: Tambahkan StartCol
+     IsObjDestr: Boolean;
+     DtNames: TStringList;
+     DtRhs, DtAccess: TNode;
+     DtTempName: string;
+     DtIdx: Integer;
 begin
   node1 := nil; node2 := nil; node3 := nil; Idx := nil;
   CallNode := nil; MethodCall := nil; DeclBlock := nil;
@@ -12270,6 +12275,49 @@ begin
     DeclBlock := TBlockNode.Create(False);
   
     try
+      // ── v1.1.0 Phase 3: destructuring (statement scope) ──
+      if FCurrToken.Typ in [ttLBrace, ttLBracket] then
+      begin
+        IsObjDestr := (FCurrToken.Typ = ttLBrace);
+        Eat(FCurrToken.Typ);
+        DtNames := TStringList.Create;
+        repeat
+          DtNames.Add(FCurrToken.Str);
+          Eat(ttId);
+          if FCurrToken.Typ = ttComma then Eat(ttComma) else Break;
+        until False;
+        if IsObjDestr then Eat(ttRBrace) else Eat(ttRBracket);
+        if (FCurrToken.Typ = ttAssign) or (FCurrToken.Typ = ttEqual) then
+          Eat(FCurrToken.Typ)
+        else
+          errMSG.callerror(25,
+            'destructuring: butuh = / := setelah pattern',
+            FCurrToken.Line, FCurrToken.Col);
+        DtRhs := ParseExpression;
+        DtTempName := '__pascak_dt_' + IntToStr(StartLine) + '_' + IntToStr(StartCol);
+        DeclNode := TVarDeclNode.Create(DtTempName, DtRhs, False);
+        DeclNode.Line := StartLine;
+        DeclNode.Col := StartCol;
+        DeclBlock.Statements.Add(DeclNode);
+        for DtIdx := 0 to DtNames.Count - 1 do
+        begin
+          if IsObjDestr then
+            DtAccess := TMemberAccessNode.Create(
+              TVariableNode.Create(DtTempName), DtNames[DtIdx])
+          else
+            DtAccess := TArrayAccessNode.Create(
+              TVariableNode.Create(DtTempName),
+              TLiteralNode.Create(TValue.CreateNum(DtIdx)));
+          DeclNode := TVarDeclNode.Create(DtNames[DtIdx], DtAccess, IsConst);
+          DeclNode.Line := StartLine;
+          DeclNode.Col := StartCol;
+          DeclBlock.Statements.Add(DeclNode);
+        end;
+        DtNames.Free;
+        Result := DeclBlock;
+        Exit;
+      end;
+
       repeat
         // PERBAIKAN: Capture posisi identifier SEKARANG, sebelum Eat
         Obj := FCurrToken.Str;
@@ -12707,6 +12755,11 @@ var
   EnumName: string;
   EnumDict: TDictLiteralNode;
   EnumIdx: Integer;
+  IsObjDestr: Boolean;
+  DtNames: TStringList;
+  DtRhs, DtAccess: TNode;
+  DtTempName: string;
+  DtIdx: Integer;
 begin
   B := TBlockNode.Create(False); 
   try
@@ -12743,6 +12796,46 @@ begin
         IsConst := (FCurrToken.Typ = ttConst);
         Eat(FCurrToken.Typ);
         
+        // ── v1.1.0 Phase 3: destructuring ──
+        // var {a,b} = obj  →  var __pascak_dt_N = obj; var a = __.a; var b = __.b
+        // var [x,y] = arr  →  var __pascak_dt_N = arr; var x = __[0]; var y = __[1]
+        if FCurrToken.Typ in [ttLBrace, ttLBracket] then
+        begin
+          IsObjDestr := (FCurrToken.Typ = ttLBrace);
+          Eat(FCurrToken.Typ);
+          DtNames := TStringList.Create;
+          repeat
+            DtNames.Add(FCurrToken.Str);
+            Eat(ttId);
+            if FCurrToken.Typ = ttComma then Eat(ttComma) else Break;
+          until False;
+          if IsObjDestr then Eat(ttRBrace) else Eat(ttRBracket);
+          if (FCurrToken.Typ = ttAssign) or (FCurrToken.Typ = ttEqual) then
+            Eat(FCurrToken.Typ)
+          else
+            errMSG.callerror(25,
+              'destructuring: butuh = / := setelah pattern',
+              FCurrToken.Line, FCurrToken.Col);
+          DtRhs := ParseExpression;
+          DtTempName := '__pascak_dt_' + IntToStr(StartLine);
+          DeclNode := TVarDeclNode.Create(DtTempName, DtRhs, False);
+          DeclNode.Line := StartLine;
+          B.Statements.Add(DeclNode);
+          for DtIdx := 0 to DtNames.Count - 1 do
+          begin
+            if IsObjDestr then
+              DtAccess := TMemberAccessNode.Create(
+                TVariableNode.Create(DtTempName), DtNames[DtIdx])
+            else
+              DtAccess := TArrayAccessNode.Create(
+                TVariableNode.Create(DtTempName),
+                TLiteralNode.Create(TValue.CreateNum(DtIdx)));
+            DeclNode := TVarDeclNode.Create(DtNames[DtIdx], DtAccess, IsConst);
+            DeclNode.Line := StartLine;
+            B.Statements.Add(DeclNode);
+          end;
+          DtNames.Free;
+        end else
         // : Jangan gunakan while ttId, gunakan deteksi koma agar fungsi tidak tertelan
         repeat
           ObjName := FCurrToken.Str;
