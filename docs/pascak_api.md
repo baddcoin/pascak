@@ -93,7 +93,15 @@ Top-level dan statement-scope. Default values (v1.2.0):
     var {a = 10, b = 20} = {"a": 1};
     var [x = 0, y = 100] = [42];
 
-Defaults fire on `null` only (0, "", false pass through). Nested/rest: belum support (v1.2.1+).
+Defaults fire on `null` only (0, "", false pass through).
+
+Array rest (v1.2.1):
+
+    var [first, ...tail] = [10, 20, 30, 40];   // first=10, tail=[20,30,40]
+
+Rest must be last; no default; out-of-bounds -> empty array.
+
+Nested destructuring / object rest: belum support (v1.2.2+).
 
 ### Syntax Quirks
 

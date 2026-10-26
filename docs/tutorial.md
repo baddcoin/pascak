@@ -4624,6 +4624,37 @@ Kalau butuh fallback pada falsy juga, pakai ternary `?:`:
     var {db = {"host": "localhost"}} = cfg;
     println(db.host);  // "localhost" (default dipakai karena db=null)
 
+### 31.7 - Array Rest Element (v1.2.1)
+
+Capture sisa elemen array dalam satu variabel:
+
+    var [first, ...tail] = [10, 20, 30, 40];
+    println(first);         // 10
+    println(tail);          // [20, 30, 40]
+
+    var [...all] = [5, 6, 7];
+    println(all);           // [5, 6, 7]
+
+    var [a, b, ...rest] = [1, 2, 3, 4, 5];
+    println(a);             // 1
+    println(b);             // 2
+    println(rest);          // [3, 4, 5]
+
+**Aturan**:
+- Rest element harus di posisi terakhir
+- Rest tidak boleh punya default value
+- Rest pada array pendek -> slice kosong `[]` (bukan error):
+
+    var [x, ...tail2] = [100];
+    println(x);             // 100
+    println(tail2);         // []
+
+**Implementasi**: rest element desugar jadi `TArraySliceNode(temp, idx, nil, nil)` - reuse slice syntax `temp[idx:]` yang sudah ada. Tidak ada overhead runtime tambahan.
+
+**Belum didukung (v1.2.2)**:
+- Object rest: `var {a, ...rest} = obj` (butuh runtime dict.omit())
+- Nested rest: `var [a, [b, ...r]] = arr`
+
 ## Bonus — HTTP/2 Client
 
 Pascak juga mendukung HTTP/2 client via ALPN negotiation (RFC 7301).

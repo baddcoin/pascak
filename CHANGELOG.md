@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.2.1] - 2026-10-26
+
+### Added
+- **Array rest element** — `var [first, ...tail] = arr` captures remaining elements as array slice (reuses existing slice syntax `arr[start:]`). Rest must be last, no default allowed. Out-of-bounds → empty array.
+
+### Notes
+- Object rest (`var {a, ...rest} = obj`) and nested destructuring (`var {a: {b}} = obj`): planned for v1.2.2.
+
+### Regression
+- 10/10 new tests PASS + 31/31 prior tests PASS (Phase 1/2/3 + v1.2.0 defaults).
+
 ## [1.2.0] - 2026-10-26
 
 ### Added
