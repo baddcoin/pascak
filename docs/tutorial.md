@@ -4655,6 +4655,54 @@ Capture sisa elemen array dalam satu variabel:
 - Object rest: `var {a, ...rest} = obj` (butuh runtime dict.omit())
 - Nested rest: `var [a, [b, ...r]] = arr`
 
+### 31.8 — Nested Destructuring (v1.2.2)
+
+Extract nilai dari nested dict/array dalam satu deklarasi. Root pattern harus objek ({..}):
+
+    var {a: {b, c}} = {"a": {"b": 1, "c": 2}};
+    println(b);    // 1
+    println(c);    // 2
+
+    var {p: [m, n]} = {"p": [30, 40]};
+    println(m);    // 30
+    println(n);    // 40
+
+**Mixed flat + nested**:
+
+    var {q: {r}, s} = {"q": {"r": 100}, "s": 200};
+    println(r);    // 100
+    println(s);    // 200
+
+**Multiple nested**:
+
+    var {u: [i, j], v: {k, l}} = {"u": [1, 2], "v": {"k": 3, "l": 4}};
+    println(i);    // 1
+    println(l);    // 4
+
+**Nested with default**:
+
+    var {w: {z = 42}} = {"w": {}};
+    println(z);    // 42
+
+**Implementasi**: path disimpan sebagai string ("a.b" / "p.0"),
+kemudian emit split di "." dan chain TMemberAccessNode /
+TArrayAccessNode. Zero overhead runtime.
+
+**Batasan (v1.2.2)**:
+- Root harus objek: `var {..} = ...` (bukan `var [..] = ...`)
+- Nested hanya 1 level: `{a: {b, c}}` OK, `{a: {b: {c}}}` = error
+- Rest di dalam nested: belum support
+- Array root nested: `var [a, {b}] = arr` = error
+
+**Kombinasi nested + default (OK)**:
+
+    var {a: {b = 10, c}} = {"a": {"c": 2}};
+    // b = 10 (default, karena missing), c = 2
+
+**Kombinasi nested + rest (error v1.2.2)**:
+
+    var {a: {b, ...r}} = {"a": {"b": 1, "x": 2}};   // ERROR
+
 ## Bonus — HTTP/2 Client
 
 Pascak juga mendukung HTTP/2 client via ALPN negotiation (RFC 7301).

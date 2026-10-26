@@ -101,7 +101,14 @@ Array rest (v1.2.1):
 
 Rest must be last; no default; out-of-bounds -> empty array.
 
-Nested destructuring / object rest: belum support (v1.2.2+).
+Nested destructuring (obj-root, v1.2.2):
+
+    var {a: {b, c}} = {"a": {"b": 1, "c": 2}};
+    var {p: [m, n]} = {"p": [30, 40]};
+
+Supports mixed flat+nested, multi-nested, nested with default.
+Restrictions: obj-root only, 1-level, no rest inside nested.
+Deeper (>1 level) / array-root nested / object rest: deferred to v1.2.3.
 
 ### Syntax Quirks
 

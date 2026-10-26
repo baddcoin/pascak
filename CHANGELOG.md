@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.2.2] - 2026-10-26
+
+### Added
+- **Nested destructuring (obj-root)** — `var {a: {b, c}} = obj` and `var {a: [x, y]} = obj`. Supports mixed flat+nested, multi-nested, nested with default, statement + top-level scope.
+
+### Notes
+- Array-root nested (`var [a, {b}] = arr`), rest inside nested, and deeper than 1 level: deferred to v1.2.3.
+
+### Regression
+- 19/19 nested tests PASS + 41/41 prior tests PASS.
+
 ## [1.2.1] - 2026-10-26
 
 ### Added
