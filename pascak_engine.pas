@@ -12166,6 +12166,10 @@ var DeclNode,node1, node2, node3: TNode;
      DtRhs, DtAccess: TNode;
      DtTempName: string;
      DtIdx: Integer;
+     DtDefaults: TList;
+     EnumName: string;
+     EnumDict: TDictLiteralNode;
+     EnumIdx: Integer;
 begin
   node1 := nil; node2 := nil; node3 := nil; Idx := nil;
   CallNode := nil; MethodCall := nil; DeclBlock := nil;
@@ -12268,6 +12272,31 @@ begin
     end;
   end else
 
+  if FCurrToken.Typ = ttEnum then
+  begin
+    // ── v1.2.0 Phase A2: enum in function/statement scope ──
+    Eat(ttEnum);
+    EnumName := FCurrToken.Str;
+    Eat(ttId);
+    Eat(ttLBrace);
+    EnumDict := TDictLiteralNode.Create;
+    EnumIdx := 0;
+    repeat
+      EnumDict.FKeys.Add(FCurrToken.Str);
+      EnumDict.FValues.Add(TLiteralNode.Create(TValue.CreateNum(EnumIdx)));
+      Eat(ttId);
+      Inc(EnumIdx);
+      if FCurrToken.Typ = ttComma then Eat(ttComma) else Break;
+    until False;
+    Eat(ttRBrace);
+    if FCurrToken.Typ = ttSemiColon then Eat(ttSemiColon);
+    DeclNode := TVarDeclNode.Create(EnumName, EnumDict, True);
+    DeclNode.Line := StartLine;
+    DeclNode.Col := StartCol;
+    Result := DeclNode;
+    Exit;
+  end else
+
   if (FCurrToken.Typ = ttVar) or (FCurrToken.Typ = ttConst) then 
   begin
     IsConst := (FCurrToken.Typ = ttConst);
@@ -12281,9 +12310,16 @@ begin
         IsObjDestr := (FCurrToken.Typ = ttLBrace);
         Eat(FCurrToken.Typ);
         DtNames := TStringList.Create;
+        DtDefaults := TList.Create;
         repeat
           DtNames.Add(FCurrToken.Str);
           Eat(ttId);
+          if (FCurrToken.Typ = ttAssign) or (FCurrToken.Typ = ttEqual) then
+          begin
+            Eat(FCurrToken.Typ);
+            DtDefaults.Add(ParseExpression);
+          end else
+            DtDefaults.Add(nil);
           if FCurrToken.Typ = ttComma then Eat(ttComma) else Break;
         until False;
         if IsObjDestr then Eat(ttRBrace) else Eat(ttRBracket);
@@ -12308,12 +12344,15 @@ begin
             DtAccess := TArrayAccessNode.Create(
               TVariableNode.Create(DtTempName),
               TLiteralNode.Create(TValue.CreateNum(DtIdx)));
+          if DtDefaults[DtIdx] <> nil then
+            DtAccess := TBinaryOpNode.Create(DtAccess, opNullCoalesce, TNode(DtDefaults[DtIdx]));
           DeclNode := TVarDeclNode.Create(DtNames[DtIdx], DtAccess, IsConst);
           DeclNode.Line := StartLine;
           DeclNode.Col := StartCol;
           DeclBlock.Statements.Add(DeclNode);
         end;
         DtNames.Free;
+        DtDefaults.Free;
         Result := DeclBlock;
         Exit;
       end;
@@ -12760,6 +12799,7 @@ var
   DtRhs, DtAccess: TNode;
   DtTempName: string;
   DtIdx: Integer;
+  DtDefaults: TList;
 begin
   B := TBlockNode.Create(False); 
   try
@@ -12804,9 +12844,16 @@ begin
           IsObjDestr := (FCurrToken.Typ = ttLBrace);
           Eat(FCurrToken.Typ);
           DtNames := TStringList.Create;
+          DtDefaults := TList.Create;
           repeat
             DtNames.Add(FCurrToken.Str);
             Eat(ttId);
+            if (FCurrToken.Typ = ttAssign) or (FCurrToken.Typ = ttEqual) then
+            begin
+              Eat(FCurrToken.Typ);
+              DtDefaults.Add(ParseExpression);
+            end else
+              DtDefaults.Add(nil);
             if FCurrToken.Typ = ttComma then Eat(ttComma) else Break;
           until False;
           if IsObjDestr then Eat(ttRBrace) else Eat(ttRBracket);
@@ -12830,11 +12877,14 @@ begin
               DtAccess := TArrayAccessNode.Create(
                 TVariableNode.Create(DtTempName),
                 TLiteralNode.Create(TValue.CreateNum(DtIdx)));
+            if DtDefaults[DtIdx] <> nil then
+              DtAccess := TBinaryOpNode.Create(DtAccess, opNullCoalesce, TNode(DtDefaults[DtIdx]));
             DeclNode := TVarDeclNode.Create(DtNames[DtIdx], DtAccess, IsConst);
             DeclNode.Line := StartLine;
             B.Statements.Add(DeclNode);
           end;
           DtNames.Free;
+          DtDefaults.Free;
         end else
         // : Jangan gunakan while ttId, gunakan deteksi koma agar fungsi tidak tertelan
         repeat
