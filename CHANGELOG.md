@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.2.3] - 2026-10-26
+
+### Added
+- **2-level nested destructuring** — `var {a: {b: {c, d}}} = obj` and `var {a: {b: [x, y]}} = obj`. Extends v1.2.2 (1-level obj-root) up to 2 levels.
+
+### Notes
+- Deeper than 2 level, array-root nested, object rest, rest-inside-nested: deferred to v1.2.4.
+- Emit refactored to iterate-all-dots path (backward compatible).
+
+### Regression
+- 14/14 v1.2.3 tests + 69/69 prior tests PASS.
+
 ## [1.2.2] - 2026-10-26
 
 ### Added

@@ -4703,6 +4703,45 @@ TArrayAccessNode. Zero overhead runtime.
 
     var {a: {b, ...r}} = {"a": {"b": 1, "x": 2}};   // ERROR
 
+### 31.9 — 2-Level Nested (v1.2.3)
+
+Nested lebih dalam (2 level) untuk config pattern:
+
+    var {p: {q: {r, s}}} = {"p": {"q": {"r": 10, "s": 20}}};
+    println(r);    // 10
+    println(s);    // 20
+
+**Mixed 1-level sibling + 2-level**:
+
+    var {u: {v}, w: {x: {y, z}}} =
+      {"u": {"v": 100}, "w": {"x": {"y": 200, "z": 300}}};
+    println(v);    // 100
+    println(y);    // 200
+    println(z);    // 300
+
+**2-level dengan default**:
+
+    var {m: {n: {o = 42, p2}}} = {"m": {"n": {"p2": 7}}};
+    println(o);    // 42 (default)
+    println(p2);   // 7
+
+**2-level mixed obj → array**:
+
+    var {cfg: {coords: [cx, cy]}} = {"cfg": {"coords": [1, 2]}};
+    println(cx);   // 1
+    println(cy);   // 2
+
+**Batasan (v1.2.3)**:
+- Root harus objek
+- Max 2 level: `{a: {b: {c}}}` OK, `{a: {b: {c: {d}}}}` = error
+- Array-root nested (var [a, {b}] = arr): belum support
+- Rest di nested: belum support
+- Object rest top-level: belum support
+
+**Implementasi**: path disimpan flat dengan '.' separator
+('p.q.r'), emit iterate split-by-dot dan chain member/array
+access. Zero overhead runtime.
+
 ## Bonus — HTTP/2 Client
 
 Pascak juga mendukung HTTP/2 client via ALPN negotiation (RFC 7301).

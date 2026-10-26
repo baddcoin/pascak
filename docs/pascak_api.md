@@ -108,7 +108,11 @@ Nested destructuring (obj-root, v1.2.2):
 
 Supports mixed flat+nested, multi-nested, nested with default.
 Restrictions: obj-root only, 1-level, no rest inside nested.
-Deeper (>1 level) / array-root nested / object rest: deferred to v1.2.3.
+2-level nested (v1.2.3):
+
+    var {p: {q: {r, s}}} = {"p": {"q": {"r": 10, "s": 20}}};
+
+Max 2 level. Array-root nested / object rest / rest-inside-nested / 3+ level: deferred to v1.2.4.
 
 ### Syntax Quirks
 
