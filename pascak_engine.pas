@@ -12167,6 +12167,8 @@ var DeclNode,node1, node2, node3: TNode;
      DtTempName: string;
      DtIdx: Integer;
      DtDefaults: TList;
+     DtRestFlags: TStringList;
+     IsRest: Boolean;
      EnumName: string;
      EnumDict: TDictLiteralNode;
      EnumIdx: Integer;
@@ -12311,9 +12313,27 @@ begin
         Eat(FCurrToken.Typ);
         DtNames := TStringList.Create;
         DtDefaults := TList.Create;
+        DtRestFlags := TStringList.Create;
         repeat
+          IsRest := (FCurrToken.Typ = ttSpread);
+          if IsRest then Eat(ttSpread);
           DtNames.Add(FCurrToken.Str);
           Eat(ttId);
+          if IsRest then
+          begin
+            if (FCurrToken.Typ = ttAssign) or (FCurrToken.Typ = ttEqual) then
+              errMSG.callerror(25,
+                'rest element: default tidak diizinkan',
+                FCurrToken.Line, FCurrToken.Col);
+            DtDefaults.Add(nil);
+            DtRestFlags.Add('R');
+            if FCurrToken.Typ = ttComma then
+              errMSG.callerror(25,
+                'rest element harus di posisi terakhir',
+                FCurrToken.Line, FCurrToken.Col);
+            Break;
+          end;
+          DtRestFlags.Add('');
           if (FCurrToken.Typ = ttAssign) or (FCurrToken.Typ = ttEqual) then
           begin
             Eat(FCurrToken.Typ);
@@ -12337,7 +12357,18 @@ begin
         DeclBlock.Statements.Add(DeclNode);
         for DtIdx := 0 to DtNames.Count - 1 do
         begin
-          if IsObjDestr then
+          if DtRestFlags[DtIdx] = 'R' then
+          begin
+            if IsObjDestr then
+              errMSG.callerror(25,
+                'object rest belum didukung di v1.2.1',
+                StartLine, StartCol);
+            DtAccess := TArraySliceNode.Create(
+              TVariableNode.Create(DtTempName),
+              TLiteralNode.Create(TValue.CreateNum(DtIdx)),
+              nil, nil);
+          end
+          else if IsObjDestr then
             DtAccess := TMemberAccessNode.Create(
               TVariableNode.Create(DtTempName), DtNames[DtIdx])
           else
@@ -12353,6 +12384,7 @@ begin
         end;
         DtNames.Free;
         DtDefaults.Free;
+        DtRestFlags.Free;
         Result := DeclBlock;
         Exit;
       end;
@@ -12800,6 +12832,8 @@ var
   DtTempName: string;
   DtIdx: Integer;
   DtDefaults: TList;
+  DtRestFlags: TStringList;
+  IsRest: Boolean;
 begin
   B := TBlockNode.Create(False); 
   try
@@ -12845,9 +12879,27 @@ begin
           Eat(FCurrToken.Typ);
           DtNames := TStringList.Create;
           DtDefaults := TList.Create;
+          DtRestFlags := TStringList.Create;
           repeat
+            IsRest := (FCurrToken.Typ = ttSpread);
+            if IsRest then Eat(ttSpread);
             DtNames.Add(FCurrToken.Str);
             Eat(ttId);
+            if IsRest then
+            begin
+              if (FCurrToken.Typ = ttAssign) or (FCurrToken.Typ = ttEqual) then
+                errMSG.callerror(25,
+                  'rest element: default tidak diizinkan',
+                  FCurrToken.Line, FCurrToken.Col);
+              DtDefaults.Add(nil);
+              DtRestFlags.Add('R');
+              if FCurrToken.Typ = ttComma then
+                errMSG.callerror(25,
+                  'rest element harus di posisi terakhir',
+                  FCurrToken.Line, FCurrToken.Col);
+              Break;
+            end;
+            DtRestFlags.Add('');
             if (FCurrToken.Typ = ttAssign) or (FCurrToken.Typ = ttEqual) then
             begin
               Eat(FCurrToken.Typ);
@@ -12870,7 +12922,18 @@ begin
           B.Statements.Add(DeclNode);
           for DtIdx := 0 to DtNames.Count - 1 do
           begin
-            if IsObjDestr then
+            if DtRestFlags[DtIdx] = 'R' then
+            begin
+              if IsObjDestr then
+                errMSG.callerror(25,
+                  'object rest belum didukung di v1.2.1',
+                  StartLine, 1);
+              DtAccess := TArraySliceNode.Create(
+                TVariableNode.Create(DtTempName),
+                TLiteralNode.Create(TValue.CreateNum(DtIdx)),
+                nil, nil);
+            end
+            else if IsObjDestr then
               DtAccess := TMemberAccessNode.Create(
                 TVariableNode.Create(DtTempName), DtNames[DtIdx])
             else
@@ -12885,6 +12948,7 @@ begin
           end;
           DtNames.Free;
           DtDefaults.Free;
+          DtRestFlags.Free;
         end else
         // : Jangan gunakan while ttId, gunakan deteksi koma agar fungsi tidak tertelan
         repeat
