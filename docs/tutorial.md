@@ -4489,6 +4489,28 @@ Tapi value yang di-extract **bisa** di-reassign (biasa untuk tipe numerik):
 
 ---
 
+### 30.6 — Enum di Function Scope (v1.2.0)
+
+Sejak v1.2.0, enum boleh dideclare di dalam function atau block:
+
+    function getStatus() begin
+      enum Status { Pending, Active, Done }
+      return Status.Active;
+    end;
+
+    begin
+      println(getStatus());    // 1
+
+      enum Local { X, Y, Z }
+      println(Local.Z);        // 2
+    end.
+
+**Scope**: enum lokal hanya visible di function/block tempat dia
+dideclare (sama seperti `var`). Tidak leaking ke outer scope.
+
+**Cocok untuk**: state machine lokal per fungsi, konstanta helper
+yang tidak perlu global.
+
 ## Bab 31 — Destructuring
 
 Destructure dict atau array ke multiple variable dalam satu baris.
@@ -4572,6 +4594,35 @@ Keduanya support:
 **File lengkap**: `examples/lang_v110.pas`.
 
 ---
+
+### 31.6 — Default Values (v1.2.0)
+
+Berikan fallback kalau key missing atau index out-of-bounds:
+
+    var {a = 10, b = 20} = {"a": 1};
+    println(a);       // 1  (key ada)
+    println(b);       // 20 (key missing → default)
+
+    var [x = 0, y = 100] = [42];
+    println(x);       // 42
+    println(y);       // 100 (index 1 out-of-bounds → default)
+
+**Semantik**: default **hanya** dipakai kalau extracted value `null`.
+Falsy value (`0`, `""`, `false`) **pass-through** tanpa fallback:
+
+    var {n = 99, s = "default"} = {"n": 0, "s": ""};
+    println(n);       // 0  (bukan 99)
+    println(s);       // "" (bukan "default")
+
+Kalau butuh fallback pada falsy juga, pakai ternary `?:`:
+
+    var safe_n := (n ?: 99);
+
+**Kombinasi dengan optional chaining**:
+
+    var cfg := {"db": null};
+    var {db = {"host": "localhost"}} = cfg;
+    println(db.host);  // "localhost" (default dipakai karena db=null)
 
 ## Bonus — HTTP/2 Client
 

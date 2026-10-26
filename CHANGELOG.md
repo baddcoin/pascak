@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.2.0] - 2026-10-26
+
+### Added
+- **Destructure defaults** — `var {a = 10, b = 20} = obj` (dan array equivalent `var [x = 0, y = 100] = arr`) provide fallback when key missing / index out-of-bounds. Defaults apply on `null` only; `0`, `""`, `false` pass through.
+- **Enum in function scope** — `enum Status { OK, ERR }` now allowed inside function body or `begin` block (previously top-level only). Same desugar as top-level (dict + const).
+
+### Notes
+- Nested destructuring (`var {a: {b}} = obj`) and rest element (`var {a, ...rest} = obj`): planned for v1.2.1.
+
+### Regression
+- 21/21 v1.1.x tests PASS (Phase 1/2/3 unchanged) + 10/10 new v1.2.0 tests PASS.
+
 ## [1.1.1] - 2026-10-26
 
 ### Fixed

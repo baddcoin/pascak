@@ -78,7 +78,7 @@ Hanya cek `null`, bukan falsy value.
 
     enum Color { Red, Green, Blue }
 
-Desugar ke `const Color = {Red:0, Green:1, Blue:2}`. Auto-numbered 0..N-1. Top-level only.
+Desugar ke `const Color = {Red:0, Green:1, Blue:2}`. Auto-numbered 0..N-1. Top-level dan function scope (v1.2.0).
 
 Akses: `Color.Red` atau `Color["Red"]`.
 
@@ -88,7 +88,12 @@ Akses: `Color.Red` atau `Color["Red"]`.
     var [x, y]    = [10, 20];
     const {PI}    = {"PI": 3.14159};
 
-Top-level dan statement-scope. Nested/rest/default: belum support (v1.1.1+).
+Top-level dan statement-scope. Default values (v1.2.0):
+
+    var {a = 10, b = 20} = {"a": 1};
+    var [x = 0, y = 100] = [42];
+
+Defaults fire on `null` only (0, "", false pass through). Nested/rest: belum support (v1.2.1+).
 
 ### Syntax Quirks
 
