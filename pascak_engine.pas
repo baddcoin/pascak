@@ -12170,9 +12170,9 @@ var DeclNode,node1, node2, node3: TNode;
      DtRestFlags: TStringList;
      DtLeafNames: TStringList;
      IsRest: Boolean;
-     DtName, SubName: string;
-     SubIsObj: Boolean;
-     SubIdx, DotPos: Integer;
+     DtName, SubName, SubSubName: string;
+     SubIsObj, SubSubIsObj: Boolean;
+     SubIdx, SubSubIdx, DotPos: Integer;
      EnumName: string;
      EnumDict: TDictLiteralNode;
      EnumIdx: Integer;
@@ -12346,18 +12346,59 @@ begin
             repeat
               SubName := FCurrToken.Str;
               Eat(ttId);
-              if SubIsObj then
-                DtNames.Add(DtName + '.' + SubName)
-              else
-                DtNames.Add(DtName + '.' + IntToStr(SubIdx));
-              DtLeafNames.Add(SubName);
-              DtRestFlags.Add('');
-              if (FCurrToken.Typ = ttAssign) or (FCurrToken.Typ = ttEqual) then
+              // v1.2.3: 3rd token after id can be ':' for deeper nested
+              if FCurrToken.Typ = ttColon then
               begin
+                if not SubIsObj then
+                  errMSG.callerror(25,
+                    'nested level-2 hanya di objek {..}',
+                    FCurrToken.Line, FCurrToken.Col);
+                Eat(ttColon);
+                SubSubIsObj := (FCurrToken.Typ = ttLBrace);
+                if not (FCurrToken.Typ in [ttLBrace, ttLBracket]) then
+                  errMSG.callerror(25,
+                    'nested pattern harus {..} atau [..]',
+                    FCurrToken.Line, FCurrToken.Col);
                 Eat(FCurrToken.Typ);
-                DtDefaults.Add(ParseExpression);
+                SubSubIdx := 0;
+                repeat
+                  SubSubName := FCurrToken.Str;
+                  Eat(ttId);
+                  if FCurrToken.Typ = ttColon then
+                    errMSG.callerror(25,
+                      'nested hanya 2 level di v1.2.3',
+                      FCurrToken.Line, FCurrToken.Col);
+                  if SubSubIsObj then
+                    DtNames.Add(DtName + '.' + SubName + '.' + SubSubName)
+                  else
+                    DtNames.Add(DtName + '.' + SubName + '.' + IntToStr(SubSubIdx));
+                  DtLeafNames.Add(SubSubName);
+                  DtRestFlags.Add('');
+                  if (FCurrToken.Typ = ttAssign) or (FCurrToken.Typ = ttEqual) then
+                  begin
+                    Eat(FCurrToken.Typ);
+                    DtDefaults.Add(ParseExpression);
+                  end else
+                    DtDefaults.Add(nil);
+                  Inc(SubSubIdx);
+                  if FCurrToken.Typ = ttComma then Eat(ttComma) else Break;
+                until False;
+                if SubSubIsObj then Eat(ttRBrace) else Eat(ttRBracket);
               end else
-                DtDefaults.Add(nil);
+              begin
+                if SubIsObj then
+                  DtNames.Add(DtName + '.' + SubName)
+                else
+                  DtNames.Add(DtName + '.' + IntToStr(SubIdx));
+                DtLeafNames.Add(SubName);
+                DtRestFlags.Add('');
+                if (FCurrToken.Typ = ttAssign) or (FCurrToken.Typ = ttEqual) then
+                begin
+                  Eat(FCurrToken.Typ);
+                  DtDefaults.Add(ParseExpression);
+                end else
+                  DtDefaults.Add(nil);
+              end;
               Inc(SubIdx);
               if FCurrToken.Typ = ttComma then Eat(ttComma) else Break;
             until False;
@@ -12418,21 +12459,27 @@ begin
           end
           else if IsObjDestr then
           begin
-            DotPos := Pos('.', DtNames[DtIdx]);
-            if DotPos > 0 then
+            // v1.2.3: iterate all '.' in path (supports 2+ level nested)
+            DtAccess := TVariableNode.Create(DtTempName);
+            SubName := DtNames[DtIdx];
+            while SubName <> '' do
             begin
-              DtName := Copy(DtNames[DtIdx], 1, DotPos - 1);
-              SubName := Copy(DtNames[DtIdx], DotPos + 1, Length(DtNames[DtIdx]));
-              DtAccess := TMemberAccessNode.Create(
-                TVariableNode.Create(DtTempName), DtName);
-              if (SubName <> '') and (SubName[1] in ['0'..'9']) then
+              DotPos := Pos('.', SubName);
+              if DotPos > 0 then
+              begin
+                DtName := Copy(SubName, 1, DotPos - 1);
+                SubName := Copy(SubName, DotPos + 1, Length(SubName));
+              end else
+              begin
+                DtName := SubName;
+                SubName := '';
+              end;
+              if (DtName <> '') and (DtName[1] in ['0'..'9']) then
                 DtAccess := TArrayAccessNode.Create(DtAccess,
-                  TLiteralNode.Create(TValue.CreateNum(StrToInt(SubName))))
+                  TLiteralNode.Create(TValue.CreateNum(StrToInt(DtName))))
               else
-                DtAccess := TMemberAccessNode.Create(DtAccess, SubName);
-            end else
-              DtAccess := TMemberAccessNode.Create(
-                TVariableNode.Create(DtTempName), DtNames[DtIdx]);
+                DtAccess := TMemberAccessNode.Create(DtAccess, DtName);
+            end;
           end
           else
             DtAccess := TArrayAccessNode.Create(
@@ -12899,9 +12946,9 @@ var
   DtRestFlags: TStringList;
   DtLeafNames: TStringList;
   IsRest: Boolean;
-  DtName, SubName: string;
-  SubIsObj: Boolean;
-  SubIdx, DotPos: Integer;
+  DtName, SubName, SubSubName: string;
+  SubIsObj, SubSubIsObj: Boolean;
+  SubIdx, SubSubIdx, DotPos: Integer;
 begin
   B := TBlockNode.Create(False); 
   try
@@ -12976,18 +13023,59 @@ begin
               repeat
                 SubName := FCurrToken.Str;
                 Eat(ttId);
-                if SubIsObj then
-                  DtNames.Add(DtName + '.' + SubName)
-                else
-                  DtNames.Add(DtName + '.' + IntToStr(SubIdx));
-                DtLeafNames.Add(SubName);
-                DtRestFlags.Add('');
-                if (FCurrToken.Typ = ttAssign) or (FCurrToken.Typ = ttEqual) then
+                // v1.2.3: 3rd token after id can be ':' for deeper nested
+                if FCurrToken.Typ = ttColon then
                 begin
+                  if not SubIsObj then
+                    errMSG.callerror(25,
+                      'nested level-2 hanya di objek {..}',
+                      FCurrToken.Line, FCurrToken.Col);
+                  Eat(ttColon);
+                  SubSubIsObj := (FCurrToken.Typ = ttLBrace);
+                  if not (FCurrToken.Typ in [ttLBrace, ttLBracket]) then
+                    errMSG.callerror(25,
+                      'nested pattern harus {..} atau [..]',
+                      FCurrToken.Line, FCurrToken.Col);
                   Eat(FCurrToken.Typ);
-                  DtDefaults.Add(ParseExpression);
+                  SubSubIdx := 0;
+                  repeat
+                    SubSubName := FCurrToken.Str;
+                    Eat(ttId);
+                    if FCurrToken.Typ = ttColon then
+                      errMSG.callerror(25,
+                        'nested hanya 2 level di v1.2.3',
+                        FCurrToken.Line, FCurrToken.Col);
+                    if SubSubIsObj then
+                      DtNames.Add(DtName + '.' + SubName + '.' + SubSubName)
+                    else
+                      DtNames.Add(DtName + '.' + SubName + '.' + IntToStr(SubSubIdx));
+                    DtLeafNames.Add(SubSubName);
+                    DtRestFlags.Add('');
+                    if (FCurrToken.Typ = ttAssign) or (FCurrToken.Typ = ttEqual) then
+                    begin
+                      Eat(FCurrToken.Typ);
+                      DtDefaults.Add(ParseExpression);
+                    end else
+                      DtDefaults.Add(nil);
+                    Inc(SubSubIdx);
+                    if FCurrToken.Typ = ttComma then Eat(ttComma) else Break;
+                  until False;
+                  if SubSubIsObj then Eat(ttRBrace) else Eat(ttRBracket);
                 end else
-                  DtDefaults.Add(nil);
+                begin
+                  if SubIsObj then
+                    DtNames.Add(DtName + '.' + SubName)
+                  else
+                    DtNames.Add(DtName + '.' + IntToStr(SubIdx));
+                  DtLeafNames.Add(SubName);
+                  DtRestFlags.Add('');
+                  if (FCurrToken.Typ = ttAssign) or (FCurrToken.Typ = ttEqual) then
+                  begin
+                    Eat(FCurrToken.Typ);
+                    DtDefaults.Add(ParseExpression);
+                  end else
+                    DtDefaults.Add(nil);
+                end;
                 Inc(SubIdx);
                 if FCurrToken.Typ = ttComma then Eat(ttComma) else Break;
               until False;
@@ -13047,21 +13135,27 @@ begin
             end
             else if IsObjDestr then
             begin
-              DotPos := Pos('.', DtNames[DtIdx]);
-              if DotPos > 0 then
+              // v1.2.3: iterate all '.' in path
+              DtAccess := TVariableNode.Create(DtTempName);
+              SubName := DtNames[DtIdx];
+              while SubName <> '' do
               begin
-                DtName := Copy(DtNames[DtIdx], 1, DotPos - 1);
-                SubName := Copy(DtNames[DtIdx], DotPos + 1, Length(DtNames[DtIdx]));
-                DtAccess := TMemberAccessNode.Create(
-                  TVariableNode.Create(DtTempName), DtName);
-                if (SubName <> '') and (SubName[1] in ['0'..'9']) then
+                DotPos := Pos('.', SubName);
+                if DotPos > 0 then
+                begin
+                  DtName := Copy(SubName, 1, DotPos - 1);
+                  SubName := Copy(SubName, DotPos + 1, Length(SubName));
+                end else
+                begin
+                  DtName := SubName;
+                  SubName := '';
+                end;
+                if (DtName <> '') and (DtName[1] in ['0'..'9']) then
                   DtAccess := TArrayAccessNode.Create(DtAccess,
-                    TLiteralNode.Create(TValue.CreateNum(StrToInt(SubName))))
+                    TLiteralNode.Create(TValue.CreateNum(StrToInt(DtName))))
                 else
-                  DtAccess := TMemberAccessNode.Create(DtAccess, SubName);
-              end else
-                DtAccess := TMemberAccessNode.Create(
-                  TVariableNode.Create(DtTempName), DtNames[DtIdx]);
+                  DtAccess := TMemberAccessNode.Create(DtAccess, DtName);
+              end;
             end
             else
               DtAccess := TArrayAccessNode.Create(
