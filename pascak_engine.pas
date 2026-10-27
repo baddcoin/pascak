@@ -10458,6 +10458,73 @@ begin
   end;
 end;
 
+function BuiltIn_Dict_Omit(TargetObj: TValue; const Args: array of TValue): TValue;
+var
+  OmitKeys: TStringList;
+  SourceKeys: TStringArray;
+  NewDict: TDictValue;
+  I, J: Integer;
+  ShouldOmit: Boolean;
+  TmpVal: TValue;
+begin
+  if Length(Args) <> 1 then
+  begin
+    errMSG.callerror(144, 'Dict.omit() butuh 1 argumen (array of keys)', errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateNull);
+  end;
+  if Args[0].DataType <> dtArray then
+  begin
+    errMSG.callerror(144, 'Dict.omit() argumen harus array', errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateNull);
+  end;
+
+  OmitKeys := TStringList.Create;
+  try
+    Args[0].ArrayVal.FLock.Acquire;
+    try
+      for I := 0 to Args[0].ArrayVal.Count - 1 do
+        if Assigned(Args[0].ArrayVal[I]) and (Args[0].ArrayVal[I].DataType = dtString) then
+          OmitKeys.Add(Args[0].ArrayVal[I].StrVal);
+    finally
+      Args[0].ArrayVal.FLock.Release;
+    end;
+
+    NewDict := TDictValue.Create;
+    try
+      TargetObj.DictVal.FLock.Acquire;
+      try
+        SourceKeys := TargetObj.DictVal.GetKeys;
+      finally
+        TargetObj.DictVal.FLock.Release;
+      end;
+
+      for I := 0 to High(SourceKeys) do
+      begin
+        ShouldOmit := False;
+        for J := 0 to OmitKeys.Count - 1 do
+          if OmitKeys[J] = SourceKeys[I] then
+          begin
+            ShouldOmit := True;
+            Break;
+          end;
+        if not ShouldOmit then
+        begin
+          TmpVal := TargetObj.DictVal.GetValue(SourceKeys[I]);
+          if Assigned(TmpVal) then
+            NewDict.SetValue(SourceKeys[I], TmpVal.Clone);
+        end;
+      end;
+
+      Result := TValue.CreateDict(NewDict);
+    except
+      NewDict.Free;
+      raise;
+    end;
+  finally
+    OmitKeys.Free;
+  end;
+end;
+
 function BuiltIn_Dict_Clear(TargetObj: TValue; const Args: array of TValue): TValue;
 begin
   if Length(Args) <> 0 then 
@@ -10597,6 +10664,7 @@ begin
   DictMethodsRegistry.Add('hasKey', @BuiltIn_Dict_HasKey);
   DictMethodsRegistry.Add('remove', @BuiltIn_Dict_Remove);
   DictMethodsRegistry.Add('update', @BuiltIn_Dict_Update);
+  DictMethodsRegistry.Add('omit', @BuiltIn_Dict_Omit);
 
 end;
 //shortcut init end
@@ -12273,6 +12341,9 @@ var DeclNode,node1, node2, node3: TNode;
      DtName, SubName, SubSubName: string;
      SubIsObj, SubSubIsObj: Boolean;
      SubIdx, SubSubIdx, DotPos: Integer;
+     DtOmitCall: TMethodCallNode;
+     DtKeysArr: TArrayLiteralNode;
+     DtJ: Integer;
      EnumName: string;
      EnumDict: TDictLiteralNode;
      EnumIdx: Integer;
@@ -12438,13 +12509,27 @@ begin
           if DtRestFlags[DtIdx] = 'R' then
           begin
             if IsObjDestr then
-              errMSG.callerror(25,
-                'object rest belum didukung di v1.2.4',
-                StartLine, StartCol);
-            DtAccess := TArraySliceNode.Create(
-              TVariableNode.Create(DtTempName),
-              TLiteralNode.Create(TValue.CreateNum(StrToInt(DtNames[DtIdx]))),
-              nil, nil);
+            begin
+              // v1.2.5: object rest → __tmp.omit([keys])
+              DtKeysArr := TArrayLiteralNode.Create;
+              for DtJ := 0 to DtIdx - 1 do
+              begin
+                SubName := DtNames[DtJ];
+                DotPos := Pos('.', SubName);
+                if DotPos > 0 then
+                  SubName := Copy(SubName, 1, DotPos - 1);
+                DtKeysArr.AddElement(TLiteralNode.Create(TValue.CreateStr(SubName)));
+              end;
+              DtOmitCall := TMethodCallNode.Create(
+                TVariableNode.Create(DtTempName), 'omit');
+              DtOmitCall.Args.Add(DtKeysArr);
+              DtAccess := DtOmitCall;
+            end
+            else
+              DtAccess := TArraySliceNode.Create(
+                TVariableNode.Create(DtTempName),
+                TLiteralNode.Create(TValue.CreateNum(StrToInt(DtNames[DtIdx]))),
+                nil, nil);
           end
           else
           begin
@@ -12934,6 +13019,9 @@ var
   DtName, SubName, SubSubName: string;
   SubIsObj, SubSubIsObj: Boolean;
   SubIdx, SubSubIdx, DotPos: Integer;
+  DtOmitCall: TMethodCallNode;
+  DtKeysArr: TArrayLiteralNode;
+  DtJ: Integer;
 begin
   B := TBlockNode.Create(False); 
   try
@@ -12999,13 +13087,27 @@ begin
             if DtRestFlags[DtIdx] = 'R' then
             begin
               if IsObjDestr then
-                errMSG.callerror(25,
-                  'object rest belum didukung di v1.2.4',
-                  StartLine, 1);
-              DtAccess := TArraySliceNode.Create(
-                TVariableNode.Create(DtTempName),
-                TLiteralNode.Create(TValue.CreateNum(StrToInt(DtNames[DtIdx]))),
-                nil, nil);
+              begin
+                // v1.2.5: object rest → __tmp.omit([keys])
+                DtKeysArr := TArrayLiteralNode.Create;
+                for DtJ := 0 to DtIdx - 1 do
+                begin
+                  SubName := DtNames[DtJ];
+                  DotPos := Pos('.', SubName);
+                  if DotPos > 0 then
+                    SubName := Copy(SubName, 1, DotPos - 1);
+                  DtKeysArr.AddElement(TLiteralNode.Create(TValue.CreateStr(SubName)));
+                end;
+                DtOmitCall := TMethodCallNode.Create(
+                  TVariableNode.Create(DtTempName), 'omit');
+                DtOmitCall.Args.Add(DtKeysArr);
+                DtAccess := DtOmitCall;
+              end
+              else
+                DtAccess := TArraySliceNode.Create(
+                  TVariableNode.Create(DtTempName),
+                  TLiteralNode.Create(TValue.CreateNum(StrToInt(DtNames[DtIdx]))),
+                  nil, nil);
             end
             else
             begin
