@@ -1619,6 +1619,8 @@ type
     function ParseStructDecl(IsRecord: Boolean): TClassDeclNode;
     function ParseFStringContent(const AStr: string): TNode; // <-- TAMBAHAN BARU
     function ParseCase: TNode;
+    procedure ParsePattern(const Prefix: string; IsObj: Boolean;
+      Names, LeafNames, RestFlags: TStringList; Defaults: TList);
     function OptimizeBinaryOp(L: TNode; Op: TOpKind; R: TNode): TNode;
     function OptimizeUnaryOp(AOp: string; AExpr: TNode): TNode;
 
@@ -12152,6 +12154,104 @@ begin
   end;
 end;
 
+procedure TParser.ParsePattern(const Prefix: string; IsObj: Boolean;
+  Names, LeafNames, RestFlags: TStringList; Defaults: TList);
+var
+  EntryIdx: Integer;
+  IsRest, ChildIsObj: Boolean;
+  EntryName, EntryPrefix: string;
+begin
+  EntryIdx := 0;
+  repeat
+    IsRest := (FCurrToken.Typ = ttSpread);
+    if IsRest then Eat(ttSpread);
+
+    if FCurrToken.Typ in [ttLBrace, ttLBracket] then
+    begin
+      if IsRest then
+        errMSG.callerror(25, 'rest element tidak bisa nested',
+          FCurrToken.Line, FCurrToken.Col);
+      ChildIsObj := (FCurrToken.Typ = ttLBrace);
+      Eat(FCurrToken.Typ);
+      if Prefix <> '' then
+        EntryPrefix := Prefix + '.' + IntToStr(EntryIdx)
+      else
+        EntryPrefix := IntToStr(EntryIdx);
+      ParsePattern(EntryPrefix, ChildIsObj, Names, LeafNames, RestFlags, Defaults);
+      if ChildIsObj then Eat(ttRBrace) else Eat(ttRBracket);
+    end
+    else
+    begin
+      EntryName := FCurrToken.Str;
+      Eat(ttId);
+      if FCurrToken.Typ = ttColon then
+      begin
+        if IsRest then
+          errMSG.callerror(25, 'rest element tidak bisa nested',
+            FCurrToken.Line, FCurrToken.Col);
+        if not IsObj then
+          errMSG.callerror(25, 'nested dengan nama hanya di objek {..}',
+            FCurrToken.Line, FCurrToken.Col);
+        Eat(ttColon);
+        if not (FCurrToken.Typ in [ttLBrace, ttLBracket]) then
+          errMSG.callerror(25, 'nested pattern harus {..} atau [..]',
+            FCurrToken.Line, FCurrToken.Col);
+        ChildIsObj := (FCurrToken.Typ = ttLBrace);
+        Eat(FCurrToken.Typ);
+        if Prefix <> '' then
+          EntryPrefix := Prefix + '.' + EntryName
+        else
+          EntryPrefix := EntryName;
+        ParsePattern(EntryPrefix, ChildIsObj, Names, LeafNames, RestFlags, Defaults);
+        if ChildIsObj then Eat(ttRBrace) else Eat(ttRBracket);
+      end
+      else
+      begin
+        if IsObj then
+        begin
+          if Prefix <> '' then
+            EntryPrefix := Prefix + '.' + EntryName
+          else
+            EntryPrefix := EntryName;
+        end else
+        begin
+          if Prefix <> '' then
+            EntryPrefix := Prefix + '.' + IntToStr(EntryIdx)
+          else
+            EntryPrefix := IntToStr(EntryIdx);
+        end;
+        Names.Add(EntryPrefix);
+        LeafNames.Add(EntryName);
+        if IsRest then
+        begin
+          if Prefix <> '' then
+            errMSG.callerror(25, 'rest element tidak bisa nested',
+              FCurrToken.Line, FCurrToken.Col);
+          if (FCurrToken.Typ = ttAssign) or (FCurrToken.Typ = ttEqual) then
+            errMSG.callerror(25, 'rest element: default tidak diizinkan',
+              FCurrToken.Line, FCurrToken.Col);
+          Defaults.Add(nil);
+          RestFlags.Add('R');
+          if FCurrToken.Typ = ttComma then
+            errMSG.callerror(25, 'rest element harus di posisi terakhir',
+              FCurrToken.Line, FCurrToken.Col);
+          Break;
+        end;
+        RestFlags.Add('');
+        if (FCurrToken.Typ = ttAssign) or (FCurrToken.Typ = ttEqual) then
+        begin
+          Eat(FCurrToken.Typ);
+          Defaults.Add(ParseExpression);
+        end else
+          Defaults.Add(nil);
+      end;
+    end;
+
+    Inc(EntryIdx);
+    if FCurrToken.Typ = ttComma then Eat(ttComma) else Break;
+  until False;
+end;
+
 function TParser.ParseStatement: TNode;
 var DeclNode,node1, node2, node3: TNode;
     Obj, ObjType, Mem, OpStr : string;     
@@ -12319,118 +12419,7 @@ begin
         DtDefaults := TList.Create;
         DtRestFlags := TStringList.Create;
         DtLeafNames := TStringList.Create;
-        repeat
-          IsRest := (FCurrToken.Typ = ttSpread);
-          if IsRest then Eat(ttSpread);
-          DtName := FCurrToken.Str;
-          Eat(ttId);
-          // v1.2.2: nested pattern {a: {b,c}} or {a: [x,y]}
-          if FCurrToken.Typ = ttColon then
-          begin
-            if not IsObjDestr then
-              errMSG.callerror(25,
-                'nested hanya di objek {..}, bukan array',
-                FCurrToken.Line, FCurrToken.Col);
-            if IsRest then
-              errMSG.callerror(25,
-                'rest element tidak bisa nested',
-                FCurrToken.Line, FCurrToken.Col);
-            Eat(ttColon);
-            SubIsObj := (FCurrToken.Typ = ttLBrace);
-            if not (FCurrToken.Typ in [ttLBrace, ttLBracket]) then
-              errMSG.callerror(25,
-                'nested pattern harus {..} atau [..]',
-                FCurrToken.Line, FCurrToken.Col);
-            Eat(FCurrToken.Typ);
-            SubIdx := 0;
-            repeat
-              SubName := FCurrToken.Str;
-              Eat(ttId);
-              // v1.2.3: 3rd token after id can be ':' for deeper nested
-              if FCurrToken.Typ = ttColon then
-              begin
-                if not SubIsObj then
-                  errMSG.callerror(25,
-                    'nested level-2 hanya di objek {..}',
-                    FCurrToken.Line, FCurrToken.Col);
-                Eat(ttColon);
-                SubSubIsObj := (FCurrToken.Typ = ttLBrace);
-                if not (FCurrToken.Typ in [ttLBrace, ttLBracket]) then
-                  errMSG.callerror(25,
-                    'nested pattern harus {..} atau [..]',
-                    FCurrToken.Line, FCurrToken.Col);
-                Eat(FCurrToken.Typ);
-                SubSubIdx := 0;
-                repeat
-                  SubSubName := FCurrToken.Str;
-                  Eat(ttId);
-                  if FCurrToken.Typ = ttColon then
-                    errMSG.callerror(25,
-                      'nested hanya 2 level di v1.2.3',
-                      FCurrToken.Line, FCurrToken.Col);
-                  if SubSubIsObj then
-                    DtNames.Add(DtName + '.' + SubName + '.' + SubSubName)
-                  else
-                    DtNames.Add(DtName + '.' + SubName + '.' + IntToStr(SubSubIdx));
-                  DtLeafNames.Add(SubSubName);
-                  DtRestFlags.Add('');
-                  if (FCurrToken.Typ = ttAssign) or (FCurrToken.Typ = ttEqual) then
-                  begin
-                    Eat(FCurrToken.Typ);
-                    DtDefaults.Add(ParseExpression);
-                  end else
-                    DtDefaults.Add(nil);
-                  Inc(SubSubIdx);
-                  if FCurrToken.Typ = ttComma then Eat(ttComma) else Break;
-                until False;
-                if SubSubIsObj then Eat(ttRBrace) else Eat(ttRBracket);
-              end else
-              begin
-                if SubIsObj then
-                  DtNames.Add(DtName + '.' + SubName)
-                else
-                  DtNames.Add(DtName + '.' + IntToStr(SubIdx));
-                DtLeafNames.Add(SubName);
-                DtRestFlags.Add('');
-                if (FCurrToken.Typ = ttAssign) or (FCurrToken.Typ = ttEqual) then
-                begin
-                  Eat(FCurrToken.Typ);
-                  DtDefaults.Add(ParseExpression);
-                end else
-                  DtDefaults.Add(nil);
-              end;
-              Inc(SubIdx);
-              if FCurrToken.Typ = ttComma then Eat(ttComma) else Break;
-            until False;
-            if SubIsObj then Eat(ttRBrace) else Eat(ttRBracket);
-          end else
-          begin
-            DtNames.Add(DtName);
-            DtLeafNames.Add(DtName);
-            if IsRest then
-            begin
-              if (FCurrToken.Typ = ttAssign) or (FCurrToken.Typ = ttEqual) then
-                errMSG.callerror(25,
-                  'rest element: default tidak diizinkan',
-                  FCurrToken.Line, FCurrToken.Col);
-              DtDefaults.Add(nil);
-              DtRestFlags.Add('R');
-              if FCurrToken.Typ = ttComma then
-                errMSG.callerror(25,
-                  'rest element harus di posisi terakhir',
-                  FCurrToken.Line, FCurrToken.Col);
-              Break;
-            end;
-            DtRestFlags.Add('');
-            if (FCurrToken.Typ = ttAssign) or (FCurrToken.Typ = ttEqual) then
-            begin
-              Eat(FCurrToken.Typ);
-              DtDefaults.Add(ParseExpression);
-            end else
-              DtDefaults.Add(nil);
-          end;
-          if FCurrToken.Typ = ttComma then Eat(ttComma) else Break;
-        until False;
+        ParsePattern('', IsObjDestr, DtNames, DtLeafNames, DtRestFlags, DtDefaults);
         if IsObjDestr then Eat(ttRBrace) else Eat(ttRBracket);
         if (FCurrToken.Typ = ttAssign) or (FCurrToken.Typ = ttEqual) then
           Eat(FCurrToken.Typ)
@@ -12450,16 +12439,16 @@ begin
           begin
             if IsObjDestr then
               errMSG.callerror(25,
-                'object rest belum didukung di v1.2.1',
+                'object rest belum didukung di v1.2.4',
                 StartLine, StartCol);
             DtAccess := TArraySliceNode.Create(
               TVariableNode.Create(DtTempName),
-              TLiteralNode.Create(TValue.CreateNum(DtIdx)),
+              TLiteralNode.Create(TValue.CreateNum(StrToInt(DtNames[DtIdx]))),
               nil, nil);
           end
-          else if IsObjDestr then
+          else
           begin
-            // v1.2.3: iterate all '.' in path (supports 2+ level nested)
+            // v1.2.4: iterate all '.' in path (obj and array unified)
             DtAccess := TVariableNode.Create(DtTempName);
             SubName := DtNames[DtIdx];
             while SubName <> '' do
@@ -12480,11 +12469,7 @@ begin
               else
                 DtAccess := TMemberAccessNode.Create(DtAccess, DtName);
             end;
-          end
-          else
-            DtAccess := TArrayAccessNode.Create(
-              TVariableNode.Create(DtTempName),
-              TLiteralNode.Create(TValue.CreateNum(DtIdx)));
+          end;
           if DtDefaults[DtIdx] <> nil then
             DtAccess := TBinaryOpNode.Create(DtAccess, opNullCoalesce, TNode(DtDefaults[DtIdx]));
           DeclNode := TVarDeclNode.Create(DtLeafNames[DtIdx], DtAccess, IsConst);
@@ -12996,118 +12981,7 @@ begin
           DtDefaults := TList.Create;
           DtRestFlags := TStringList.Create;
           DtLeafNames := TStringList.Create;
-          repeat
-            IsRest := (FCurrToken.Typ = ttSpread);
-            if IsRest then Eat(ttSpread);
-            DtName := FCurrToken.Str;
-            Eat(ttId);
-            // v1.2.2: nested pattern {a: {b,c}} or {a: [x,y]}
-            if FCurrToken.Typ = ttColon then
-            begin
-              if not IsObjDestr then
-                errMSG.callerror(25,
-                  'nested hanya di objek {..}, bukan array',
-                  FCurrToken.Line, FCurrToken.Col);
-              if IsRest then
-                errMSG.callerror(25,
-                  'rest element tidak bisa nested',
-                  FCurrToken.Line, FCurrToken.Col);
-              Eat(ttColon);
-              SubIsObj := (FCurrToken.Typ = ttLBrace);
-              if not (FCurrToken.Typ in [ttLBrace, ttLBracket]) then
-                errMSG.callerror(25,
-                  'nested pattern harus {..} atau [..]',
-                  FCurrToken.Line, FCurrToken.Col);
-              Eat(FCurrToken.Typ);
-              SubIdx := 0;
-              repeat
-                SubName := FCurrToken.Str;
-                Eat(ttId);
-                // v1.2.3: 3rd token after id can be ':' for deeper nested
-                if FCurrToken.Typ = ttColon then
-                begin
-                  if not SubIsObj then
-                    errMSG.callerror(25,
-                      'nested level-2 hanya di objek {..}',
-                      FCurrToken.Line, FCurrToken.Col);
-                  Eat(ttColon);
-                  SubSubIsObj := (FCurrToken.Typ = ttLBrace);
-                  if not (FCurrToken.Typ in [ttLBrace, ttLBracket]) then
-                    errMSG.callerror(25,
-                      'nested pattern harus {..} atau [..]',
-                      FCurrToken.Line, FCurrToken.Col);
-                  Eat(FCurrToken.Typ);
-                  SubSubIdx := 0;
-                  repeat
-                    SubSubName := FCurrToken.Str;
-                    Eat(ttId);
-                    if FCurrToken.Typ = ttColon then
-                      errMSG.callerror(25,
-                        'nested hanya 2 level di v1.2.3',
-                        FCurrToken.Line, FCurrToken.Col);
-                    if SubSubIsObj then
-                      DtNames.Add(DtName + '.' + SubName + '.' + SubSubName)
-                    else
-                      DtNames.Add(DtName + '.' + SubName + '.' + IntToStr(SubSubIdx));
-                    DtLeafNames.Add(SubSubName);
-                    DtRestFlags.Add('');
-                    if (FCurrToken.Typ = ttAssign) or (FCurrToken.Typ = ttEqual) then
-                    begin
-                      Eat(FCurrToken.Typ);
-                      DtDefaults.Add(ParseExpression);
-                    end else
-                      DtDefaults.Add(nil);
-                    Inc(SubSubIdx);
-                    if FCurrToken.Typ = ttComma then Eat(ttComma) else Break;
-                  until False;
-                  if SubSubIsObj then Eat(ttRBrace) else Eat(ttRBracket);
-                end else
-                begin
-                  if SubIsObj then
-                    DtNames.Add(DtName + '.' + SubName)
-                  else
-                    DtNames.Add(DtName + '.' + IntToStr(SubIdx));
-                  DtLeafNames.Add(SubName);
-                  DtRestFlags.Add('');
-                  if (FCurrToken.Typ = ttAssign) or (FCurrToken.Typ = ttEqual) then
-                  begin
-                    Eat(FCurrToken.Typ);
-                    DtDefaults.Add(ParseExpression);
-                  end else
-                    DtDefaults.Add(nil);
-                end;
-                Inc(SubIdx);
-                if FCurrToken.Typ = ttComma then Eat(ttComma) else Break;
-              until False;
-              if SubIsObj then Eat(ttRBrace) else Eat(ttRBracket);
-            end else
-            begin
-              DtNames.Add(DtName);
-              DtLeafNames.Add(DtName);
-              if IsRest then
-              begin
-                if (FCurrToken.Typ = ttAssign) or (FCurrToken.Typ = ttEqual) then
-                  errMSG.callerror(25,
-                    'rest element: default tidak diizinkan',
-                    FCurrToken.Line, FCurrToken.Col);
-                DtDefaults.Add(nil);
-                DtRestFlags.Add('R');
-                if FCurrToken.Typ = ttComma then
-                  errMSG.callerror(25,
-                    'rest element harus di posisi terakhir',
-                    FCurrToken.Line, FCurrToken.Col);
-                Break;
-              end;
-              DtRestFlags.Add('');
-              if (FCurrToken.Typ = ttAssign) or (FCurrToken.Typ = ttEqual) then
-              begin
-                Eat(FCurrToken.Typ);
-                DtDefaults.Add(ParseExpression);
-              end else
-                DtDefaults.Add(nil);
-            end;
-            if FCurrToken.Typ = ttComma then Eat(ttComma) else Break;
-          until False;
+          ParsePattern('', IsObjDestr, DtNames, DtLeafNames, DtRestFlags, DtDefaults);
           if IsObjDestr then Eat(ttRBrace) else Eat(ttRBracket);
           if (FCurrToken.Typ = ttAssign) or (FCurrToken.Typ = ttEqual) then
             Eat(FCurrToken.Typ)
@@ -13126,16 +13000,16 @@ begin
             begin
               if IsObjDestr then
                 errMSG.callerror(25,
-                  'object rest belum didukung di v1.2.1',
+                  'object rest belum didukung di v1.2.4',
                   StartLine, 1);
               DtAccess := TArraySliceNode.Create(
                 TVariableNode.Create(DtTempName),
-                TLiteralNode.Create(TValue.CreateNum(DtIdx)),
+                TLiteralNode.Create(TValue.CreateNum(StrToInt(DtNames[DtIdx]))),
                 nil, nil);
             end
-            else if IsObjDestr then
+            else
             begin
-              // v1.2.3: iterate all '.' in path
+              // v1.2.4: iterate all '.' in path (obj and array unified)
               DtAccess := TVariableNode.Create(DtTempName);
               SubName := DtNames[DtIdx];
               while SubName <> '' do
@@ -13156,11 +13030,7 @@ begin
                 else
                   DtAccess := TMemberAccessNode.Create(DtAccess, DtName);
               end;
-            end
-            else
-              DtAccess := TArrayAccessNode.Create(
-                TVariableNode.Create(DtTempName),
-                TLiteralNode.Create(TValue.CreateNum(DtIdx)));
+            end;
             if DtDefaults[DtIdx] <> nil then
               DtAccess := TBinaryOpNode.Create(DtAccess, opNullCoalesce, TNode(DtDefaults[DtIdx]));
             DeclNode := TVarDeclNode.Create(DtLeafNames[DtIdx], DtAccess, IsConst);
