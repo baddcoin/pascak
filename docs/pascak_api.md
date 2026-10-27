@@ -108,11 +108,17 @@ Nested destructuring (obj-root, v1.2.2):
 
 Supports mixed flat+nested, multi-nested, nested with default.
 Restrictions: obj-root only, 1-level, no rest inside nested.
-2-level nested (v1.2.3):
+Arbitrary-depth + array-root nested (v1.2.4):
 
-    var {p: {q: {r, s}}} = {"p": {"q": {"r": 10, "s": 20}}};
+    var {a: {b: {c: {d}}}} = obj;      // unlimited obj depth
+    var [x, {u, v}, y] = arr;           // array-root nested
+    var [p, [q, r], s] = arr;           // array-in-array
+    var [m, {n}, ...rest] = arr;        // nested + rest combined
 
-Max 2 level. Array-root nested / object rest / rest-inside-nested / 3+ level: deferred to v1.2.4.
+Recursive ParsePattern helper; flat path ('a.b.c'). Emit iterates
+dot-split and chains member/array access.
+
+Object rest (var {a, ...rest} = obj): v1.2.5 (needs dict.omit()).
 
 ### Syntax Quirks
 

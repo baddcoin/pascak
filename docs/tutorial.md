@@ -4742,6 +4742,51 @@ Nested lebih dalam (2 level) untuk config pattern:
 ('p.q.r'), emit iterate split-by-dot dan chain member/array
 access. Zero overhead runtime.
 
+### 31.10 — Arbitrary Depth + Array-Root Nested (v1.2.4)
+
+Sejak v1.2.4, nested destructuring **tidak dibatasi 2 level** dan **root boleh array**.
+
+**Unlimited depth (obj-root)**:
+
+    var {m: {n: {o: {u, v}}}} = {"m": {"n": {"o": {"u": 100, "v": 200}}}};
+    println(u);    // 100
+    println(v);    // 200
+
+**Array-root nested**:
+
+    var [a, {u, v}, c] = [10, {"u": 20, "v": 30}, 40];
+    println(a);    // 10
+    println(u);    // 20
+    println(v);    // 30
+    println(c);    // 40
+
+**Array nested dalam array**:
+
+    var [p, [q, r], s] = [1, [2, 3], 4];
+    println(q);    // 2
+    println(r);    // 3
+
+**Kombinasi array nested + rest**:
+
+    var [m, {n}, ...rest] = [100, {"n": 200}, 300, 400];
+    println(m);     // 100
+    println(n);     // 200
+    println(rest);  // [300, 400]
+
+**Array + 2-level obj nested**:
+
+    var [x, {cfg: {h, pt}}] = [1, {"cfg": {"h": "host", "pt": 8080}}];
+    println(h);     // "host"
+    println(pt);    // 8080
+
+**Implementasi**: recursive `ParsePattern` menyimpan flat path
+('a.b.c.d') — unlimited depth. Emit iterate path split-by-dot,
+chain access. Array index di path pakai format numeric.
+
+**Batasan (v1.2.4)**:
+- Object rest (var {a, ...rest} = obj): belum support (v1.2.5)
+- Rest di dalam nested: belum support
+
 ## Bonus — HTTP/2 Client
 
 Pascak juga mendukung HTTP/2 client via ALPN negotiation (RFC 7301).

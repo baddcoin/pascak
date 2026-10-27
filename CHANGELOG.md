@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.2.4] - 2026-10-27
+
+### Added
+- **Arbitrary-depth nested destructuring** — `var {a: {b: {c: {d}}}} = obj` and beyond. Parser refactored to recursive `ParsePattern`.
+- **Array-root nested** — `var [a, {u, v}, c] = arr`, `var [p, [q, r], s] = arr`, combined with rest `var [a, {b}, ...rest] = arr`.
+
+### Refactored
+- `TParser.ParsePattern` recursive helper replaces inline 2-level logic.
+- Emit path iterator uses `StrToInt(path)` for array index; backward-compat.
+
+### Notes
+- Object rest (`var {a, ...rest} = obj`) still deferred (needs `dict.omit()`): v1.2.5.
+
+### Regression
+- 85/85 tests PASS (29 new v1.2.4 + 56 prior).
+
 ## [1.2.3] - 2026-10-26
 
 ### Added
