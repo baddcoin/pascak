@@ -4827,6 +4827,50 @@ Bisa juga dipakai manual (bukan hanya destructuring):
 - Rest di dalam nested (`{a: {b, ...r}}`): belum support (v1.2.6)
 - Default tidak berlaku untuk rest
 
+### 31.12 — Rest di Nested (v1.2.6)
+
+Object rest bisa dipakai di dalam nested pattern:
+
+    var {cfg: {host, ...rest}} =
+      {"cfg": {"host": "h", "port": 80, "user": "u"}};
+    println(host);          // "h"
+    println(rest.port);     // 80
+    println(rest.host);     // null (key 'host' sudah di-omit di level ini)
+
+**2+ level nested rest**:
+
+    var {a: {b: {x, ...r}}} = {"a": {"b": {"x": 1, "y": 2, "z": 3}}};
+    println(x);       // 1
+    println(r.y);     // 2
+    println(r.z);     // 3
+
+**Array + nested + rest**:
+
+    var [first, {u, ...v}, last] = [10, {"u": 20, "w": 30}, 40];
+    println(first);   // 10
+    println(u);       // 20
+    println(v.w);     // 30
+    println(last);    // 40
+
+**Array-nested di dalam obj + rest**:
+
+    var {cfg: {items, ...others}} = {"cfg": {"items": [1, 2], "keep": true}};
+    println(items);        // [1, 2]
+    println(others.keep);  // true
+
+**Semantik penting**: omit `rest` di nested hanya exclude key di level itu.
+
+    var {a: {x, ...r}, b} = {"a": {"x": 1, "y": 2}, "b": 3};
+    // r = {"y": 2} — r tidak punya key 'x', tapi juga tidak menyentuh 'b'
+    // b = 3
+
+**Implementasi**: path-aware emit — rest path di-split, target chain
+dibangun bertingkat, numeric leaf → TArraySliceNode, string leaf →
+omit() call dengan sibling names dari prefix path yang sama.
+
+**Batasan (v1.2.6)**:
+- Rest element harus di posisi terakhir dari pattern level-nya
+
 ## Bonus — HTTP/2 Client
 
 Pascak juga mendukung HTTP/2 client via ALPN negotiation (RFC 7301).

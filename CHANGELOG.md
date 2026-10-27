@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.2.6] - 2026-10-27
+
+### Added
+- **Rest in nested destructuring** — `var {cfg: {host, ...rest}} = obj`, 2+ level `var {a: {b: {x, ...r}}} = obj`, array+obj mixed `var [first, {u, ...v}, last] = arr`.
+- Emit path-aware: numeric rest leaf → slice, string rest leaf → omit siblings at that nesting level only.
+
+### Refactored
+- Unified rest emit logic (root and nested share one code path).
+- Backward compatible: root-level rest identical to v1.2.5 behavior.
+
+### Regression
+- 121/121 tests PASS (18 new v1.2.6 + 103 prior).
+
 ## [1.2.5] - 2026-10-27
 
 ### Added
