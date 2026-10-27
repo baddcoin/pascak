@@ -29085,7 +29085,7 @@ begin
 end;
 
 // Main-thread: enqueue task ke worker pool
-function Native_HTTP_Get2(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+function Native_Http_Get2Impl(Args: TObjectList; CallEnv: TSymbolTable): TValue;
 var
   URL, Host, Path, BodyStr, Rest, PoolKey: string;
   ExtraHeaders: THPACKHeaderArray;
@@ -29103,7 +29103,9 @@ var
   IsCreator: Boolean;
   SlotErrMsg: string;
   WaitStart: QWord;
+  TLSNoVerify: Boolean;
 begin
+  TLSNoVerify := GetEnvironmentVariable('PASCAK_TLS_NO_VERIFY') = '1';
   if (Args.Count < 1) or (Args.Count > 3) or
      (TValue(Args[0]).DataType <> dtString) then
   begin
@@ -29195,7 +29197,7 @@ begin
         if not TLSInit then
           errMSG.callerror(144, 'http.get2: TLS tidak tersedia',
                            errMSG.xrow, errMSG.xcol);
-        Ctx := GetSharedTLSContext(True);
+        Ctx := GetSharedTLSContext(not TLSNoVerify);
         if not TLSConnectALPN(Ctx, Sock, Host, ['h2'], TLSConn, Negotiated) then
           errMSG.callerror(144, 'http.get2: TLS handshake gagal - ' + TLSConn.LastError,
                            errMSG.xrow, errMSG.xcol);
@@ -29267,7 +29269,7 @@ begin
       if not TLSInit then
         errMSG.callerror(144, 'http.get2: TLS tidak tersedia',
                          errMSG.xrow, errMSG.xcol);
-      Ctx := GetSharedTLSContext(True);
+      Ctx := GetSharedTLSContext(not TLSNoVerify);
       if not TLSConnectALPN(Ctx, Sock, Host, ['h2'], TLSConn, Negotiated) then
         errMSG.callerror(144, 'http.get2: TLS handshake gagal - ' + TLSConn.LastError,
                          errMSG.xrow, errMSG.xcol);
@@ -29332,6 +29334,36 @@ begin
     end;
   end;
 end;
+
+{ v1.2.9: retry wrapper — up to 3 attempts on retryable H2 errors }
+function Native_HTTP_Get2(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  Attempt, MaxAttempts: Integer;
+begin
+  MaxAttempts := 3;
+  Result := nil;
+  for Attempt := 1 to MaxAttempts do
+  begin
+    try
+      Result := Native_Http_Get2Impl(Args, CallEnv);
+      Exit;
+    except
+      on E: Exception do
+      begin
+        if ((Pos('(retryable,', E.Message) > 0) or
+             (Pos('connection closed', E.Message) > 0) or
+             (Pos('GOAWAY received', E.Message) > 0)) and
+           (Attempt < MaxAttempts) then
+        begin
+          Sleep(100 shl (Attempt - 1));  // 100ms, 200ms
+          Continue;
+        end;
+        raise;
+      end;
+    end;
+  end;
+end;
+
 
 
 { H2 Session 3: worker-safe wrapper — unpacks array, calls Native_HTTP_Get2 }
