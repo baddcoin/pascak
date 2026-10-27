@@ -4871,6 +4871,47 @@ omit() call dengan sibling names dari prefix path yang sama.
 **Batasan (v1.2.6)**:
 - Rest element harus di posisi terakhir dari pattern level-nya
 
+### 31.13 — Optional Method Call ?.() (v1.2.7)
+
+Method call via `?.()` short-circuit kalau target null:
+
+    var obj := {"x": 1, "y": 2};
+    println(obj?.hasKey("x"));      // true
+    println(obj?.hasKey("zz"));     // false
+
+    var n := null;
+    println(n?.hasKey("x"));        // null (no crash)
+
+**Dengan argumen**:
+
+    var d := {"items": [1, 2, 3]};
+    println(d?.keys());             // ["items"]
+    println(n?.keys());             // null
+
+**Short-circuit args** (argumen TIDAK dievaluasi kalau target null):
+
+    var n := null;
+    var r := n?.hasKey(n.undefined());   // null — n.undefined() tidak dipanggil
+    // Kalau tidak short-circuit -> crash "call null as function"
+
+Ini penting untuk performance (skip expensive arg) dan safety
+(arg bisa side-effect/crash).
+
+**Chain property + method**:
+
+    var cfg := {"db": {"ping": null}};
+    println(cfg?.db?.hasKey("ping"));    // true
+    println(cfg?.missing?.hasKey("x"));  // null
+
+**Method call tanpa ?. tetap jalan**:
+
+    var d := {"x": 1};
+    println(d.hasKey("x"));              // true (crash kalau null)
+
+**Batasan (v1.2.7)**:
+- Hanya method call (bukan constructor `new X?.()`)
+- Single-call per `?.` (tidak support `obj?.a()?.b()` chained calls)
+
 ## Bonus — HTTP/2 Client
 
 Pascak juga mendukung HTTP/2 client via ALPN negotiation (RFC 7301).

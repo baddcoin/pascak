@@ -61,7 +61,14 @@ Dari lowest ke highest:
     var x := obj?.name;              // null-safe access
     var y := cfg?.db?.host;          // deep chain (short-circuit)
 
-Tidak support: `obj?.method()` dan `obj?.prop := value`.
+Optional method call (v1.2.7):
+
+    obj?.method()                    // null target -> null, no crash
+    obj?.method(a, b)                // args not evaluated on null
+
+    var r := n?.hasKey(n.expensive());   // null if n=null, n.expensive() NOT called
+
+Tidak support: `obj?.prop := value` (assignment tidak null-safe).
 
 ### Null-Coalescing `??`
 

@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.2.7] - 2026-10-27
+
+### Added
+- **Optional method call** — `obj?.method()` and `obj?.method(args)` short-circuit on null target. Args not evaluated on null (short-circuit). Chains with property access: `obj?.prop?.method()`.
+
+### Implementation
+- `TMethodCallNode` extended with `IsOptional: Boolean`.
+- Compiler emits `opcJumpIfNull` before method call when optional.
+- VM unchanged — `opcJumpIfNull` already peek-only since v1.1.0.
+
+### Regression
+- 130/130 tests PASS (9 new v1.2.7 + 121 prior).
+
 ## [1.2.6] - 2026-10-27
 
 ### Added
