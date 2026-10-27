@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.2.9] - 2026-10-27
+
+### Added
+- **Auto-retry** on retryable H2 errors — `http.get2` and `http.get2Async` now silently retry up to 3 attempts with exponential backoff (100ms, 200ms) on transient GOAWAY / connection-closed failures.
+- `PASCAK_TLS_NO_VERIFY=1` env override — shared with HTTPS/1.1 path (existing) for TLS peer verify bypass. Used in tests only.
+
+### Implementation
+- `Native_HTTP_Get2` renamed to `Native_Http_Get2Impl` (unchanged body).
+- New `Native_HTTP_Get2` wrapper handles retry logic.
+- `get2Async` automatically inherits retry (via Native_HTTPSync2).
+
+### Verified
+- Mock H2 server (Python h2 + self-signed TLS, GOAWAY after N requests).
+- E2E test: GOAWAY on first conn -> client silently retries -> 200 success.
+- Server log confirms 2x ACCEPT + pool reuse after retry.
+
+### Deferred (v1.3.0)
+- Rate limiter backoff on H2_ERR_ENHANCE_YOUR_CALM (still needs token bucket)
+
 ## [1.2.8] - 2026-10-27
 
 ### Added

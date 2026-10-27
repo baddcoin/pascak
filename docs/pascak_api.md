@@ -2478,25 +2478,32 @@ Error message format:
     http.get2: request gagal (retryable, code=0) - connection GOAWAY received (retryable) — hint: retry on fresh connection
     http.get2: request gagal (fatal, code=1) - connection GOAWAY received (fatal: code 1)
 
-Manual retry pattern (auto-retry deferred to v1.2.9):
+### Auto-retry (v1.2.9)
 
-    function fetch_with_retry(url, max_attempts) begin
-      var attempt := 0;
-      while attempt < max_attempts do
-      begin
-        try
-          return http.get2(url);
-        catch e
-          if contains(e.message, "retryable") then
-          begin
-            attempt := attempt + 1;
-            sleep(100 * attempt);
-          end else
-            throw e;
-        end;
-      end;
-      throw "http.get2: max attempts exhausted";
-    end;
+`http.get2` and `http.get2Async` automatically retry up to 3 attempts
+on retryable failures with exponential backoff (100ms, 200ms):
+
+- **Retryable** errors retry silently on a fresh connection.
+- **Fatal** errors fail immediately.
+- Fresh connection per retry (pool auto-evicts closed slots).
+
+No user code change needed — retry is transparent:
+
+    var r := http.get2(url);   // auto-retries on transient failures
+    println(r.status);          // 200 even if first attempt got GOAWAY
+
+For fine-grained control, catch and inspect the error message:
+
+    try
+      var r := http.get2(url);
+    catch e
+      // e.message contains "(retryable, code=N)" or "(fatal, code=N)"
+      log(e.message);
+      throw e;
+    end.
+
+If you need different retry policy (more attempts, longer backoff),
+catch the retryable error and implement manual loop.
 
 ### `http.get(url [, headers]) → dict`
 
