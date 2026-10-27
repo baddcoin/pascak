@@ -12292,9 +12292,6 @@ begin
         LeafNames.Add(EntryName);
         if IsRest then
         begin
-          if Prefix <> '' then
-            errMSG.callerror(25, 'rest element tidak bisa nested',
-              FCurrToken.Line, FCurrToken.Col);
           if (FCurrToken.Typ = ttAssign) or (FCurrToken.Typ = ttEqual) then
             errMSG.callerror(25, 'rest element: default tidak diizinkan',
               FCurrToken.Line, FCurrToken.Col);
@@ -12344,6 +12341,8 @@ var DeclNode,node1, node2, node3: TNode;
      DtOmitCall: TMethodCallNode;
      DtKeysArr: TArrayLiteralNode;
      DtJ: Integer;
+     RestPath, RestPrefix, RestLeaf, DtRestSib: string;
+     DtRestTarget: TNode;
      EnumName: string;
      EnumDict: TDictLiteralNode;
      EnumIdx: Integer;
@@ -12508,28 +12507,76 @@ begin
         begin
           if DtRestFlags[DtIdx] = 'R' then
           begin
-            if IsObjDestr then
+            // v1.2.6: unified rest — path-aware (root + nested, obj + array)
+            RestPath := DtNames[DtIdx];
+            DotPos := 0;
+            for DtJ := Length(RestPath) downto 1 do
+              if RestPath[DtJ] = '.' then begin DotPos := DtJ; Break; end;
+            if DotPos > 0 then
             begin
-              // v1.2.5: object rest → __tmp.omit([keys])
-              DtKeysArr := TArrayLiteralNode.Create;
-              for DtJ := 0 to DtIdx - 1 do
+              RestPrefix := Copy(RestPath, 1, DotPos - 1);
+              RestLeaf := Copy(RestPath, DotPos + 1, Length(RestPath) - DotPos);
+            end else
+            begin
+              RestPrefix := '';
+              RestLeaf := RestPath;
+            end;
+
+            // Build target chain (temp + all prefix segments)
+            DtRestTarget := TVariableNode.Create(DtTempName);
+            if RestPrefix <> '' then
+            begin
+              SubName := RestPrefix;
+              while SubName <> '' do
               begin
-                SubName := DtNames[DtJ];
                 DotPos := Pos('.', SubName);
                 if DotPos > 0 then
-                  SubName := Copy(SubName, 1, DotPos - 1);
-                DtKeysArr.AddElement(TLiteralNode.Create(TValue.CreateStr(SubName)));
+                begin
+                  DtName := Copy(SubName, 1, DotPos - 1);
+                  SubName := Copy(SubName, DotPos + 1, Length(SubName));
+                end else
+                begin
+                  DtName := SubName;
+                  SubName := '';
+                end;
+                if (DtName <> '') and (DtName[1] in ['0'..'9']) then
+                  DtRestTarget := TArrayAccessNode.Create(DtRestTarget,
+                    TLiteralNode.Create(TValue.CreateNum(StrToInt(DtName))))
+                else
+                  DtRestTarget := TMemberAccessNode.Create(DtRestTarget, DtName);
               end;
-              DtOmitCall := TMethodCallNode.Create(
-                TVariableNode.Create(DtTempName), 'omit');
+            end;
+
+            // Numeric leaf = array rest (slice), string leaf = obj rest (omit)
+            if (RestLeaf <> '') and (RestLeaf[1] in ['0'..'9']) then
+              DtAccess := TArraySliceNode.Create(DtRestTarget,
+                TLiteralNode.Create(TValue.CreateNum(StrToInt(RestLeaf))),
+                nil, nil)
+            else
+            begin
+              DtKeysArr := TArrayLiteralNode.Create;
+              for DtJ := 0 to DtIdx - 1 do
+                if DtRestFlags[DtJ] <> 'R' then
+                begin
+                  SubName := DtNames[DtJ];
+                  if RestPrefix = '' then
+                  begin
+                    DotPos := Pos('.', SubName);
+                    if DotPos > 0 then
+                      SubName := Copy(SubName, 1, DotPos - 1);
+                    DtKeysArr.AddElement(TLiteralNode.Create(TValue.CreateStr(SubName)));
+                  end
+                  else if Copy(SubName, 1, Length(RestPrefix) + 1) = RestPrefix + '.' then
+                  begin
+                    DtRestSib := Copy(SubName, Length(RestPrefix) + 2, Length(SubName));
+                    if (DtRestSib <> '') and (Pos('.', DtRestSib) = 0) then
+                      DtKeysArr.AddElement(TLiteralNode.Create(TValue.CreateStr(DtRestSib)));
+                  end;
+                end;
+              DtOmitCall := TMethodCallNode.Create(DtRestTarget, 'omit');
               DtOmitCall.Args.Add(DtKeysArr);
               DtAccess := DtOmitCall;
-            end
-            else
-              DtAccess := TArraySliceNode.Create(
-                TVariableNode.Create(DtTempName),
-                TLiteralNode.Create(TValue.CreateNum(StrToInt(DtNames[DtIdx]))),
-                nil, nil);
+            end;
           end
           else
           begin
@@ -13022,6 +13069,8 @@ var
   DtOmitCall: TMethodCallNode;
   DtKeysArr: TArrayLiteralNode;
   DtJ: Integer;
+  RestPath, RestPrefix, RestLeaf, DtRestSib: string;
+  DtRestTarget: TNode;
 begin
   B := TBlockNode.Create(False); 
   try
@@ -13086,28 +13135,74 @@ begin
           begin
             if DtRestFlags[DtIdx] = 'R' then
             begin
-              if IsObjDestr then
+              // v1.2.6: unified rest — path-aware (root + nested, obj + array)
+              RestPath := DtNames[DtIdx];
+              DotPos := 0;
+              for DtJ := Length(RestPath) downto 1 do
+                if RestPath[DtJ] = '.' then begin DotPos := DtJ; Break; end;
+              if DotPos > 0 then
               begin
-                // v1.2.5: object rest → __tmp.omit([keys])
-                DtKeysArr := TArrayLiteralNode.Create;
-                for DtJ := 0 to DtIdx - 1 do
+                RestPrefix := Copy(RestPath, 1, DotPos - 1);
+                RestLeaf := Copy(RestPath, DotPos + 1, Length(RestPath) - DotPos);
+              end else
+              begin
+                RestPrefix := '';
+                RestLeaf := RestPath;
+              end;
+
+              DtRestTarget := TVariableNode.Create(DtTempName);
+              if RestPrefix <> '' then
+              begin
+                SubName := RestPrefix;
+                while SubName <> '' do
                 begin
-                  SubName := DtNames[DtJ];
                   DotPos := Pos('.', SubName);
                   if DotPos > 0 then
-                    SubName := Copy(SubName, 1, DotPos - 1);
-                  DtKeysArr.AddElement(TLiteralNode.Create(TValue.CreateStr(SubName)));
+                  begin
+                    DtName := Copy(SubName, 1, DotPos - 1);
+                    SubName := Copy(SubName, DotPos + 1, Length(SubName));
+                  end else
+                  begin
+                    DtName := SubName;
+                    SubName := '';
+                  end;
+                  if (DtName <> '') and (DtName[1] in ['0'..'9']) then
+                    DtRestTarget := TArrayAccessNode.Create(DtRestTarget,
+                      TLiteralNode.Create(TValue.CreateNum(StrToInt(DtName))))
+                  else
+                    DtRestTarget := TMemberAccessNode.Create(DtRestTarget, DtName);
                 end;
-                DtOmitCall := TMethodCallNode.Create(
-                  TVariableNode.Create(DtTempName), 'omit');
+              end;
+
+              if (RestLeaf <> '') and (RestLeaf[1] in ['0'..'9']) then
+                DtAccess := TArraySliceNode.Create(DtRestTarget,
+                  TLiteralNode.Create(TValue.CreateNum(StrToInt(RestLeaf))),
+                  nil, nil)
+              else
+              begin
+                DtKeysArr := TArrayLiteralNode.Create;
+                for DtJ := 0 to DtIdx - 1 do
+                  if DtRestFlags[DtJ] <> 'R' then
+                  begin
+                    SubName := DtNames[DtJ];
+                    if RestPrefix = '' then
+                    begin
+                      DotPos := Pos('.', SubName);
+                      if DotPos > 0 then
+                        SubName := Copy(SubName, 1, DotPos - 1);
+                      DtKeysArr.AddElement(TLiteralNode.Create(TValue.CreateStr(SubName)));
+                    end
+                    else if Copy(SubName, 1, Length(RestPrefix) + 1) = RestPrefix + '.' then
+                    begin
+                      DtRestSib := Copy(SubName, Length(RestPrefix) + 2, Length(SubName));
+                      if (DtRestSib <> '') and (Pos('.', DtRestSib) = 0) then
+                        DtKeysArr.AddElement(TLiteralNode.Create(TValue.CreateStr(DtRestSib)));
+                    end;
+                  end;
+                DtOmitCall := TMethodCallNode.Create(DtRestTarget, 'omit');
                 DtOmitCall.Args.Add(DtKeysArr);
                 DtAccess := DtOmitCall;
-              end
-              else
-                DtAccess := TArraySliceNode.Create(
-                  TVariableNode.Create(DtTempName),
-                  TLiteralNode.Create(TValue.CreateNum(StrToInt(DtNames[DtIdx]))),
-                  nil, nil);
+              end;
             end
             else
             begin
