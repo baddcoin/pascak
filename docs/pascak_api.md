@@ -2461,6 +2461,43 @@ lib.close();
 
 ## HTTP Client
 
+### http.get2 error handling
+
+`http.get2` returns a dict on success (`status`, `headers`, `body`, `version`).
+On failure, it raises a script error. Since v1.2.8, the error message
+distinguishes retryable from fatal errors:
+
+- **Retryable** — transient failures like connection closed, GOAWAY with
+  `H2_ERR_NO_ERROR` (graceful server shutdown), or `H2_ERR_ENHANCE_YOUR_CALM`
+  (rate limit). Safe to retry on a fresh connection.
+- **Fatal** — protocol errors (PROTOCOL_ERROR, INTERNAL_ERROR, etc).
+  Retrying won't help.
+
+Error message format:
+
+    http.get2: request gagal (retryable, code=0) - connection GOAWAY received (retryable) — hint: retry on fresh connection
+    http.get2: request gagal (fatal, code=1) - connection GOAWAY received (fatal: code 1)
+
+Manual retry pattern (auto-retry deferred to v1.2.9):
+
+    function fetch_with_retry(url, max_attempts) begin
+      var attempt := 0;
+      while attempt < max_attempts do
+      begin
+        try
+          return http.get2(url);
+        catch e
+          if contains(e.message, "retryable") then
+          begin
+            attempt := attempt + 1;
+            sleep(100 * attempt);
+          end else
+            throw e;
+        end;
+      end;
+      throw "http.get2: max attempts exhausted";
+    end;
+
 ### `http.get(url [, headers]) → dict`
 
 Sync HTTPS request.

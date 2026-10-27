@@ -1,5 +1,29 @@
 # Changelog
 
+## [1.2.8] - 2026-10-27
+
+### Added
+- **GOAWAY classification** — `http.get2` error message now distinguishes retryable vs fatal failures with H2 error code.
+- `TH2Response.ErrorCode` + `TH2Response.Retryable` fields (public API for programmatic retry).
+- `TH2Connection.FGoAwayErrCode` tracks RFC 7540 error code from GOAWAY frame.
+
+### Behavior
+- No change for happy path (http.get2 success -> status 200, pool reuse works).
+- On failure, error message format:
+  - Retryable: `request gagal (retryable, code=N) - <detail> — hint: retry on fresh connection`
+  - Fatal: `request gagal (fatal, code=N) - <detail>`
+- Retryable classification:
+  - `H2_ERR_NO_ERROR` / `H2_ERR_ENHANCE_YOUR_CALM` -> retryable
+  - Connection closed / reader thread unavailable -> retryable
+  - Other H2 protocol errors -> fatal
+
+### Deferred (v1.2.9)
+- Auto-retry loop (needs mock GOAWAY server test infra)
+- Rate limiter backoff on `H2_ERR_ENHANCE_YOUR_CALM`
+
+### Regression
+- 130/130 prior tests PASS + happy path verified.
+
 ## [1.2.7] - 2026-10-27
 
 ### Added
