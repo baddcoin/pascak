@@ -2478,6 +2478,15 @@ Error message format:
     http.get2: request gagal (retryable, code=0) - connection GOAWAY received (retryable) — hint: retry on fresh connection
     http.get2: request gagal (fatal, code=1) - connection GOAWAY received (fatal: code 1)
 
+### Flow control (v1.3.0)
+
+`http.get2` / `http.get2Async` handle both stream-level and connection-level
+HTTP/2 flow control. Responses larger than 64KB total (across all streams)
+now work correctly — the client sends `WINDOW_UPDATE` frames at both levels
+as data is consumed.
+
+No user-facing API change. Just works for large bodies.
+
 ### Auto-retry (v1.2.9)
 
 `http.get2` and `http.get2Async` automatically retry up to 3 attempts

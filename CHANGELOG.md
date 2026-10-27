@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.3.0] - 2026-10-27
+
+### Fixed
+- **HTTP/2 connection-level flow control** — client now sends connection-level `WINDOW_UPDATE` (stream 0) for every received DATA frame, in addition to the existing stream-level WINDOW_UPDATE. Previously, the connection window (initial 65535 bytes) was never replenished, causing the server to stall after sending ~64KB total across all streams.
+
+### Verified
+- Mock H2 server sends 128KB body -> client receives full body, status=200.
+- Server log shows repeated `WINDOW_UPDATE stream=0 delta=16384` confirming client replenishes the connection window.
+
+### Notes
+- Per-stream flow control (v1.0.x) was already working; only the connection window was missing.
+- No user-facing API change — transparent fix.
+
+### Deferred (v1.3.1)
+- Rate limiter backoff on `H2_ERR_ENHANCE_YOUR_CALM` (token bucket per host).
+
 ## [1.2.9] - 2026-10-27
 
 ### Added
