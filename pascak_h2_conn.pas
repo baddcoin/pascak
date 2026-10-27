@@ -498,7 +498,13 @@ begin
   try
     Stream.Body := Stream.Body + Frame.Payload;
     if Length(Frame.Payload) > 0 then
+    begin
       SendFrameLocked(H2BuildWindowUpdate(Frame.StreamID, Length(Frame.Payload)));
+      { v1.3.0: connection-level flow control. Without this, the connection }
+      { window (initial 65535 bytes) is never replenished and the server    }
+      { stalls after sending 64KB total across all streams.                }
+      SendFrameLocked(H2BuildWindowUpdate(0, Length(Frame.Payload)));
+    end;
     if (Frame.Flags and H2_FLAG_END_STREAM) <> 0 then
     begin
       Stream.Ended := True;
