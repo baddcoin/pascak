@@ -1463,9 +1463,10 @@ type
     Target: TNode;       
     sMethodName: string;
     Args: TObjectList;
-    constructor Create(ATarget: TNode; AMethod: string);
+    IsOptional: Boolean;
+    constructor Create(ATarget: TNode; AMethod: string; AIsOptional: Boolean = False);
     destructor Destroy; override;
-  end;  
+  end;
 
   TClassDeclNode = class(TNode)
   public
@@ -9772,11 +9773,12 @@ begin
     inherited; 
 end;
 
-constructor TMethodCallNode.Create(ATarget: TNode; AMethod: string); 
-begin 
-    Target := ATarget; 
-    sMethodName := AMethod; 
-    Args := TObjectList.Create(True); 
+constructor TMethodCallNode.Create(ATarget: TNode; AMethod: string; AIsOptional: Boolean = False);
+begin
+    Target := ATarget;
+    sMethodName := AMethod;
+    Args := TObjectList.Create(True);
+    IsOptional := AIsOptional;
 end;
 
 destructor TMethodCallNode.Destroy; 
@@ -11790,10 +11792,29 @@ begin
         Eat(ttOptionalDot);
         Mem := FCurrToken.Str;
         Eat(ttId);
+        // v1.2.7: obj?.method(args) - method call with optional chain
         if FCurrToken.Typ = ttLParen then
-          errMSG.callerror(25, 'TParser.ParseFactor: ?.() not supported',
-                           FCurrToken.Line, FCurrToken.Col);
-        LHS := TMemberAccessNode.Create(LHS, Mem, True);
+        begin
+          Eat(ttLParen);
+          MethodCall := TMethodCallNode.Create(LHS, Mem, True);
+          try
+            if FCurrToken.Typ <> ttRParen then
+            begin
+              MethodCall.Args.Add(ParseExpression);
+              while FCurrToken.Typ = ttComma do
+              begin
+                Eat(ttComma);
+                MethodCall.Args.Add(ParseExpression);
+              end;
+            end;
+            Eat(ttRParen);
+            LHS := MethodCall;
+          except
+            MethodCall.Free;
+            raise;
+          end;
+        end else
+          LHS := TMemberAccessNode.Create(LHS, Mem, True);
       end else
 
       if FCurrToken.Typ = ttLBracket then 
@@ -14923,7 +14944,7 @@ end;
 
 procedure TCompiler.Compile(Node: TNode; IsStatement: Boolean = False);
 var 
-  JumpIfFalseIdx, JumpEndIdx, LoopStartIdx, i: Integer;
+  JumpIfFalseIdx, JumpEndIdx, LoopStartIdx, OptCallJumpIdx, i: Integer;
   ContinueTarget, idx, JumpToNext: Integer; 
   JumpCatchIdx : integer;
   WasEmitted: Boolean; 
@@ -15418,7 +15439,13 @@ begin
       // --- COMPILASI METHOD CALL ---
       else if Node is TMethodCallNode then
       begin
-        Compile(TMethodCallNode(Node).Target, False); 
+        Compile(TMethodCallNode(Node).Target, False);
+
+        // v1.2.7: obj?.method(args) - short-circuit on null target
+        if TMethodCallNode(Node).IsOptional then
+          OptCallJumpIdx := FChunk.AddInstruction(opcJumpIfNull, 0)
+        else
+          OptCallJumpIdx := -1;
 
         if CheckSpreadOperator(TMethodCallNode(Node).Args) then
         begin
@@ -15430,6 +15457,10 @@ begin
             Compile(TNode(TMethodCallNode(Node).Args[i]), False);
           FChunk.AddInstruction(opcMethodCall, FChunk.AddConstant(TValue.CreateStr(TMethodCallNode(Node).sMethodName)), TMethodCallNode(Node).Args.Count);
         end;
+
+        if OptCallJumpIdx >= 0 then
+          FChunk.Code[OptCallJumpIdx].Operand :=
+            FChunk.CodeCount - OptCallJumpIdx - 1;
       end
       
       // --- COMPILASI STATEMENT RETURN ---
