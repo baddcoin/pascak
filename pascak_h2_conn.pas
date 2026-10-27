@@ -23,6 +23,8 @@ type
     Body: RawByteString;
     Error: string;
     HasError: Boolean;
+    ErrorCode: Cardinal;   // H2 error code if GOAWAY/RST (0 otherwise)
+    Retryable: Boolean;    // safe to retry on fresh connection
   end;
 
   TStreamState = class
@@ -62,6 +64,7 @@ type
     FStreams: TStreamMap;
     FConnectionError: string;
     FGoAwayLastStreamID: Cardinal;
+    FGoAwayErrCode: Cardinal;
     FServerInitialWindow: Cardinal;
     FServerMaxStreams: Cardinal;
 
@@ -229,6 +232,7 @@ begin
   FStreams.Sorted := True;
   FConnectionError := '';
   FGoAwayLastStreamID := 0;
+  FGoAwayErrCode := 0;
   FServerInitialWindow := 65535;
   FServerMaxStreams := 100;
 end;
@@ -538,6 +542,7 @@ begin
   if H2ParseGoAway(Frame.Payload, LastID, ErrCode, DebugData) then
   begin
     FGoAwayLastStreamID := LastID;
+    FGoAwayErrCode := ErrCode;
     FConnectionError := 'GOAWAY: ' + H2ErrorName(ErrCode);
   end
   else
@@ -628,11 +633,14 @@ begin
   Result.Body := '';
   Result.Error := '';
   Result.HasError := False;
+  Result.ErrorCode := 0;
+  Result.Retryable := False;
 
   if FReaderThread = nil then
   begin
     Result.HasError := True;
     Result.Error := 'connection not opened or reader not running';
+    Result.Retryable := True;   // transient — reopen may succeed
     Exit;
   end;
 
@@ -649,12 +657,22 @@ begin
       begin
         Result.HasError := True;
         Result.Error := 'connection closed: ' + FConnectionError;
+        Result.ErrorCode := FGoAwayErrCode;
+        Result.Retryable := True;   // closed conn → reopen
         Exit;
       end;
       if FGoAwayLastStreamID > 0 then
       begin
         Result.HasError := True;
-        Result.Error := 'connection GOAWAY received';
+        Result.ErrorCode := FGoAwayErrCode;
+        if (FGoAwayErrCode = H2_ERR_NO_ERROR) or
+           (FGoAwayErrCode = H2_ERR_ENHANCE_YOUR_CALM) then
+        begin
+          Result.Error := 'connection GOAWAY received (retryable)';
+          Result.Retryable := True;
+        end else
+          Result.Error := 'connection GOAWAY received (fatal: code ' +
+                          IntToStr(FGoAwayErrCode) + ')';
         Exit;
       end;
       if (Integer(FServerMaxStreams) > 0) and

@@ -29283,8 +29283,18 @@ begin
     Resp := H2.Request('GET', Path, ExtraHeaders, BodyStr, 30000);
 
     if Resp.HasError then
-      errMSG.callerror(144, 'http.get2: request gagal - ' + Resp.Error,
-                       errMSG.xrow, errMSG.xcol);
+    begin
+      if Resp.Retryable then
+        errMSG.callerror(144,
+          'http.get2: request gagal (retryable, code=' + IntToStr(Resp.ErrorCode) +
+          ') - ' + Resp.Error + ' — hint: retry on fresh connection',
+          errMSG.xrow, errMSG.xcol)
+      else
+        errMSG.callerror(144,
+          'http.get2: request gagal (fatal, code=' + IntToStr(Resp.ErrorCode) +
+          ') - ' + Resp.Error,
+          errMSG.xrow, errMSG.xcol);
+    end;
 
     ResultDict := TDictValue.Create;
     try
