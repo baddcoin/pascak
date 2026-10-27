@@ -4787,6 +4787,46 @@ chain access. Array index di path pakai format numeric.
 - Object rest (var {a, ...rest} = obj): belum support (v1.2.5)
 - Rest di dalam nested: belum support
 
+### 31.11 — Object Rest (v1.2.5)
+
+Capture sisa keys dari dict ke variabel baru:
+
+    var {a, b, ...rest} = {"a": 1, "b": 2, "c": 3, "d": 4};
+    println(a);           // 1
+    println(b);           // 2
+    println(rest);        // {"c": 3, "d": 4}
+
+**Hanya rest (clone semua)**:
+
+    var {...all} = {"x": 10, "y": 20};
+    println(all.x);       // 10
+    println(all.y);       // 20
+
+**Empty rest (semua dikonsumsi)**:
+
+    var {p, q, ...empty} = {"p": 1, "q": 2};
+    println(empty.p);     // null (key 'p' sudah di-omit)
+
+**Nested + rest** (rest excludes top-level key):
+
+    var {cfg: {h}, ...rest2} = {"cfg": {"h": "localhost"}, "port": 8080};
+    println(h);           // "localhost"
+    println(rest2.port);  // 8080
+    // rest2 tidak punya key 'cfg' (sudah di-extract nested)
+
+**Runtime method `dict.omit(keys)`**:
+
+Bisa juga dipakai manual (bukan hanya destructuring):
+
+    var full := {"a": 1, "b": 2, "c": 3};
+    var no_a := full.omit(["a"]);
+    println(no_a);        // {"b": 2, "c": 3}
+
+**Batasan (v1.2.5)**:
+- Rest harus di posisi terakhir
+- Rest di dalam nested (`{a: {b, ...r}}`): belum support (v1.2.6)
+- Default tidak berlaku untuk rest
+
 ## Bonus — HTTP/2 Client
 
 Pascak juga mendukung HTTP/2 client via ALPN negotiation (RFC 7301).

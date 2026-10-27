@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.2.5] - 2026-10-27
+
+### Added
+- **Object rest destructuring** — `var {a, b, ...rest} = obj` captures remaining keys into new dict. Combines with nested: `var {cfg: {h}, ...rest} = obj` excludes `cfg` top-level key from `rest`.
+
+### Added (runtime)
+- `dict.omit(keys_array)` native method — returns clone of dict excluding specified keys.
+
+### Notes
+- Object rest uses TMethodCallNode emit calling `__tmp.omit([known_keys])`.
+- Array rest (v1.2.1) unchanged — still uses slice.
+- Rest inside nested (`var {a: {b, ...r}}`): deferred to v1.2.6.
+
+### Regression
+- 103/103 tests PASS (18 new v1.2.5 + 85 prior).
+
 ## [1.2.4] - 2026-10-27
 
 ### Added

@@ -118,7 +118,15 @@ Arbitrary-depth + array-root nested (v1.2.4):
 Recursive ParsePattern helper; flat path ('a.b.c'). Emit iterates
 dot-split and chains member/array access.
 
-Object rest (var {a, ...rest} = obj): v1.2.5 (needs dict.omit()).
+Object rest (v1.2.5):
+
+    var {a, b, ...rest} = obj;                // rest = obj - {a,b}
+    var {cfg: {h}, ...rest} = obj;            // rest excludes top-level 'cfg'
+    var {...all} = obj;                       // rest = clone(obj)
+
+Runtime method `dict.omit(keys_array)` also available standalone:
+
+    var filtered := mydict.omit(["secret", "internal"]);
 
 ### Syntax Quirks
 
