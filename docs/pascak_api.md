@@ -199,7 +199,17 @@ Function params can destructure directly:
     function mixed(a, {b, c}, d) begin return a + b + c + d; end;
 
 Supports: nested patterns, defaults, multiple patterns per signature.
-Rest element inside pattern param: not supported (v1.6.0).
+
+Rest element (v1.6.1):
+
+    function f({a, b, ...rest}) begin ... end
+    function g([x, ...tail]) begin ... end
+    function h({cfg: {port, ...other}}) begin ... end
+
+Rest semantics match destructuring statement (v1.2.6):
+- obj rest -> omit siblings
+- array rest -> slice from index
+- nested rest -> level-aware
 
 Implementation: synthetic param `__fp_N` + prelude destructure var.
 

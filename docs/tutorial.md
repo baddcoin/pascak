@@ -5028,8 +5028,27 @@ Function parameters can destructure directly:
 synthetic `__fp_N`, injects `var {destructure} = __fp_N;` prelude at
 body start. Zero overhead beyond equivalent manual destructuring.
 
-**Batasan (v1.6.0)**:
-- Rest element inside pattern param belum support
+**Rest element in param (v1.6.1)**:
+
+    function f({a, b, ...rest}) begin
+      return a + b + rest.c + rest.d;
+    end;
+    println(f({"a": 1, "b": 2, "c": 3, "d": 4}));    // 10
+
+    function g([x, ...tail]) begin
+      return x + len(tail);
+    end;
+    println(g([10, 20, 30, 40]));                     // 13
+
+    function h({cfg: {port, ...other}}) begin
+      return port + other.host;
+    end;
+    println(h({"cfg": {"port": 80, "host": 100}}));   // 180
+
+Semantics match destructuring statement rest (v1.2.6).
+
+**Batasan (v1.6.1)**:
+- Rest must be at end of pattern (existing parser restriction)
 
 ## Bonus — HTTP/2 Client
 

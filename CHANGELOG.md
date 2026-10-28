@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.6.1] - 2026-10-28
+
+### Added
+- **Rest element in function param pattern** - `function f({a, b, ...rest})`, `function g([x, ...tail])`, `function h({cfg: {port, ...other}})` now supported.
+
+### Implementation
+- Splits rest path by last dot into prefix + leaf.
+- Numeric leaf -> TArraySliceNode (array rest).
+- String leaf -> TMethodCallNode(target, 'omit', siblings) - reuses v1.2.6 emit.
+- Replaces v1.6.0 'belum support' error.
+
+### Verified
+4 cases: obj rest, array rest, nested rest, no-rest regression.
+
 ## [1.6.0] - 2026-10-28
 
 ### Added
