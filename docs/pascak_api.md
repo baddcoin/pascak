@@ -219,6 +219,26 @@ Hot-reload: watches script file (500ms poll), exits 0 on change.
 
 Messages: `[hot-reload] watching: <path>` dan `[hot-reload] detected change in: <path>`.
 
+## LSP Server
+
+### Signature Help (v1.5.0)
+
+`textDocument/signatureHelp` supported. Editor shows parameter hints
+when typing `name(` and updates active parameter as you type commas.
+
+Example (VSCode, Vim coc.nvim, Neovim LSP):
+
+    add(1, |2)   ->  function add(a, b)
+                              ^ (highlight active param)
+
+User functions extracted from document source (`function NAME(...)`
+declarations). Native functions have hardcoded signatures (println,
+len, str, int, bool, range, sort, sleep).
+
+Trigger characters: `(` and `,`.
+
+No extension change needed — LSP client auto-handles.
+
 ## Config
 
 Config management — dotenv, JSON, env override, runtime set dengan precedence chain.

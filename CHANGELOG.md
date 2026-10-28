@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.5.0] - 2026-10-28
+
+### Added
+- **LSP signature help** — `textDocument/signatureHelp` handler. Editor shows parameter hints when typing function call: `add(1, |2)` -> `function add(a, b)` with active parameter highlight.
+
+### Implementation
+- `HandleSignatureHelp`: backward scan from cursor for `(`, extract name, find `function NAME(...)` declaration across document, parse param list.
+- Native fallback for builtins (`println`, `len`, `str`, `int`, `bool`, `range`, `sort`, `sleep`).
+- `activeParameter` = comma count at paren depth 0.
+- Capabilities: `signatureHelpProvider.triggerCharacters = ['(', ',']`.
+- No vscode ext change needed (generic LSP auto-handles).
+
+### Verified
+Python LSP client test:
+- init caps include `signatureHelpProvider`.
+- `add(1, |)` -> `function add(a, b)` activeParameter 0/1 per comma.
+- `println(|)` -> `println(value, ...)`.
+- Outside call -> `null`.
+
 ## [1.4.2] - 2026-10-28
 
 ### Added
