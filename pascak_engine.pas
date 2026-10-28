@@ -39229,6 +39229,7 @@ type
 
 var
   GGuiAppCounter: LongInt = 0;
+  GHotMode: Boolean = False;
 
 procedure EnsureGuiAppsInit;
 begin
@@ -39855,6 +39856,35 @@ begin
   Result := TValue.CreateNum(H);
 end;
 
+procedure InjectHotReloadJS(App: TGuiApp);
+var
+  JsBlock, WsPortStr: string;
+begin
+  WsPortStr := IntToStr(App.WSPort);
+  JsBlock :=
+    '<script>(function(){' +
+    'var PORT=' + WsPortStr + ';' +
+    'var proto=location.protocol==="https:"?"wss:":"ws:";' +
+    'var url=proto+"//"+location.hostname+":"+PORT+"/";' +
+    'function connect(){try{' +
+    'var ws=new WebSocket(url);' +
+    'ws.onmessage=function(e){try{var d=JSON.parse(e.data);' +
+    'if(d&&d.type==="reload"){console.log("[hot] reload");location.reload();}}catch(_){}};' +
+    'ws.onclose=function(){setTimeout(connect,1000);};' +
+    'ws.onerror=function(){};' +
+    '}catch(_){setTimeout(connect,2000);}}' +
+    'connect();})();</script>';
+
+  if Pos('</body>', App.HTML) > 0 then
+    App.HTML := StringReplace(App.HTML, '</body>', JsBlock + '</body>', [rfReplaceAll])
+  else
+    App.HTML := App.HTML + JsBlock;
+
+  WriteLn('[hot-reload] injected WS reload JS (WSPort=', WsPortStr, ')');
+  Flush(Output);
+end;
+
+
 function Native_GUI_Serve(Args: TObjectList; CallEnv: TSymbolTable): TValue;
 var
   App: TGuiApp;
@@ -39872,6 +39902,10 @@ begin
     Exit(TValue.CreateBool(False));
   end;
   App.HTML := TValue(Args[1]).StrVal;
+
+  if GHotMode then
+    InjectHotReloadJS(App);
+
   Result := TValue.CreateBool(True);
 end;
 
@@ -46325,6 +46359,36 @@ begin
   GHotWatchThread.Start;
 end;
 
+procedure BroadcastHotReloadToGUI;
+var
+  I, N, Sent: Integer;
+  App: TGuiApp;
+begin
+  Sent := 0;
+  N := 0;
+  if Assigned(GGuiAppsLock) then GGuiAppsLock.Acquire;
+  try
+    if Assigned(GGuiApps) then
+    begin
+      N := GGuiApps.Count;
+      for I := 0 to N - 1 do
+      begin
+        App := TGuiApp(GGuiApps[I]);
+        if (App.WSHandle > 0) and Assigned(GWSEventLoop) then
+          try
+            Inc(Sent, GWSEventLoop.BroadcastToServer(App.WSHandle,
+              RawByteString('{"type":"reload"}')));
+          except end;
+      end;
+    end;
+  finally
+    if Assigned(GGuiAppsLock) then GGuiAppsLock.Release;
+  end;
+  WriteLn('[hot-reload] broadcast reload: ', Sent, ' client(s) across ', N, ' GUI app(s)');
+  Flush(Output);
+end;
+
+
 procedure THotWatchThread.Execute;
 var
   I: Integer;
@@ -46345,6 +46409,13 @@ begin
       begin
         WriteLn('');
         WriteLn('[hot-reload] detected change in: ', GHotWatchFiles[I].Path);
+
+        if GHotMode and Assigned(GWSEventLoop) then
+        begin
+          BroadcastHotReloadToGUI();
+          Sleep(300);
+        end;
+
         WriteLn('[hot-reload] exiting (0) — wrapper should restart process');
         WriteLn('[hot-reload] tip: while true; do pascak --dev --watch app.pas; sleep 1; done');
         Flush(Output);
@@ -46395,6 +46466,14 @@ begin
     else if ParamStr(ArgIdx) = '--watch' then
     begin
       GWatchMode := True;
+      Inc(ArgIdx);
+      if ArgIdx <= ParamCount then
+        GWatchSpec := ParamStr(ArgIdx);
+    end
+    else if ParamStr(ArgIdx) = '--hot' then
+    begin
+      GWatchMode := True;
+      GHotMode := True;
       Inc(ArgIdx);
       if ArgIdx <= ParamCount then
         GWatchSpec := ParamStr(ArgIdx);
