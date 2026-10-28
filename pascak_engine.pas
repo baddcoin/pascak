@@ -1513,7 +1513,8 @@ type
     MemberName: string;
     Expr: TNode;
     OpAssign: string;
-    constructor Create(ATarget: TNode; AMem: string; AExpr: TNode);
+    IsOptional: Boolean;
+    constructor Create(ATarget: TNode; AMem: string; AExpr: TNode; AIsOptional: Boolean = False);
     destructor Destroy; override; 
   end;
  
@@ -10717,11 +10718,12 @@ begin
     inherited; 
 end;
 
-constructor TMemberAssignNode.Create(ATarget: TNode; AMem: string; AExpr: TNode); 
-begin 
-    Target := ATarget; 
-    MemberName := AMem; 
-    Expr := AExpr; 
+constructor TMemberAssignNode.Create(ATarget: TNode; AMem: string; AExpr: TNode; AIsOptional: Boolean = False);
+begin
+    Target := ATarget;
+    MemberName := AMem;
+    Expr := AExpr;
+    IsOptional := AIsOptional;
 end;
 
 destructor TMemberAssignNode.Destroy; 
@@ -12512,6 +12514,7 @@ var DeclNode,node1, node2, node3: TNode;
     CallNode: TFunctionCallNode;
     MethodCall: TMethodCallNode;
     IsConst, IsDownto: Boolean;
+    IsOpt: Boolean;
     DeclBlock: TBlockNode; 
     StartLine, StartCol: Integer; // FIX: Tambahkan StartCol
      IsObjDestr: Boolean;
@@ -13032,7 +13035,7 @@ begin
 
     try
       while FCurrToken.Typ in [
-          ttLBracket, ttDot, ttAssign, ttLParen, ttPlusAssign, 
+          ttLBracket, ttDot, ttOptionalDot, ttAssign, ttLParen, ttPlusAssign, 
           ttMinusAssign, ttMulAssign, ttDivAssign, ttModAssign] do
       begin
         if FCurrToken.Typ = ttLParen then
@@ -13090,6 +13093,7 @@ begin
           if Result is TMemberAccessNode then
           begin
             Mem := TMemberAccessNode(Result).MemberName;
+            IsOpt := TMemberAccessNode(Result).IsOptional;
             node2 := TMemberAccessNode(Result).Target;
             
             TMemberAccessNode(Result).Target := nil; 
@@ -13097,7 +13101,7 @@ begin
             Result := nil; // <-- PERBAIKAN FATAL: Cegah Double-Free di handler except terluar
 
             try
-              Result := TMemberAssignNode.Create(node2, Mem, node3);
+              Result := TMemberAssignNode.Create(node2, Mem, node3, IsOpt);
               TMemberAssignNode(Result).OpAssign := OpStr;
             except
               node2.Free; 
@@ -13168,7 +13172,36 @@ begin
           begin
             Result := TMemberAccessNode.Create(Result, Mem);
           end;
-        end else 
+        end else
+
+        if FCurrToken.Typ = ttOptionalDot then
+        begin
+          { v1.6.2: optional dot chain in statement context }
+          Eat(ttOptionalDot);
+          Mem := FCurrToken.Str; Eat(ttId);
+          
+          if FCurrToken.Typ = ttLParen then
+          begin
+            Eat(ttLParen);
+            MethodCall := TMethodCallNode.Create(Result, Mem, True);
+            Result := nil;
+            try
+              if FCurrToken.Typ <> ttRParen then
+              begin
+                MethodCall.Args.Add(ParseExpression);
+                while FCurrToken.Typ = ttComma do begin Eat(ttComma); MethodCall.Args.Add(ParseExpression); end;
+              end;
+              Eat(ttRParen);
+              Result := MethodCall;
+            except
+              MethodCall.Free;
+              raise;
+            end;
+          end else
+          begin
+            Result := TMemberAccessNode.Create(Result, Mem, True);
+          end;
+        end else
         
         if FCurrToken.Typ = ttLBracket then
         begin
@@ -16258,13 +16291,32 @@ begin
       // --- COMPILASI PROPERTY ASSIGNMENT ---
       else if Node is TMemberAssignNode then
       begin
-        Compile(TMemberAssignNode(Node).Target, False); 
-        Compile(TMemberAssignNode(Node).Expr, False);   
-    
-        FChunk.AddInstruction(opcSetProp, 
-          FChunk.AddConstant(TValue.CreateStr(TMemberAssignNode(Node).MemberName)), 
-          FChunk.AddConstant(TValue.CreateStr(TMemberAssignNode(Node).OpAssign)));
-          
+        if TMemberAssignNode(Node).IsOptional then
+        begin
+          { v1.6.2: null-safe assignment obj?.prop := val }
+          Compile(TMemberAssignNode(Node).Target, False);
+          JumpIfFalseIdx := FChunk.AddInstruction(opcJumpIfNull, 0);
+          Compile(TMemberAssignNode(Node).Expr, False);
+          FChunk.AddInstruction(opcSetProp,
+            FChunk.AddConstant(TValue.CreateStr(TMemberAssignNode(Node).MemberName)),
+            FChunk.AddConstant(TValue.CreateStr(TMemberAssignNode(Node).OpAssign)));
+          JumpEndIdx := FChunk.AddInstruction(opcJump, 0);
+          FChunk.Code[JumpIfFalseIdx].Operand :=
+            FChunk.CodeCount - JumpIfFalseIdx - 1;
+          FChunk.AddInstruction(opcPop);
+          FChunk.AddInstruction(opcNull);
+          FChunk.Code[JumpEndIdx].Operand :=
+            FChunk.CodeCount - JumpEndIdx - 1;
+        end else
+        begin
+          Compile(TMemberAssignNode(Node).Target, False);
+          Compile(TMemberAssignNode(Node).Expr, False);
+
+          FChunk.AddInstruction(opcSetProp,
+            FChunk.AddConstant(TValue.CreateStr(TMemberAssignNode(Node).MemberName)),
+            FChunk.AddConstant(TValue.CreateStr(TMemberAssignNode(Node).OpAssign)));
+        end;
+
         PushedValue := True;
       end
       
