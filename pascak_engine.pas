@@ -46814,7 +46814,16 @@ begin
         WriteLn('[hot-reload] exiting (0) — wrapper should restart process');
         WriteLn('[hot-reload] tip: while true; do pascak --dev --watch app.pas; sleep 1; done');
         Flush(Output);
-        Sleep(100);
+
+        { v1.7.0: graceful shutdown — signal RunLoop to break so shutdown
+          hooks, H2 pool cleanup, WS close frames all execute naturally. }
+        InterlockedExchange(IsShuttingDown, 1);
+        WriteLn('[hot-reload] graceful shutdown requested');
+        Flush(Output);
+        Sleep(2000);  // graceful window extended
+        Flush(Output);
+        WriteLn('[hot-reload] graceful window expired — force halt');
+        Flush(Output);
         Halt(0);
       end;
     end;
