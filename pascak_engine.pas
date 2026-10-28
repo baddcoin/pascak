@@ -12171,6 +12171,11 @@ var
   FuncBodyBlock: TBlockNode;
   ParamCount, ParamCap: Integer;
   Prelude: TObjectList;
+  RestPath, RestPrefix, RestLeaf, RestSib: string;
+  RestTarget: TNode;
+  OmitCall: TMethodCallNode;
+  KeysArr: TArrayLiteralNode;
+  InnerK: Integer;
   IsPatObj: Boolean;
   SynthName, Seg, RemPath: string;
   PatNames, PatLeafs, PatRest: TStringList;
@@ -12204,32 +12209,110 @@ var
         while OutK <= PatLeafs.Count - 1 do
         begin
           if PatRest[OutK] = 'R' then
-            errMSG.callerror(25, 'function param: rest element belum support',
-              FCurrToken.Line, FCurrToken.Col);
-          Cur := TVariableNode.Create(SynthName);
-          RemPath := PatNames[OutK];
-          while RemPath <> '' do
           begin
-            DotPos := Pos('.', RemPath);
+            { v1.6.1: rest in param - reuse v1.2.6 rest-in-nested approach }
+            RestPath := PatNames[OutK];
+            DotPos := 0;
+            InnerK := Length(RestPath);
+            while InnerK >= 1 do
+            begin
+              if RestPath[InnerK] = '.' then
+              begin
+                DotPos := InnerK;
+                Break;
+              end;
+              Dec(InnerK);
+            end;
             if DotPos > 0 then
             begin
-              Seg := Copy(RemPath, 1, DotPos - 1);
-              RemPath := Copy(RemPath, DotPos + 1, Length(RemPath));
+              RestPrefix := Copy(RestPath, 1, DotPos - 1);
+              RestLeaf := Copy(RestPath, DotPos + 1, Length(RestPath) - DotPos);
             end else
             begin
-              Seg := RemPath;
-              RemPath := '';
+              RestPrefix := '';
+              RestLeaf := RestPath;
             end;
-            if (Seg <> '') and (Seg[1] in ['0'..'9']) then
-              Cur := TArrayAccessNode.Create(Cur,
-                TLiteralNode.Create(TValue.CreateNum(StrToInt(Seg))))
+            RestTarget := TVariableNode.Create(SynthName);
+            if RestPrefix <> '' then
+            begin
+              RemPath := RestPrefix;
+              while RemPath <> '' do
+              begin
+                DotPos := Pos('.', RemPath);
+                if DotPos > 0 then
+                begin
+                  Seg := Copy(RemPath, 1, DotPos - 1);
+                  RemPath := Copy(RemPath, DotPos + 1, Length(RemPath));
+                end else
+                begin
+                  Seg := RemPath;
+                  RemPath := '';
+                end;
+                if (Seg <> '') and (Seg[1] in ['0'..'9']) then
+                  RestTarget := TArrayAccessNode.Create(RestTarget,
+                    TLiteralNode.Create(TValue.CreateNum(StrToInt(Seg))))
+                else
+                  RestTarget := TMemberAccessNode.Create(RestTarget, Seg);
+              end;
+            end;
+            if (RestLeaf <> '') and (RestLeaf[1] in ['0'..'9']) then
+              ExtractNode := TArraySliceNode.Create(RestTarget,
+                TLiteralNode.Create(TValue.CreateNum(StrToInt(RestLeaf))),
+                nil, nil)
             else
-              Cur := TMemberAccessNode.Create(Cur, Seg);
+            begin
+              KeysArr := TArrayLiteralNode.Create;
+              InnerK := 0;
+              while InnerK < OutK do
+              begin
+                if PatRest[InnerK] <> 'R' then
+                begin
+                  RestSib := PatNames[InnerK];
+                  if RestPrefix = '' then
+                  begin
+                    DotPos := Pos('.', RestSib);
+                    if DotPos > 0 then RestSib := Copy(RestSib, 1, DotPos - 1);
+                    KeysArr.AddElement(TLiteralNode.Create(TValue.CreateStr(RestSib)));
+                  end else if Copy(RestSib, 1, Length(RestPrefix) + 1) = RestPrefix + '.' then
+                  begin
+                    RestSib := Copy(RestSib, Length(RestPrefix) + 2, Length(RestSib));
+                    if (RestSib <> '') and (Pos('.', RestSib) = 0) then
+                      KeysArr.AddElement(TLiteralNode.Create(TValue.CreateStr(RestSib)));
+                  end;
+                end;
+                Inc(InnerK);
+              end;
+              OmitCall := TMethodCallNode.Create(RestTarget, 'omit');
+              OmitCall.Args.Add(KeysArr);
+              ExtractNode := OmitCall;
+            end;
+          end else
+          begin
+            Cur := TVariableNode.Create(SynthName);
+            RemPath := PatNames[OutK];
+            while RemPath <> '' do
+            begin
+              DotPos := Pos('.', RemPath);
+              if DotPos > 0 then
+              begin
+                Seg := Copy(RemPath, 1, DotPos - 1);
+                RemPath := Copy(RemPath, DotPos + 1, Length(RemPath));
+              end else
+              begin
+                Seg := RemPath;
+                RemPath := '';
+              end;
+              if (Seg <> '') and (Seg[1] in ['0'..'9']) then
+                Cur := TArrayAccessNode.Create(Cur,
+                  TLiteralNode.Create(TValue.CreateNum(StrToInt(Seg))))
+              else
+                Cur := TMemberAccessNode.Create(Cur, Seg);
+            end;
+            ExtractNode := Cur;
+            if PatDefaults[OutK] <> nil then
+              ExtractNode := TBinaryOpNode.Create(ExtractNode, opNullCoalesce,
+                TNode(PatDefaults[OutK]));
           end;
-          ExtractNode := Cur;
-          if PatDefaults[OutK] <> nil then
-            ExtractNode := TBinaryOpNode.Create(ExtractNode, opNullCoalesce,
-              TNode(PatDefaults[OutK]));
           VarNode := TVarDeclNode.Create(PatLeafs[OutK], ExtractNode, False);
           Prelude.Add(VarNode);
           Inc(OutK);
