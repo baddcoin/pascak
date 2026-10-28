@@ -1,5 +1,29 @@
 # Changelog
 
+## [1.7.0] - 2026-10-28
+
+### Improved
+- **Graceful shutdown for hot-reload** - `--watch`/`--hot` no longer uses abrupt `Halt(0)`. Watcher requests graceful shutdown via `IsShuttingDown` flag; `RunLoop` breaks naturally; post-`gui.run()` statements execute; shutdown hooks run; WS clients receive clean close frames; H2 pool closes cleanly.
+
+### Implementation
+- Watcher: `InterlockedExchange(IsShuttingDown, 1)` + 2s graceful window + `Halt(0)` fallback.
+- `Flush(Output)` before Halt preserves buffered script output.
+
+### Benefits
+- No more dropped WS connections (clean onclose)
+- No TLS/H2 shutdown errors
+- User shutdown hooks execute
+- Script statements after `gui.run()` run normally
+
+### Verified
+- `MARK3` printed after `gui.run()` returns -> RunLoop break works
+- Buffered stdout flushed
+- Main exits before 2s fallback (no 'window expired' log)
+- ~4s total (2s touch + graceful break)
+
+### Notes
+- True in-process re-execute (no process restart) deferred to v1.8.0.
+
 ## [1.6.2] - 2026-10-28
 
 ### Added
