@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.3.1] - 2026-10-28
+
+### Added
+- **Rate limiter backoff** on `H2_ERR_ENHANCE_YOUR_CALM` — per-host exponential backoff (1s, 2s, 4s, 8s, 16s) after consecutive throttling errors. Transparent to user code.
+
+### Fixed
+- **Post-wait GOAWAY classification** — `TH2Connection.Request()` post-wait path uses `FGoAwayErrCode` to enrich error message with proper code. Previously generic `code=0 fatal`.
+
+### Implementation
+- Globals: `G_H2RateList` + `G_H2RateLock` (thread-safe).
+- `TH2RateEntry`: per-host state (backoff tick, consecutive, last access).
+- `Native_HTTP_Get2` wrapper: rate check + Sleep + record + reset + 60s cap.
+
+### Verified
+- Mock H2 server 3 consecutive ENHANCE then success.
+- req1: retryable, code=11 — error surfaced after 3 attempts.
+- req2: sleeps ~4s (backoff), succeeds — total ~7s vs 1s pre-patch.
+
 ## [1.3.0] - 2026-10-27
 
 ### Fixed

@@ -2487,6 +2487,19 @@ as data is consumed.
 
 No user-facing API change. Just works for large bodies.
 
+### Rate limiter (v1.3.1)
+
+On `H2_ERR_ENHANCE_YOUR_CALM`, client stores per-host exponential
+backoff (1s, 2s, 4s, 8s, 16s) and sleeps before next request to same host:
+
+    http.get2(url);      // throttled -> backoff 1s
+    http.get2(url);      // sleeps 1s, retries
+    http.get2(url);      // throttled again -> backoff 2s
+    // ...up to 16s cap
+
+Success resets backoff to zero. Backoff > 60s triggers immediate fail
+with `rate limited - retry in Xs`.
+
 ### Auto-retry (v1.2.9)
 
 `http.get2` and `http.get2Async` automatically retry up to 3 attempts
