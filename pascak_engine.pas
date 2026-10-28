@@ -46192,6 +46192,74 @@ begin
   end;
 end;
 
+{ v1.4.0: hot-reload watcher — Halt on file change }
+var
+  GWatchMode: Boolean = False;
+  GHotWatchThread: TThread = nil;
+  GHotWatchPath: string;
+  GHotWatchInitialAge: LongInt;
+  GHotWatchInitialSize: Int64;
+
+type
+  THotWatchThread = class(TThread)
+  protected
+    procedure Execute; override;
+  end;
+
+function HotWatch_FileSize(const Path: string): Int64;
+var
+  SR: TSearchRec;
+begin
+  Result := -1;
+  if FindFirst(Path, faAnyFile, SR) = 0 then
+  begin
+    Result := SR.Size;
+    FindClose(SR);
+  end;
+end;
+
+procedure THotWatchThread.Execute;
+var
+  CurAge: LongInt;
+  CurSize: Int64;
+begin
+  while not Terminated do
+  begin
+    Sleep(500);
+    CurAge := FileAge(GHotWatchPath);
+    CurSize := HotWatch_FileSize(GHotWatchPath);
+    if (CurAge <> GHotWatchInitialAge) or (CurSize <> GHotWatchInitialSize) then
+    begin
+      WriteLn('');
+      WriteLn('[hot-reload] detected change in: ', GHotWatchPath);
+      WriteLn('[hot-reload] exiting (0) — wrapper should restart process');
+      WriteLn('[hot-reload] tip: while true; do pascak --dev --watch app.pas; sleep 1; done');
+      Flush(Output);
+      Sleep(100);
+      Halt(0);
+    end;
+  end;
+end;
+
+procedure EnableHotWatch(const FilePath: string);
+begin
+  if not FileExists(FilePath) then
+  begin
+    WriteLn('[hot-reload] WARN: file not found: ', FilePath);
+    Exit;
+  end;
+  GHotWatchPath := FilePath;
+  GHotWatchInitialAge := FileAge(FilePath);
+  GHotWatchInitialSize := HotWatch_FileSize(FilePath);
+  GHotWatchThread := THotWatchThread.Create(True);
+  GHotWatchThread.FreeOnTerminate := False;
+  GHotWatchThread.Start;
+  WriteLn('[hot-reload] watching: ', FilePath);
+  WriteLn('[hot-reload] poll=500ms; file change -> exit(0)');
+  Flush(Output);
+end;
+
+
 procedure RunCLI;
 var
   DebugMode: Boolean;
@@ -46228,6 +46296,8 @@ begin
   begin
     if ParamStr(ArgIdx) = '--debug' then
       DebugMode := True
+    else if ParamStr(ArgIdx) = '--watch' then
+      GWatchMode := True
     else if ParamStr(ArgIdx) = '--dev' then
       GDangerousEnvAllowed := True
     else if ParamStr(ArgIdx) = '--repl' then
@@ -46248,6 +46318,10 @@ begin
       ScriptArg := ParamStr(ArgIdx);
     Inc(ArgIdx);
   end;
+
+  // v1.4.0: hot-reload watcher
+  if GWatchMode and (ScriptArg <> '') then
+    EnableHotWatch(ScriptArg);
   
   if GDangerousEnvAllowed and (GetEnvironmentVariable('PASCAK_DEBUG') = '1') then
   begin
