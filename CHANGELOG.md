@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.6.2] - 2026-10-28
+
+### Added
+- **Null-safe assignment** - `obj?.prop := value`. Non-null target: normal assign, RHS evaluated once. Null target: statement skipped, RHS NOT evaluated (short-circuit, no crash). Chains supported: `obj?.a?.b := value`.
+
+### Implementation
+- `TMemberAssignNode.IsOptional` + ctor param.
+- ParseStatement postfix loop includes `ttOptionalDot`.
+- Compiler emit: `opcJumpIfNull` before RHS compile (short-circuit).
+- Non-optional branch unchanged.
+
+### Verified
+7 cases: non-null assign, null skip, nested null skip, nested non-null assign, RHS not-evaluated on null (side effect count), RHS evaluated once on non-null.
+
 ## [1.6.1] - 2026-10-28
 
 ### Added

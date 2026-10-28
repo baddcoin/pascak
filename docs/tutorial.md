@@ -4391,7 +4391,41 @@ Pattern paling umum: safe access + fallback default:
       println(host2);         // "prod.example.com"
     end.
 
-### 29.5 — Pitfalls
+### 29.5 — Null-Safe Assignment (v1.6.2)
+
+`obj?.prop := value` assigns only if target bukan null:
+
+    var o := {"x": 1};
+    o?.x := 42;
+    println(o.x);         // 42
+
+    var n := null;
+    n?.x := 99;           // no-op, no crash
+    println("ok");        // ok
+
+**Short-circuit RHS** - RHS tidak dievaluasi kalau target null:
+
+    var cnt := 0;
+    function bump() begin cnt := cnt + 1; return 1; end;
+
+    var n := null;
+    n?.y := bump();       // bump() NOT called
+    println(cnt);         // 0
+
+    var o := {"y": 0};
+    o?.y := bump();       // bump() called once
+    println(cnt);         // 1
+
+**Nested chain**:
+
+    var cfg := {"db": {"host": "old"}};
+    cfg?.db?.host := "new";       // assigned
+    println(cfg.db.host);         // new
+
+    var cfg2 := {"db": null};
+    cfg2?.db?.host := "x";        // no-op, no crash
+
+### 29.6 — Pitfalls
 
 **1. `?.` di assignment tidak support**:
 

@@ -68,7 +68,18 @@ Optional method call (v1.2.7):
 
     var r := n?.hasKey(n.expensive());   // null if n=null, n.expensive() NOT called
 
-Tidak support: `obj?.prop := value` (assignment tidak null-safe).
+Null-safe assignment (v1.6.2):
+
+    obj?.prop := value            // assign only if obj != null
+    obj?.a?.b := value            // nested chain
+
+Non-null target: normal assign, RHS evaluated once.
+Null target: statement skipped, RHS NOT evaluated (short-circuit, no crash).
+
+    var n := null;
+    n?.x := expensive_fn();       // expensive_fn() NOT called
+
+Tidak support: `obj?.[index] := value` (array index assignment).
 
 ### Null-Coalescing `??`
 
