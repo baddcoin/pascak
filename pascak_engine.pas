@@ -46192,19 +46192,24 @@ begin
   end;
 end;
 
-{ v1.4.0: hot-reload watcher — Halt on file change }
-var
-  GWatchMode: Boolean = False;
-  GHotWatchThread: TThread = nil;
-  GHotWatchPath: string;
-  GHotWatchInitialAge: LongInt;
-  GHotWatchInitialSize: Int64;
-
+{ v1.4.1: hot-reload watcher — multi-file + directory support }
 type
+  THotWatchFile = record
+    Path: string;
+    InitialAge: LongInt;
+    InitialSize: Int64;
+  end;
+
   THotWatchThread = class(TThread)
   protected
     procedure Execute; override;
   end;
+
+var
+  GWatchMode: Boolean = False;
+  GWatchSpec: string = '';
+  GHotWatchThread: TThread = nil;
+  GHotWatchFiles: array of THotWatchFile;
 
 function HotWatch_FileSize(const Path: string): Int64;
 var
@@ -46218,45 +46223,136 @@ begin
   end;
 end;
 
+function HotWatch_IsDir(const Path: string): Boolean;
+var
+  SR: TSearchRec;
+begin
+  Result := False;
+  if Path = '' then Exit;
+  if FindFirst(Path, faAnyFile, SR) = 0 then
+  begin
+    Result := (SR.Attr and faDirectory) <> 0;
+    FindClose(SR);
+  end;
+end;
+
+procedure HotWatch_AddFile(const Path: string);
+var
+  Idx: Integer;
+begin
+  Idx := Length(GHotWatchFiles);
+  SetLength(GHotWatchFiles, Idx + 1);
+  GHotWatchFiles[Idx].Path := Path;
+  GHotWatchFiles[Idx].InitialAge := FileAge(Path);
+  GHotWatchFiles[Idx].InitialSize := HotWatch_FileSize(Path);
+end;
+
+procedure HotWatch_AddDir(const Dir: string);
+var
+  SR: TSearchRec;
+  Mask, FullPath: string;
+  HasSlash: Boolean;
+begin
+  HasSlash := (Length(Dir) > 0) and (Dir[Length(Dir)] = '/');
+  if HasSlash then
+    Mask := Dir + '*.pas'
+  else
+    Mask := Dir + '/*.pas';
+
+  if FindFirst(Mask, faAnyFile, SR) = 0 then
+  begin
+    repeat
+      if (SR.Name <> '.') and (SR.Name <> '..') and
+         ((SR.Attr and faDirectory) = 0) then
+      begin
+        if HasSlash then
+          FullPath := Dir + SR.Name
+        else
+          FullPath := Dir + '/' + SR.Name;
+        HotWatch_AddFile(FullPath);
+      end;
+    until FindNext(SR) <> 0;
+    FindClose(SR);
+  end;
+end;
+
+procedure HotWatch_AddPath(const Path: string);
+begin
+  if Path = '' then Exit;
+  if HotWatch_IsDir(Path) then
+    HotWatch_AddDir(Path)
+  else
+    HotWatch_AddFile(Path);
+end;
+
+procedure EnableHotWatch(const Spec: string);
+var
+  I: Integer;
+  Cur: string;
+  Ch: Char;
+begin
+  GHotWatchFiles := nil;
+
+  Cur := '';
+  for I := 1 to Length(Spec) do
+  begin
+    Ch := Spec[I];
+    if Ch = ',' then
+    begin
+      if Cur <> '' then HotWatch_AddPath(Cur);
+      Cur := '';
+    end
+    else
+      Cur := Cur + Ch;
+  end;
+  if Cur <> '' then HotWatch_AddPath(Cur);
+
+  if Length(GHotWatchFiles) = 0 then
+  begin
+    WriteLn('[hot-reload] WARN: no files matched spec: ', Spec);
+    Flush(Output);
+    Exit;
+  end;
+
+  WriteLn('[hot-reload] watching ', Length(GHotWatchFiles), ' file(s):');
+  for I := 0 to High(GHotWatchFiles) do
+    WriteLn('[hot-reload]   - ', GHotWatchFiles[I].Path);
+  WriteLn('[hot-reload] poll=500ms; any file change -> exit(0)');
+  Flush(Output);
+
+  GHotWatchThread := THotWatchThread.Create(True);
+  GHotWatchThread.FreeOnTerminate := False;
+  GHotWatchThread.Start;
+end;
+
 procedure THotWatchThread.Execute;
 var
+  I: Integer;
   CurAge: LongInt;
   CurSize: Int64;
+  Changed: Boolean;
 begin
   while not Terminated do
   begin
     Sleep(500);
-    CurAge := FileAge(GHotWatchPath);
-    CurSize := HotWatch_FileSize(GHotWatchPath);
-    if (CurAge <> GHotWatchInitialAge) or (CurSize <> GHotWatchInitialSize) then
+    for I := 0 to High(GHotWatchFiles) do
     begin
-      WriteLn('');
-      WriteLn('[hot-reload] detected change in: ', GHotWatchPath);
-      WriteLn('[hot-reload] exiting (0) — wrapper should restart process');
-      WriteLn('[hot-reload] tip: while true; do pascak --dev --watch app.pas; sleep 1; done');
-      Flush(Output);
-      Sleep(100);
-      Halt(0);
+      CurAge := FileAge(GHotWatchFiles[I].Path);
+      CurSize := HotWatch_FileSize(GHotWatchFiles[I].Path);
+      Changed := (CurAge <> GHotWatchFiles[I].InitialAge) or
+                 (CurSize <> GHotWatchFiles[I].InitialSize);
+      if Changed then
+      begin
+        WriteLn('');
+        WriteLn('[hot-reload] detected change in: ', GHotWatchFiles[I].Path);
+        WriteLn('[hot-reload] exiting (0) — wrapper should restart process');
+        WriteLn('[hot-reload] tip: while true; do pascak --dev --watch app.pas; sleep 1; done');
+        Flush(Output);
+        Sleep(100);
+        Halt(0);
+      end;
     end;
   end;
-end;
-
-procedure EnableHotWatch(const FilePath: string);
-begin
-  if not FileExists(FilePath) then
-  begin
-    WriteLn('[hot-reload] WARN: file not found: ', FilePath);
-    Exit;
-  end;
-  GHotWatchPath := FilePath;
-  GHotWatchInitialAge := FileAge(FilePath);
-  GHotWatchInitialSize := HotWatch_FileSize(FilePath);
-  GHotWatchThread := THotWatchThread.Create(True);
-  GHotWatchThread.FreeOnTerminate := False;
-  GHotWatchThread.Start;
-  WriteLn('[hot-reload] watching: ', FilePath);
-  WriteLn('[hot-reload] poll=500ms; file change -> exit(0)');
-  Flush(Output);
 end;
 
 
@@ -46297,7 +46393,12 @@ begin
     if ParamStr(ArgIdx) = '--debug' then
       DebugMode := True
     else if ParamStr(ArgIdx) = '--watch' then
-      GWatchMode := True
+    begin
+      GWatchMode := True;
+      Inc(ArgIdx);
+      if ArgIdx <= ParamCount then
+        GWatchSpec := ParamStr(ArgIdx);
+    end
     else if ParamStr(ArgIdx) = '--dev' then
       GDangerousEnvAllowed := True
     else if ParamStr(ArgIdx) = '--repl' then
@@ -46319,9 +46420,30 @@ begin
     Inc(ArgIdx);
   end;
 
-  // v1.4.0: hot-reload watcher
-  if GWatchMode and (ScriptArg <> '') then
-    EnableHotWatch(ScriptArg);
+  // v1.4.1: hot-reload watcher (spec + script separation)
+  if GWatchMode then
+  begin
+    // Backward compat: --watch app.pas (no explicit script) -> use spec as script
+    if (ScriptArg = '') and (GWatchSpec <> '') and
+       (Pos(',', GWatchSpec) = 0) and
+       (not HotWatch_IsDir(GWatchSpec)) and FileExists(GWatchSpec) then
+      ScriptArg := GWatchSpec;
+
+    // Validate BEFORE starting watcher thread
+    if ScriptArg = '' then
+    begin
+      WriteLn('[hot-reload] ERROR: --watch requires script argument');
+      WriteLn('[hot-reload] Usage: pascak --watch SPEC script.pas');
+      WriteLn('[hot-reload] Example: pascak --watch . app.pas');
+      WriteLn('[hot-reload] Example: pascak --watch "app.pas,lib.pas" app.pas');
+      Flush(Output);
+      Halt(1);
+    end;
+
+    if GWatchSpec = '' then
+      GWatchSpec := ScriptArg;
+    EnableHotWatch(GWatchSpec);
+  end;
   
   if GDangerousEnvAllowed and (GetEnvironmentVariable('PASCAK_DEBUG') = '1') then
   begin
