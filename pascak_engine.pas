@@ -878,6 +878,7 @@ type
     procedure HandleDidClose(Params: TJSONObject);
     procedure HandleHover(ReqId: TJSONData; Params: TJSONObject);
     procedure HandleCompletion(ReqId: TJSONData; Params: TJSONObject);
+    procedure HandleSignatureHelp(ReqId: TJSONData; Params: TJSONObject);
     procedure HandleDefinition(ReqId: TJSONData; Params: TJSONObject);
     procedure RunDiagnostics;
   public
@@ -45239,6 +45240,8 @@ begin
     HandleHover(ReqId, Params)
   else if Method = 'textDocument/completion' then
     HandleCompletion(ReqId, Params)
+  else if Method = 'textDocument/signatureHelp' then
+    HandleSignatureHelp(ReqId, Params)
   else if Method = 'textDocument/definition' then
     HandleDefinition(ReqId, Params)
   else if Method = 'textDocument/didOpen' then
@@ -45267,6 +45270,7 @@ begin
       Caps.Add('textDocumentSync', 2);
       Caps.Add('hoverProvider', True);
       Caps.Add('completionProvider', TJSONObject.Create(['triggerCharacters', TJSONArray.Create(['.', ':'])]));
+      Caps.Add('signatureHelpProvider', TJSONObject.Create(['triggerCharacters', TJSONArray.Create(['(', ','])]));
       Caps.Add('definitionProvider', True);
       ServerInfo := TJSONObject.Create;
       ServerInfo.Add('name', 'pascak-lsp');
@@ -45858,6 +45862,181 @@ begin
     SendResponse(ReqId, Result);
   finally
     Result.Free;
+  end;
+end;
+
+
+
+procedure TLspServer.HandleSignatureHelp(ReqId: TJSONData; Params: TJSONObject);
+var
+  PosObj, Result, SigObj, ParamObj: TJSONObject;
+  SigsArr, ParamsArr: TJSONArray;
+  LineVal, CharVal, I, J, ParenPos, CommaCount, Depth: Integer;
+  FuncName, SigLabel, ParamStr, Param, Cur: string;
+  Lines: TStringList;
+  P1, P2: Integer;
+begin
+  if not Assigned(Params) then
+  begin
+    SendResponse(ReqId, nil);
+    Exit;
+  end;
+  PosObj := TJSONObject(Params.Find('position'));
+  LineVal := 0; CharVal := 0;
+  if Assigned(PosObj) then
+  begin
+    LineVal := PosObj.Get('line', 0);
+    CharVal := PosObj.Get('character', 0);
+  end;
+
+  Lines := TStringList.Create;
+  try
+    Lines.Text := FDocumentText;
+    if (LineVal < 0) or (LineVal >= Lines.Count) then
+    begin
+      SendResponse(ReqId, nil);
+      Exit;
+    end;
+    Cur := Lines[LineVal];
+    if CharVal > Length(Cur) then CharVal := Length(Cur);
+    Cur := Copy(Cur, 1, CharVal);
+
+    ParenPos := 0;
+    Depth := 0;
+    I := Length(Cur);
+    while I >= 1 do
+    begin
+      if Cur[I] = ')' then Inc(Depth)
+      else if Cur[I] = '(' then
+      begin
+        if Depth = 0 then
+        begin
+          ParenPos := I;
+          Break;
+        end
+        else
+          Dec(Depth);
+      end;
+      Dec(I);
+    end;
+
+    if ParenPos = 0 then
+    begin
+      SendResponse(ReqId, nil);
+      Exit;
+    end;
+
+    I := ParenPos - 1;
+    while (I >= 1) and (Cur[I] = ' ') do Dec(I);
+    J := I;
+    while (J >= 1) and (Cur[J] in ['a'..'z', 'A'..'Z', '0'..'9', '_']) do Dec(J);
+    FuncName := Copy(Cur, J + 1, I - J);
+
+    if FuncName = '' then
+    begin
+      SendResponse(ReqId, nil);
+      Exit;
+    end;
+
+    CommaCount := 0;
+    Depth := 0;
+    for I := ParenPos + 1 to Length(Cur) do
+    begin
+      if Cur[I] = '(' then Inc(Depth)
+      else if Cur[I] = ')' then
+      begin
+        if Depth > 0 then Dec(Depth);
+      end
+      else if (Cur[I] = ',') and (Depth = 0) then
+        Inc(CommaCount);
+    end;
+
+    SigLabel := '';
+    for I := 0 to Lines.Count - 1 do
+    begin
+      P1 := Pos('function ' + FuncName + '(', Lines[I]);
+      if P1 = 0 then P1 := Pos('function ' + FuncName + ' (', Lines[I]);
+      if P1 = 0 then Continue;
+      P2 := Pos('(', Copy(Lines[I], P1, Length(Lines[I])));
+      if P2 = 0 then Continue;
+      P2 := P1 + P2 - 1;
+      J := P2 + 1;
+      Depth := 1;
+      while (J <= Length(Lines[I])) and (Depth > 0) do
+      begin
+        if Lines[I][J] = '(' then Inc(Depth)
+        else if Lines[I][J] = ')' then Dec(Depth);
+        if Depth > 0 then Inc(J);
+      end;
+      if Depth = 0 then
+      begin
+        SigLabel := 'function ' + FuncName + Copy(Lines[I], P2, J - P2 + 1);
+        Break;
+      end;
+    end;
+
+    if SigLabel = '' then
+    begin
+      if FuncName = 'println' then SigLabel := 'println(value, ...)'
+      else if FuncName = 'print' then SigLabel := 'print(value, ...)'
+      else if FuncName = 'len' then SigLabel := 'len(x)'
+      else if FuncName = 'type_of' then SigLabel := 'type_of(x)'
+      else if FuncName = 'str' then SigLabel := 'str(x)'
+      else if FuncName = 'int' then SigLabel := 'int(x)'
+      else if FuncName = 'bool' then SigLabel := 'bool(x)'
+      else if FuncName = 'range' then SigLabel := 'range(start, end, step)'
+      else if FuncName = 'sort' then SigLabel := 'sort(arr)'
+      else if FuncName = 'sleep' then SigLabel := 'sleep(ms)'
+      else
+        SigLabel := FuncName + '(...)';
+    end;
+
+    P1 := Pos('(', SigLabel);
+    P2 := Length(SigLabel);
+    while (P2 > P1) and (SigLabel[P2] <> ')') do Dec(P2);
+    if (P1 > 0) and (P2 > P1) then
+      ParamStr := Copy(SigLabel, P1 + 1, P2 - P1 - 1)
+    else
+      ParamStr := '';
+
+    Result := TJSONObject.Create;
+    try
+      SigsArr := TJSONArray.Create;
+      SigObj := TJSONObject.Create;
+      SigObj.Add('label', SigLabel);
+
+      ParamsArr := TJSONArray.Create;
+      if ParamStr <> '' then
+      begin
+        I := 1;
+        while I <= Length(ParamStr) do
+        begin
+          J := I;
+          while (J <= Length(ParamStr)) and (ParamStr[J] <> ',') do Inc(J);
+          Param := Trim(Copy(ParamStr, I, J - I));
+          if Param <> '' then
+          begin
+            ParamObj := TJSONObject.Create;
+            ParamObj.Add('label', Param);
+            ParamsArr.Add(ParamObj);
+          end;
+          I := J + 1;
+        end;
+      end;
+
+      SigObj.Add('parameters', ParamsArr);
+      SigsArr.Add(SigObj);
+
+      Result.Add('signatures', SigsArr);
+      Result.Add('activeSignature', 0);
+      Result.Add('activeParameter', CommaCount);
+
+      SendResponse(ReqId, Result);
+    finally
+      Result.Free;
+    end;
+  finally
+    Lines.Free;
   end;
 end;
 
