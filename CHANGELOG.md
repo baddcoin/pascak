@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.4.1] - 2026-10-28
+
+### Added
+- **Multi-file + directory watch** — `--watch` now accepts:
+  - `--watch app.pas` (single, backward compat)
+  - `--watch 'app.pas,lib.pas'` (comma-separated)
+  - `--watch dir/` (all *.pas in directory, non-recursive)
+  - `--watch 'dir/,extra.pas'` (mixed dir + file)
+
+### Fixed
+- **Spec vs script collision** — v1.4.0 bug where `--watch app.pas,lib.pas` was used as ScriptArg (broke script execution). Now `--watch` consumes next arg as SPEC; script remains separate positional.
+
+### Implementation
+- `THotWatchFile` record (Path + InitialAge + InitialSize per file).
+- `HotWatch_IsDir`, `HotWatch_AddFile`, `HotWatch_AddDir`, `HotWatch_AddPath` helpers.
+- `EnableHotWatch(spec)`: comma-split, walk dirs, spawn single thread.
+- Watcher `Execute`: iterate all files, `Halt(0)` on first change.
+- Validate-first: error before watcher thread starts if script missing.
+
+### Verified
+5 test cases: single, multi-file comma, dir mode, mixed dir+file, error (no script -> exit 1).
+
 ## [1.4.0] - 2026-10-28
 
 ### Added

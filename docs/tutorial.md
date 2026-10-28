@@ -4941,11 +4941,37 @@ Trade-off: 500ms delay max.
 
 **Tanpa wrapper**: proses exit 0, tidak restart otomatis.
 
-**Batasan (v1.4.0)**:
+**Multi-file + directory watch (v1.4.1)**:
+
+    # Single file
+    pascak --dev --watch app.pas
+
+    # Multi-file comma-separated
+    pascak --dev --watch "app.pas,lib.pas,util.pas" app.pas
+
+    # Directory — watch all *.pas inside (non-recursive)
+    pascak --dev --watch src/ app.pas
+
+    # Mixed: dir + extra file
+    pascak --dev --watch "src/,extra.pas" app.pas
+
+    # Wrapper loop
+    while true; do
+      pascak --dev --watch "src/,app.pas" app.pas
+      sleep 1
+    done
+
+**Syntax**: `pascak --watch SPEC [script.pas]` — SPEC consumed as first
+arg after `--watch`; script = next positional. Backward compat:
+`--watch app.pas` (single-file spec, no explicit script) works as
+before — SPEC auto-promoted to script.
+
+**Batasan (v1.4.1)**:
 - Proses exit, brief downtime ~1s
 - State hilang tiap restart
-- In-process re-execute: v1.4.1
-- Browser auto-reload (WS): v1.4.2
+- Directory watch non-recursive (sub-dirs not walked)
+- In-process re-execute (no exit): v1.4.2
+- Browser auto-reload (WS): v1.4.3
 
 ## Bonus — HTTP/2 Client
 
