@@ -5084,6 +5084,34 @@ Semantics match destructuring statement rest (v1.2.6).
 **Batasan (v1.6.1)**:
 - Rest must be at end of pattern (existing parser restriction)
 
+**Dev wrapper tools/pascak_dev.sh (v1.8.0)**:
+
+Production-grade wrapper combining graceful shutdown + auto-restart:
+
+    # Basic usage
+    tools/pascak_dev.sh app.pas app.pas
+
+    # Watch multiple files with --hot
+    tools/pascak_dev.sh 'src/,app.pas' app.pas --hot
+
+    # Custom binary
+    PASCAK_BIN=/path/to/pascak_noASTnet tools/pascak_dev.sh .
+
+**Features**:
+- Auto-restart on file change (exit 0) or error (exit 1/2)
+- SIGINT/SIGTERM forwarded to child (graceful)
+- 1s delay avoids TIME_WAIT on GUI ports
+- Colored output
+- PASCAK_BIN / RESTART_DELAY env overrides
+
+**Graceful chain (v1.7.0 + v1.8.0)**:
+1. Edit file -> watcher detects
+2. IsShuttingDown -> gui.run returns
+3. Shutdown hooks, WS clean close
+4. Process exits 0 -> wrapper restarts fresh
+
+Zero state leak, no port conflicts.
+
 ## Bonus — HTTP/2 Client
 
 Pascak juga mendukung HTTP/2 client via ALPN negotiation (RFC 7301).

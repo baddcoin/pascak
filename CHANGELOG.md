@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.8.0] - 2026-10-28
+
+### Added
+- **tools/pascak_dev.sh** - production-grade auto-restart wrapper for hot-reload. Combines v1.7.0 graceful shutdown with auto-restart.
+
+Usage:
+  tools/pascak_dev.sh <watch-spec> <script.pas> [extra pascak args]
+
+Features: auto-restart on file change (exit 0) or error (exit 1/2),
+SIGINT forwarded to child, 1s delay avoids TIME_WAIT, colored output,
+PASCAK_BIN / RESTART_DELAY env overrides.
+
+### Verified
+Full graceful chain: watcher requests shutdown, gui.run returns naturally,
+buffered output flushed, wrapper detects exit 0, restarts with fresh state.
+
+### Deferred Indefinitely
+True in-process re-execute (no process restart). GUI port TIME_WAIT +
+fragmented global state + top-level var persistence = high risk vs
+wrapper's zero-risk value.
+
 ## [1.7.0] - 2026-10-28
 
 ### Improved
