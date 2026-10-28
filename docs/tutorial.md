@@ -4966,12 +4966,28 @@ arg after `--watch`; script = next positional. Backward compat:
 `--watch app.pas` (single-file spec, no explicit script) works as
 before — SPEC auto-promoted to script.
 
-**Batasan (v1.4.1)**:
+**Browser auto-reload `--hot` (v1.4.2)**:
+
+`--hot` = `--watch` + browser auto-reload:
+
+    while true; do
+      pascak --dev --hot "src/,app.pas" app.pas
+      sleep 1
+    done
+
+**Flow**:
+1. `--hot` activates watcher + JS injection
+2. `gui.serve` injects script WS listener into HTML
+3. Browser connects to WS (WSPort = HTTP port + 1)
+4. File edit -> watcher detects -> broadcast reload message
+5. Browser JS `location.reload()`
+6. Wrapper restarts process -> fresh code live
+
+**Batasan (v1.4.2)**:
 - Proses exit, brief downtime ~1s
 - State hilang tiap restart
-- Directory watch non-recursive (sub-dirs not walked)
-- In-process re-execute (no exit): v1.4.2
-- Browser auto-reload (WS): v1.4.3
+- Directory watch non-recursive
+- JS injection falls back to append if no closing body tag
 
 ## Bonus — HTTP/2 Client
 

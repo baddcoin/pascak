@@ -191,6 +191,26 @@ Untuk tutorial lengkap: `docs/tutorial.md` Bab 1-31.
 ---
 ## CLI Flags
 
+### --hot (v1.4.2)
+
+Like `--watch` + browser auto-reload: injects JS listener that reloads
+the page when server broadcasts reload.
+
+    while true; do
+      pascak --dev --hot . app.pas
+      sleep 1
+    done
+
+Behavior:
+1. Injects script block into served HTML (before closing body tag)
+2. JS connects to WS port (WSPort = HTTP port + 1)
+3. On file change: broadcast reload to all WS clients
+4. Browser location.reload() -> wrapper restarts -> fresh code
+
+Messages:
+- `[hot-reload] injected WS reload JS (WSPort=N)` - at gui.serve
+- `[hot-reload] broadcast reload: N client(s)` - on change
+
 ### --watch (v1.4.0)
 
 Hot-reload: watches script file (500ms poll), exits 0 on change.

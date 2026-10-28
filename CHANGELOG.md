@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.4.2] - 2026-10-28
+
+### Added
+- **`--hot` flag** - implies `--watch` + auto-reloads browser GUI tabs. Broadcasts reload to WS clients, sleeps 300ms, exits cleanly. Injected JS `location.reload()`.
+
+### Implementation
+- `GHotMode` global + `--hot` CLI flag.
+- `InjectHotReloadJS`: gui.serve appends script before `</body>`.
+- `BroadcastHotReloadToGUI`: iterate GGuiApps, BroadcastToServer.
+- Watcher: broadcast + Sleep(300) before Halt(0).
+
+### Verified
+Tests A/B/C: HTML 588->1047 bytes, broadcast executes, exit 0, elapsed 3s.
+
 ## [1.4.1] - 2026-10-28
 
 ### Added
