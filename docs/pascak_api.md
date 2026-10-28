@@ -189,6 +189,16 @@ Untuk tutorial lengkap: `docs/tutorial.md` Bab 1-31.
 `runtimeStats`, `profilerEnable`, `profilerDisable`, `profilerReport`
 
 ---
+## CLI Flags
+
+### --watch (v1.4.0)
+
+Hot-reload: watches script file (500ms poll), exits 0 on change.
+
+    while true; do pascak --dev --watch app.pas; sleep 1; done
+
+Messages: `[hot-reload] watching: <path>` dan `[hot-reload] detected change in: <path>`.
+
 ## Config
 
 Config management — dotenv, JSON, env override, runtime set dengan precedence chain.

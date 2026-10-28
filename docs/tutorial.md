@@ -4912,6 +4912,41 @@ Ini penting untuk performance (skip expensive arg) dan safety
 - Hanya method call (bukan constructor `new X?.()`)
 - Single-call per `?.` (tidak support `obj?.a()?.b()` chained calls)
 
+### 32 — Hot-Reload dengan --watch (v1.4.0)
+
+Hot-reload untuk dev workflow: edit code -> auto-restart.
+
+**Wrapper pattern**:
+
+    while true; do
+      pascak --dev --watch app.pas
+      echo "restarting in 1s..."
+      sleep 1
+    done
+
+**Behavior**:
+
+    $ pascak --dev --watch app.pas
+    [hot-reload] watching: app.pas
+    [hot-reload] poll=500ms; file change -> exit(0)
+    [boot] exec policy = allow-all
+    === APP running ===
+
+    # edit app.pas
+    [hot-reload] detected change in: app.pas
+    [hot-reload] exiting (0) — wrapper should restart process
+
+**Deteksi**: mtime + size, poll 500ms. Cross-platform (no inotify needed).
+Trade-off: 500ms delay max.
+
+**Tanpa wrapper**: proses exit 0, tidak restart otomatis.
+
+**Batasan (v1.4.0)**:
+- Proses exit, brief downtime ~1s
+- State hilang tiap restart
+- In-process re-execute: v1.4.1
+- Browser auto-reload (WS): v1.4.2
+
 ## Bonus — HTTP/2 Client
 
 Pascak juga mendukung HTTP/2 client via ALPN negotiation (RFC 7301).

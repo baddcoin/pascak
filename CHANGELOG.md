@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.4.0] - 2026-10-28
+
+### Added
+- **`--watch` CLI flag** — hot-reload for dev workflow. Polls script file (mtime + size, 500ms). On change: prints `[hot-reload] detected change` and exits cleanly (0).
+
+### Implementation
+- `THotWatchThread`: background poller.
+- `HotWatch_FileSize()` helper: FindFirst/TSearchRec wrapper.
+- `EnableHotWatch(path)`: spawn thread with mtime+size snapshot.
+- `RunCLI`: `--watch` flag -> `EnableHotWatch(ScriptArg)`.
+
+### Verified
+4 test cases: baseline, no-change, touch, content-change.
+
+### Deferred
+In-process re-execute (v1.4.1), WS browser reload (v1.4.2).
+
 ## [1.3.1] - 2026-10-28
 
 ### Added
