@@ -753,7 +753,29 @@ begin
     if Stream.ErrorMsg <> '' then
     begin
       Result.HasError := True;
-      Result.Error := Stream.ErrorMsg;
+      { v1.3.1: post-wait GOAWAY classification. FailAllPending() may have
+        overwritten Stream.ErrorMsg with generic 'connection closed', but
+        FGoAwayErrCode persists on the connection. Use it to enrich error
+        with retryable hint so rate limiter / retry wrapper can detect. }
+      if FGoAwayErrCode = H2_ERR_ENHANCE_YOUR_CALM then
+      begin
+        Result.Error := Stream.ErrorMsg + ' [ENHANCE_YOUR_CALM code=11]';
+        Result.ErrorCode := FGoAwayErrCode;
+        Result.Retryable := True;
+      end
+      else if FGoAwayErrCode = H2_ERR_NO_ERROR then
+      begin
+        Result.Error := Stream.ErrorMsg + ' [GOAWAY NO_ERROR code=0]';
+        Result.ErrorCode := FGoAwayErrCode;
+        Result.Retryable := True;
+      end
+      else if Pos('connection closed', Stream.ErrorMsg) > 0 then
+      begin
+        Result.Error := Stream.ErrorMsg;
+        Result.Retryable := True;
+      end
+      else
+        Result.Error := Stream.ErrorMsg;
     end
     else if not Stream.Ended then
     begin

@@ -2158,6 +2158,8 @@ var //global
 
   // HTTP/2 Pooling (D.2b)
   G_H2Pool: TH2Pool = nil;
+  G_H2RateList: TList = nil;
+  G_H2RateLock: TCriticalSection = nil;
 
   // Production Ops (A.4 metrics)
   GMetrics: TStringList = nil;
@@ -29336,26 +29338,168 @@ begin
 end;
 
 { v1.2.9: retry wrapper — up to 3 attempts on retryable H2 errors }
+{ v1.3.1: rate limiter state + helpers }
+type
+  TH2RateEntry = class
+    Host: string;
+    BackoffUntilTick: QWord;
+    ConsecutiveErrors: Integer;
+    LastAccessTick: QWord;
+  end;
+
+procedure EnsureRateInit;
+begin
+  if not Assigned(G_H2RateLock) then
+  begin
+    G_H2RateLock := TCriticalSection.Create;
+    G_H2RateList := TList.Create;
+  end;
+end;
+
+function RateExtractHost(const URL: string): string;
+var
+  StartPos, EndPos: Integer;
+begin
+  Result := '';
+  StartPos := Pos('://', URL);
+  if StartPos = 0 then Exit;
+  StartPos := StartPos + 3;
+  EndPos := StartPos;
+  while (EndPos <= Length(URL)) and (URL[EndPos] <> '/') do
+    Inc(EndPos);
+  if EndPos > StartPos then
+    Result := LowerCase(Copy(URL, StartPos, EndPos - StartPos));
+end;
+
+function RateGetWaitMs(const Host: string): QWord;
+var
+  I: Integer;
+  Entry: TH2RateEntry;
+  NowTick: QWord;
+begin
+  Result := 0;
+  if (Host = '') or (not Assigned(G_H2RateList)) then Exit;
+  NowTick := GetTickCount64;
+  G_H2RateLock.Acquire;
+  try
+    for I := 0 to G_H2RateList.Count - 1 do
+    begin
+      Entry := TH2RateEntry(G_H2RateList[I]);
+      if Entry.Host = Host then
+      begin
+        Entry.LastAccessTick := NowTick;
+        if Entry.BackoffUntilTick > NowTick then
+          Result := Entry.BackoffUntilTick - NowTick
+        else
+          Result := 0;
+        Exit;
+      end;
+    end;
+  finally
+    G_H2RateLock.Release;
+  end;
+end;
+
+procedure RateRecordError(const Host: string);
+var
+  I: Integer;
+  Entry: TH2RateEntry;
+  NowTick, BackoffMs: QWord;
+  ShiftAmt: Integer;
+begin
+  if Host = '' then Exit;
+  EnsureRateInit;
+  NowTick := GetTickCount64;
+  G_H2RateLock.Acquire;
+  try
+    Entry := nil;
+    for I := 0 to G_H2RateList.Count - 1 do
+      if TH2RateEntry(G_H2RateList[I]).Host = Host then
+      begin
+        Entry := TH2RateEntry(G_H2RateList[I]);
+        Break;
+      end;
+    if not Assigned(Entry) then
+    begin
+      Entry := TH2RateEntry.Create;
+      Entry.Host := Host;
+      G_H2RateList.Add(Entry);
+    end;
+    Inc(Entry.ConsecutiveErrors);
+    Entry.LastAccessTick := NowTick;
+    ShiftAmt := Entry.ConsecutiveErrors - 1;
+    if ShiftAmt > 4 then ShiftAmt := 4;
+    BackoffMs := QWord(1000) shl ShiftAmt;
+    Entry.BackoffUntilTick := NowTick + BackoffMs;
+  finally
+    G_H2RateLock.Release;
+  end;
+end;
+
+procedure RateReset(const Host: string);
+var
+  I: Integer;
+begin
+  if (Host = '') or (not Assigned(G_H2RateList)) then Exit;
+  G_H2RateLock.Acquire;
+  try
+    for I := 0 to G_H2RateList.Count - 1 do
+      if TH2RateEntry(G_H2RateList[I]).Host = Host then
+      begin
+        TH2RateEntry(G_H2RateList[I]).ConsecutiveErrors := 0;
+        TH2RateEntry(G_H2RateList[I]).BackoffUntilTick := 0;
+        Exit;
+      end;
+  finally
+    G_H2RateLock.Release;
+  end;
+end;
+
 function Native_HTTP_Get2(Args: TObjectList; CallEnv: TSymbolTable): TValue;
 var
   Attempt, MaxAttempts: Integer;
+  Host: string;
+  WaitMs: QWord;
+  IsEnhance, IsRetryable: Boolean;
 begin
   MaxAttempts := 3;
   Result := nil;
+
+  Host := '';
+  if (Args.Count >= 1) and Assigned(Args[0]) and
+     (TValue(Args[0]).DataType = dtString) then
+    Host := RateExtractHost(TValue(Args[0]).StrVal);
+
   for Attempt := 1 to MaxAttempts do
   begin
+    WaitMs := RateGetWaitMs(Host);
+    if WaitMs > QWord(60000) then
+      raise Exception.Create(
+        'http.get2: rate limited - try again in ' +
+        IntToStr(Int64(WaitMs div 1000)) + 's');
+    if WaitMs > 0 then
+      Sleep(Cardinal(WaitMs));
+
     try
       Result := Native_Http_Get2Impl(Args, CallEnv);
+      RateReset(Host);
       Exit;
     except
       on E: Exception do
       begin
-        if ((Pos('(retryable,', E.Message) > 0) or
-             (Pos('connection closed', E.Message) > 0) or
-             (Pos('GOAWAY received', E.Message) > 0)) and
-           (Attempt < MaxAttempts) then
+        IsEnhance := (Pos('ENHANCE_YOUR_CALM', E.Message) > 0) or
+                     (Pos('code=11', E.Message) > 0);
+        if IsEnhance then
+          RateRecordError(Host);
+
+        IsRetryable := (Pos('(retryable,', E.Message) > 0) or
+                        (Pos('connection closed', E.Message) > 0) or
+                        (Pos('GOAWAY received', E.Message) > 0);
+
+        if IsRetryable and (Attempt < MaxAttempts) then
         begin
-          Sleep(100 shl (Attempt - 1));  // 100ms, 200ms
+          if not IsEnhance then
+            Sleep(100 shl (Attempt - 1));
           Continue;
         end;
         raise;
