@@ -12170,6 +12170,14 @@ var
   Func: TFunctionNode;
   FuncBodyBlock: TBlockNode;
   ParamCount, ParamCap: Integer;
+  Prelude: TObjectList;
+  IsPatObj: Boolean;
+  SynthName, Seg, RemPath: string;
+  PatNames, PatLeafs, PatRest: TStringList;
+  PatDefaults: TList;
+  DotPos, OutK: Integer;
+  Cur, ExtractNode: TNode;
+  VarNode: TVarDeclNode;
   
   procedure AddParam;
   begin
@@ -12179,6 +12187,65 @@ var
       SetLength(Func.Params, ParamCap);
     end;
     
+    { v1.6.0: function param destructure }
+    if FCurrToken.Typ in [ttLBrace, ttLBracket] then
+    begin
+      IsPatObj := (FCurrToken.Typ = ttLBrace);
+      Eat(FCurrToken.Typ);
+      SynthName := '__fp_' + IntToStr(ParamCount);
+      PatNames := TStringList.Create;
+      PatLeafs := TStringList.Create;
+      PatRest := TStringList.Create;
+      PatDefaults := TList.Create;
+      try
+        ParsePattern('', IsPatObj, PatNames, PatLeafs, PatRest, PatDefaults);
+        if IsPatObj then Eat(ttRBrace) else Eat(ttRBracket);
+        OutK := 0;
+        while OutK <= PatLeafs.Count - 1 do
+        begin
+          if PatRest[OutK] = 'R' then
+            errMSG.callerror(25, 'function param: rest element belum support',
+              FCurrToken.Line, FCurrToken.Col);
+          Cur := TVariableNode.Create(SynthName);
+          RemPath := PatNames[OutK];
+          while RemPath <> '' do
+          begin
+            DotPos := Pos('.', RemPath);
+            if DotPos > 0 then
+            begin
+              Seg := Copy(RemPath, 1, DotPos - 1);
+              RemPath := Copy(RemPath, DotPos + 1, Length(RemPath));
+            end else
+            begin
+              Seg := RemPath;
+              RemPath := '';
+            end;
+            if (Seg <> '') and (Seg[1] in ['0'..'9']) then
+              Cur := TArrayAccessNode.Create(Cur,
+                TLiteralNode.Create(TValue.CreateNum(StrToInt(Seg))))
+            else
+              Cur := TMemberAccessNode.Create(Cur, Seg);
+          end;
+          ExtractNode := Cur;
+          if PatDefaults[OutK] <> nil then
+            ExtractNode := TBinaryOpNode.Create(ExtractNode, opNullCoalesce,
+              TNode(PatDefaults[OutK]));
+          VarNode := TVarDeclNode.Create(PatLeafs[OutK], ExtractNode, False);
+          Prelude.Add(VarNode);
+          Inc(OutK);
+        end;
+        Func.Params[ParamCount].Name := SynthName;
+        Func.Params[ParamCount].DefaultExpr := nil;
+        Inc(ParamCount);
+      finally
+        PatNames.Free;
+        PatLeafs.Free;
+        PatRest.Free;
+        PatDefaults.Free;
+      end;
+      Exit;
+    end;
+
     Func.Params[ParamCount].Name := FCurrToken.Str;
     Eat(ttId);
     
@@ -12193,6 +12260,7 @@ var
   end;
         
 begin
+  Prelude := TObjectList.Create(True);
   Func := TFunctionNode.Create;
   FuncBodyBlock := nil;
   try
@@ -12236,12 +12304,25 @@ begin
     
     Eat(ttEnd);
 
-    Func.Body := FuncBodyBlock; 
+    Func.Body := FuncBodyBlock;
+    { v1.6.0: inject prelude var decls at body start }
+    if Prelude.Count > 0 then
+    begin
+      OutK := Prelude.Count - 1;
+      while OutK >= 0 do
+      begin
+        FuncBodyBlock.Statements.Insert(0, TNode(Prelude[OutK]));
+        Dec(OutK);
+      end;
+      Prelude.OwnsObjects := False;
+    end;
+    Prelude.Free;
     Result := Func;
-    
+
   except
     if Assigned(FuncBodyBlock) then FuncBodyBlock.Free;
-    Func.Free; 
+    Prelude.Free;
+    Func.Free;
     raise;
   end;
 end;
