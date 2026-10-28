@@ -189,6 +189,20 @@ Untuk tutorial lengkap: `docs/tutorial.md` Bab 1-31.
 `runtimeStats`, `profilerEnable`, `profilerDisable`, `profilerReport`
 
 ---
+## Function Parameter Destructuring (v1.6.0)
+
+Function params can destructure directly:
+
+    function f({a, b}, x) begin return a + b + x; end;
+    function g([x, y]) begin return x + y; end;
+    function h({cfg: {port}, u, v = 5}) begin return port + u + v; end;
+    function mixed(a, {b, c}, d) begin return a + b + c + d; end;
+
+Supports: nested patterns, defaults, multiple patterns per signature.
+Rest element inside pattern param: not supported (v1.6.0).
+
+Implementation: synthetic param `__fp_N` + prelude destructure var.
+
 ## CLI Flags
 
 ### --hot (v1.4.2)

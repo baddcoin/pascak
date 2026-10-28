@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.6.0] - 2026-10-28
+
+### Added
+- **Function parameter destructuring** — params can destructure objects/arrays:
+  - `function f({a, b}, x) begin ... end`
+  - `function g([x, y]) begin ... end`
+  - `function h({cfg: {port}, u, v = 5}) begin ... end`
+  - Mixed normal + pattern: `mixed(a, {b, c}, d)`
+
+### Implementation
+- `ParseFunctionDecl.AddParam` detects pattern, reuses `ParsePattern`.
+- Synthetic param `__fp_N`, prelude `TVarDeclNode` chain at body start.
+- Nested, defaults, multiple patterns, struct methods all supported.
+- Zero compiler change (params become locals via existing AddLocal).
+
+### Restrictions
+- Rest element in pattern param: explicit error (v1.6.0).
+
+### Verified
+5 test cases: basic obj/array, nested+default, multiple patterns, mixed.
+
 ## [1.5.0] - 2026-10-28
 
 ### Added

@@ -4989,6 +4989,48 @@ before — SPEC auto-promoted to script.
 - Directory watch non-recursive
 - JS injection falls back to append if no closing body tag
 
+### 31.13 — Function Param Destructuring (v1.6.0)
+
+Function parameters can destructure directly:
+
+    function f({a, b}, x) begin
+      return a + b + x;
+    end;
+    println(f({"a": 1, "b": 2}, 3));    // 6
+
+    function g([x, y]) begin
+      return x + y;
+    end;
+    println(g([10, 20]));                // 30
+
+**Nested + default**:
+
+    function h({cfg: {port}, u, v = 5}) begin
+      return port + u + v;
+    end;
+    println(h({"cfg": {"port": 80}, "u": 10}));   // 95
+
+**Multiple patterns**:
+
+    function two({x}, {y}) begin
+      return x + y;
+    end;
+    println(two({"x": 100}, {"y": 200}));         // 300
+
+**Mixed normal + pattern**:
+
+    function mixed(a, {b, c}, d) begin
+      return a + b + c + d;
+    end;
+    println(mixed(1, {"b": 2, "c": 3}, 4));       // 10
+
+**Implementation**: parser detects pattern in param position, generates
+synthetic `__fp_N`, injects `var {destructure} = __fp_N;` prelude at
+body start. Zero overhead beyond equivalent manual destructuring.
+
+**Batasan (v1.6.0)**:
+- Rest element inside pattern param belum support
+
 ## Bonus — HTTP/2 Client
 
 Pascak juga mendukung HTTP/2 client via ALPN negotiation (RFC 7301).
