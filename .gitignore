@@ -200,3 +200,8 @@ termux-x11/
 test/testMusic.m4a
 test/testMusic.ogg
 test/*.wav
+
+# Local backups (safety net)
+*.bak_*
+*.pas.testlock
+*.pas.bak
