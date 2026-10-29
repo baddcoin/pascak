@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.9.2] - 2026-10-29
+
+### Performance
+- **Fast CLI exit** — after `Engine.Free`, skip ~200ms of global cleanup (GC sweep, module registries, TLS/Net/Proc shutdown, lock frees) for scripts with no servers/GUI apps. OS reclaims memory on process exit.
+- **Startup: 277ms -> 68ms** (-75% vs v1.9.1).
+- **Cumulative v1.8.0 -> v1.9.2**: JSON 10.0x, Array 6.5x, String 2.8x, Arith 2.3x, Calls 2.1x, Dict 1.5x, Startup 29x.
+
+### Added
+- `PASCAK_FULL_CLEANUP=1` env var — opt-in full cleanup (preserve pre-v1.9.2 behavior).
+- `PASCAK_TIMING=1` env var — print phase timings (globals_init / engine_create / exec / event_loop / engine_shutdown / engine_free / fast_exit / total).
+- `benchmarks/results_v1.9.2.md` — cumulative analysis with per-phase timing.
+
+### Safety
+- Fast-exit guarded by `GHTTPServers.Count = 0`, `GWSServers.Count = 0`, `GGuiApps.Count = 0`.
+- `RunShutdownHooks` already runs *before* fast-exit — user hooks not skipped.
+- Server/GUI scripts still do full cleanup (graceful WS close, HTTP drain, TLS shutdown).
+- Async scripts (pool only, no servers) — pool resources OS-reclaimed; verified `http.get2Async` completes correctly.
+
+### Known limitations
+- Server script without `gui.run()` (e.g., `gui.start(); sleep(2000);`) hangs on shutdown — pre-existing bug, not v1.9.2 regression, target v1.9.3.
+- `event_loop: 21ms` fixed cost — possible minimal timer wait, investigate v1.9.3.
+
 ## [1.9.1] - 2026-10-29
 
 ### Performance

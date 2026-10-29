@@ -44625,6 +44625,32 @@ begin
   GWSClientWorkersLock := TCriticalSection.Create;  
 end;
 
+{ v1.9.2: opt-in startup timing instrumentation }
+var
+  GTimingEnabled: Boolean = False;
+  GTimingT0: QWord = 0;
+  GTimingPrev: QWord = 0;
+
+procedure TimingInit;
+begin
+  GTimingEnabled := GetEnvironmentVariable('PASCAK_TIMING') = '1';
+  GTimingT0 := GetTickCount64;
+  GTimingPrev := GTimingT0;
+end;
+
+procedure TimingMark(const Name: string);
+var
+  NowTick, Delta, Total: QWord;
+begin
+  if not GTimingEnabled then Exit;
+  NowTick := GetTickCount64;
+  Delta := NowTick - GTimingPrev;
+  Total := NowTick - GTimingT0;
+  WriteLn('  [timing] ', Name, ': ', Delta, 'ms (total ', Total, 'ms)');
+  Flush(Output);
+  GTimingPrev := NowTick;
+end;
+
 procedure runScript(scr: string; DebugMode: Boolean = False);
 var
   Engine: TPascakEngine;
@@ -44645,6 +44671,7 @@ var
   EnvPolicyTmpPolicy: TExecPolicy;   // ← TAMBAH  
   
 begin 
+  TimingInit;
   FS := DefaultFormatSettings;
   FS.DecimalSeparator := '.';
   ExitCode := 0; 
@@ -44665,6 +44692,7 @@ begin
 
   EnsureGlobalsInit;
   GlobalInit := True;
+  TimingMark('globals_init');
 
   Engine := nil;
   NetInit; 
@@ -44673,6 +44701,7 @@ begin
     try
       Engine := TPascakEngine.Create;
       Engine.SetMemoryQuota(256 * 1024 * 1024);
+  TimingMark('engine_create');
       
       if EnvPolicy <> '' then
       begin
@@ -44729,9 +44758,11 @@ begin
         Engine.SetDebugEnabled(True);
       
       Res := Engine.ExecuteString(scr, 'test.pas');      
+  TimingMark('exec');
       if Assigned(Res) then Res.Free;
       
       Engine.RunEventLoop;
+  TimingMark('event_loop');
       
       // ✅ FIX: set shutdown flag SEBELUM join thread.
       // Tanpa ini, server threads yang blocked di NetAcceptTimeout
@@ -44941,6 +44972,7 @@ begin
       end;
 
       Engine.Shutdown;
+  TimingMark('engine_shutdown');
       
       // ✅ FIX: Process zombies SEBELUM Engine.Free.
       // Zombie objects (TValueList, TDictValue, TSymbolTable) mereferensikan
@@ -44952,8 +44984,29 @@ begin
       
       Engine.Free;
       Engine := nil;
+  TimingMark('engine_free');
     end;
   
+
+    { v1.9.2: fast CLI exit. Skip ~200ms of global cleanup (GC sweep,
+      module registries, TLS/Net/Proc shutdown, lock frees) for scripts
+      with no servers, GUI, or user resources. OS reclaims memory on
+      exit. Opt-in full cleanup via PASCAK_FULL_CLEANUP=1. }
+    if (GetEnvironmentVariable('PASCAK_FULL_CLEANUP') <> '1') and
+       ((not Assigned(GHTTPServers)) or (GHTTPServers.Count = 0)) and
+       ((not Assigned(GWSServers)) or (GWSServers.Count = 0)) and
+       ((not Assigned(GGuiApps)) or (GGuiApps.Count = 0)) then
+    begin
+      TimingMark('fast_exit');
+      {$IFDEF UNIX}
+      Flush(Output);
+      Flush(ErrOutput);
+      libc__exit(ExitCode);
+      {$ELSE}
+      Halt(ExitCode);
+      {$ENDIF}
+    end;
+
     // Free GUI apps before TLS shutdown (releases TLSContext refs)
     if Assigned(GGuiAppsLock) then
     begin
@@ -45281,6 +45334,7 @@ begin
   {$IFDEF UNIX}
   Flush(Output);
   Flush(ErrOutput);
+  TimingMark('total_before_exit');
   libc__exit(ExitCode);
   {$ELSE}
   Halt(ExitCode);

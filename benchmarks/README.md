@@ -26,8 +26,9 @@ Total runtime: ~10-15 seconds (7 benchmarks, 1 warm-up + 3 runs each).
 
 See results files:
 - [results_v1.8.0.md](results_v1.8.0.md) — initial baseline
-- [results_v1.9.0.md](results_v1.9.0.md) — Sleep(1500) + script fallback fixes (~2x speedup)
-- [results_v1.9.1.md](results_v1.9.1.md) — lazy worker pool (startup 489ms -> 277ms, cumulative 2-5x)
+- [results_v1.9.0.md](results_v1.9.0.md) — Sleep(1500) + script fallback (~2x)
+- [results_v1.9.1.md](results_v1.9.1.md) — lazy worker pool (startup 489->277ms)
+- [results_v1.9.2.md](results_v1.9.2.md) — fast CLI exit (startup 277->68ms, cumulative 10x JSON, 6.5x Array, 29x startup)
 
 Key findings:
 - Parser: **fast** (780K lines/sec)
