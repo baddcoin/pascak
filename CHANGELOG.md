@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.9.3] - 2026-10-29
+
+### Performance
+- **Conditional WS poll** — `TEventLoop.RunLoop` uses `Tick(0)` (non-blocking) when no WS clients and no pending tasks, `Tick(20)` only when tasks/clients need waiting.
+- **Startup: 68ms -> 45ms** (-34% vs v1.9.2).
+- **Cumulative v1.8.0 -> v1.9.3**: JSON 11.1x, Array 6.8x, String 2.8x, Arith 2.4x, Calls 2.1x, Dict 1.5x, Startup 44x.
+
+### Verified
+- GUI scripts (`gui.run()`) still block correctly on WS clients.
+- Async scripts (`http.get2Async`) still work (FTasks.Count > 0 triggers Tick(20)).
+- Pure CLI scripts (`hi.pas`) get 45ms startup.
+- Eager worker pool (`PASCAK_WORKER_POOL=eager`) unchanged (~250ms, thread join).
+- All 130+ language tests pass (zero regression).
+
+### Diminishing returns
+~45ms is near-optimal for interpreter. Further optimization unrealistic without OS/compiler-level changes (static linking, preload, etc). Shift focus to feature work / bug fixes.
+
+### Known limitations
+- Server script without `gui.run()` (e.g., `gui.start(); sleep(N)`) hangs on shutdown — pre-existing, target v1.10+.
+
 ## [1.9.2] - 2026-10-29
 
 ### Performance

@@ -19857,7 +19857,13 @@ begin
       // B.1.4: tick WS event loop (non-blocking, 20ms timeout)
       if Assigned(GWSEventLoop) then
       begin
-        try GWSEventLoop.Tick(20);
+        try
+          { v1.9.3: non-blocking poll when idle (no WS clients + no tasks).
+            Saves ~20ms startup for pure CLI scripts. }
+          if (GWSEventLoop.ActiveConns > 0) or (FTasks.Count > 0) then
+            GWSEventLoop.Tick(20)
+          else
+            GWSEventLoop.Tick(0);
         except
           // fail-silent — error WS tidak boleh matikan script event loop
         end;
