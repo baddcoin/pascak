@@ -41,6 +41,7 @@ run_lang_tests() {
     [v160_param_destructure.pas]="mixed"
     [v161_rest_in_param.pas]="reg(no rest)"
     [v162_nullsafe_assign.pas]="o2.y"
+    [v1102_optional_index.pas]="T10: arr3\[0\] =1"
   )
 
   for file in "$TESTS_DIR"/lang/*.pas; do

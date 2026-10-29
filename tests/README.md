@@ -47,6 +47,7 @@ run with PASS/FAIL markers:
 | v160_param_destructure | `function f({a,b})` (v1.6.0) |
 | v161_rest_in_param | `function f({a, ...rest})` (v1.6.1) |
 | v162_nullsafe_assign | `obj?.prop := value` (v1.6.2) |
+| v1102_optional_index | `obj?.[idx]` read + `:= val` assign (v1.10.2) |
 
 ## Integration tests (manual)
 

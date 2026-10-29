@@ -1278,7 +1278,8 @@ type
   public
     FTarget: TNode;      
     FIndexExpr: TNode;
-    constructor Create(ATarget, AIndex: TNode);
+    IsOptional: Boolean;
+    constructor Create(ATarget, AIndex: TNode; AIsOptional: Boolean = False);
     destructor Destroy; override;
   end;
 
@@ -1289,7 +1290,8 @@ type
     FValueExpr: TNode;
   public
     FAssignOp: string;
-    constructor Create(ATarget: TNode; AIndex, AValue: TNode);
+    IsOptional: Boolean;
+    constructor Create(ATarget: TNode; AIndex, AValue: TNode; AIsOptional: Boolean = False);
     destructor Destroy; override;
   end;
 
@@ -8650,10 +8652,11 @@ begin
   end;
 end;
 
-constructor TArrayAccessNode.Create(ATarget, AIndex: TNode); 
+constructor TArrayAccessNode.Create(ATarget, AIndex: TNode; AIsOptional: Boolean = False);
 begin 
     FTarget := ATarget; 
     FIndexExpr := AIndex; 
+    IsOptional := AIsOptional;
 end;
 
 destructor TArrayAccessNode.Destroy; 
@@ -8663,11 +8666,12 @@ begin
     inherited; 
 end;
 
-constructor TArrayAssignNode.Create(ATarget: TNode; AIndex, AValue: TNode); 
+constructor TArrayAssignNode.Create(ATarget: TNode; AIndex, AValue: TNode; AIsOptional: Boolean = False);
 begin 
     FTarget := ATarget; 
     FIndexExpr := AIndex; 
     FValueExpr := AValue; 
+    IsOptional := AIsOptional;
 end;
 
 destructor TArrayAssignNode.Destroy; 
@@ -11506,6 +11510,7 @@ var
   NStart, NEnd, NStep: TNode;
   FirstExpr, ColExpr, CondExpr: TNode; 
   IterVar: string;
+  Idx: TNode;
   StartLine, StartCol: Integer;
 begin
   LHS := nil; Arr := nil; CallNode := nil; MethodCall := nil;
@@ -11831,6 +11836,20 @@ begin
       if FCurrToken.Typ = ttOptionalDot then
       begin
         Eat(ttOptionalDot);
+        { v1.10.2: obj?.[idx] optional array access }
+        if FCurrToken.Typ = ttLBracket then
+        begin
+          Eat(ttLBracket);
+          Idx := ParseExpression;
+          try
+            Eat(ttRBracket);
+            LHS := TArrayAccessNode.Create(LHS, Idx, True);
+          except
+            Idx.Free;
+            raise;
+          end;
+        end else begin
+
         Mem := FCurrToken.Str;
         Eat(ttId);
         // v1.2.7: obj?.method(args) - method call with optional chain
@@ -11856,6 +11875,7 @@ begin
           end;
         end else
           LHS := TMemberAccessNode.Create(LHS, Mem, True);
+        end;
       end else
 
       if FCurrToken.Typ = ttLBracket then 
@@ -13150,13 +13170,14 @@ begin
             node1 := TArrayAccessNode(Result).fIndexExpr;
             node2 := TArrayAccessNode(Result).fTarget;
             
+            IsOpt := TArrayAccessNode(Result).IsOptional;
             TArrayAccessNode(Result).fIndexExpr := nil; 
             TArrayAccessNode(Result).fTarget := nil; 
             Result.Free;
             Result := nil; // <-- PERBAIKAN FATAL
             
             try
-              Result := TArrayAssignNode.Create(node2, node1, node3);
+              Result := TArrayAssignNode.Create(node2, node1, node3, IsOpt);
               TArrayAssignNode(Result).FAssignOp := OpStr;
             except
               node1.Free; 
@@ -13214,6 +13235,20 @@ begin
         begin
           { v1.6.2: optional dot chain in statement context }
           Eat(ttOptionalDot);
+          { v1.10.2: obj?.[idx] read in statement context }
+          if FCurrToken.Typ = ttLBracket then
+          begin
+            Eat(ttLBracket);
+            Idx := ParseExpression;
+            try
+              Eat(ttRBracket);
+              Result := TArrayAccessNode.Create(Result, Idx, True);
+            except
+              Idx.Free;
+              raise;
+            end;
+          end else begin
+
           Mem := FCurrToken.Str; Eat(ttId);
           
           if FCurrToken.Typ = ttLParen then
@@ -13236,6 +13271,7 @@ begin
           end else
           begin
             Result := TMemberAccessNode.Create(Result, Mem, True);
+          end;
           end;
         end else
         
@@ -16210,20 +16246,55 @@ begin
       // --- COMPILASI ARRAY INDEX ---
       else if Node is TArrayAccessNode then
       begin
-        Compile(TArrayAccessNode(Node).FTarget, False);    
-        Compile(TArrayAccessNode(Node).FIndexExpr, False); 
-        FChunk.AddInstruction(opcGetIndex);
+        if TArrayAccessNode(Node).IsOptional then
+        begin
+          { v1.10.2: obj?.[idx] null-safe read }
+          Compile(TArrayAccessNode(Node).FTarget, False);
+          JumpIfFalseIdx := FChunk.AddInstruction(opcJumpIfNull, 0);
+          Compile(TArrayAccessNode(Node).FIndexExpr, False);
+          FChunk.AddInstruction(opcGetIndex);
+          JumpEndIdx := FChunk.AddInstruction(opcJump, 0);
+          FChunk.Code[JumpIfFalseIdx].Operand :=
+            FChunk.CodeCount - JumpIfFalseIdx - 1;
+          FChunk.AddInstruction(opcPop);
+          FChunk.AddInstruction(opcNull);
+          FChunk.Code[JumpEndIdx].Operand :=
+            FChunk.CodeCount - JumpEndIdx - 1;
+        end else
+        begin
+          Compile(TArrayAccessNode(Node).FTarget, False);
+          Compile(TArrayAccessNode(Node).FIndexExpr, False);
+          FChunk.AddInstruction(opcGetIndex);
+        end;
       end
     
       // --- COMPILASI ARRAY ASSIGNMENT ---
       else if Node is TArrayAssignNode then
       begin
-        Compile(TArrayAssignNode(Node).FTarget, False);     
-        Compile(TArrayAssignNode(Node).FIndexExpr, False);  
-        Compile(TArrayAssignNode(Node).FValueExpr, False);  
-        
-        FChunk.AddInstruction(opcSetIndex, FChunk.AddConstant(TValue.CreateStr(TArrayAssignNode(Node).FAssignOp)));
-        PushedValue := True; 
+        if TArrayAssignNode(Node).IsOptional then
+        begin
+          { v1.10.2: obj?.[idx] := val null-safe assign }
+          Compile(TArrayAssignNode(Node).FTarget, False);
+          JumpIfFalseIdx := FChunk.AddInstruction(opcJumpIfNull, 0);
+          Compile(TArrayAssignNode(Node).FIndexExpr, False);
+          Compile(TArrayAssignNode(Node).FValueExpr, False);
+          FChunk.AddInstruction(opcSetIndex, FChunk.AddConstant(TValue.CreateStr(TArrayAssignNode(Node).FAssignOp)));
+          JumpEndIdx := FChunk.AddInstruction(opcJump, 0);
+          FChunk.Code[JumpIfFalseIdx].Operand :=
+            FChunk.CodeCount - JumpIfFalseIdx - 1;
+          FChunk.AddInstruction(opcPop);
+          FChunk.AddInstruction(opcNull);
+          FChunk.Code[JumpEndIdx].Operand :=
+            FChunk.CodeCount - JumpEndIdx - 1;
+        end else
+        begin
+          Compile(TArrayAssignNode(Node).FTarget, False);
+          Compile(TArrayAssignNode(Node).FIndexExpr, False);
+          Compile(TArrayAssignNode(Node).FValueExpr, False);
+
+          FChunk.AddInstruction(opcSetIndex, FChunk.AddConstant(TValue.CreateStr(TArrayAssignNode(Node).FAssignOp)));
+        end;
+        PushedValue := True;
       end
     
       // --- COMPILASI ARRAY SLICING ---

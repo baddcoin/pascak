@@ -1,5 +1,32 @@
 # Changelog
 
+## [1.10.2] - 2026-10-29
+
+### Added
+- **Null-safe array index access** — `obj?.[idx]` (read) and `obj?.[idx] := value` (assign). Consistent with v1.1.0 `?.` and v1.6.2 `obj?.prop := value`.
+- Chained chains work: `obj?.list?.[1]`, `n?.a?.[0] := value`.
+
+### Behavior
+- **Read** (`obj?.[idx]`): null target → null result, index expression not evaluated
+- **Assign** (`obj?.[idx] := val`): null target → no-op, RHS not evaluated (short-circuit); non-null → normal assign
+- Full parity with property-optional pattern
+
+### Implementation
+- `TArrayAccessNode.IsOptional` field + ctor param.
+- `TArrayAssignNode.IsOptional` field + ctor param.
+- ParseFactor `?.` block: detect `[` before identifier → build `TArrayAccessNode(IsOptional=True)`.
+- ParseStatement `?.` block: same for assignment context.
+- ParseStatement array-assign: capture `IsOptional` from `TArrayAccessNode` → pass to `TArrayAssignNode`.
+- Compiler `TArrayAccessNode`/`TArrayAssignNode`: optional → `opcJumpIfNull` guard with 2-jump pattern (same as v1.6.2).
+
+### Verified (10 test cases)
+- Read: non-null array, null, nested `obj?.list?.[1]`, null mid-chain
+- Assign: non-null, null-safe, RHS side-effect = 0 on null, 1 on non-null
+- All 16 prior language tests still PASS + 1 new test = **17/17**
+
+### Test suite
+- `tests/lang/v1102_optional_index.pas` — 10 case coverage
+
 ## [1.10.1] - 2026-10-29
 
 ### Added
