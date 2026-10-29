@@ -44746,9 +44746,10 @@ begin
   finally
     InterlockedExchange(IsShuttingDown, 1);
   
-    // Beri waktu server thread lihat flag setelah accept timeout (1000ms).
-    // 1500ms cukup — NetAcceptTimeout max 1000ms + margin.
-     Sleep(1500);
+    // v1.9.0: only sleep if HTTP or WS server threads were started.
+    if (Assigned(GHTTPServers) and (GHTTPServers.Count > 0)) or
+       (Assigned(GWSServers) and (GWSServers.Count > 0)) then
+      Sleep(1500);
     
     if Assigned(ScriptThreadList) then
     begin
@@ -46846,7 +46847,7 @@ var
   LintStrict: Boolean;
 
 begin
-  cscript := scriptTest;
+  // v1.9.0: removed cscript := scriptTest
   
   SetExceptionMask([exInvalidOp, exDenormalized, exZeroDivide, exOverflow, exUnderflow, exPrecision]);
   Randomize;
@@ -47014,17 +47015,20 @@ begin
   
   if ScriptArg <> '' then
     FileName := ScriptArg
-  else 
-    FileName := './storage/downloads/test.pas';
-  
-  if SysUtils.FileExists(FileName) then
+  else
+    FileName := '';
+
+  if (FileName <> '') and SysUtils.FileExists(FileName) then
     Script := LoadScriptFromFile(FileName)
-  else 
-    Script := cScript;
-  
+  else
+    Script := '';
+
   if Script = '' then
-    Writeln(FileName + ' [script null]')
-  else 
+  begin
+    Writeln('Usage: pascak [flags] <script.pas>');
+    Writeln('Example: pascak hello.pas');
+  end
+  else
     runScript(Script, DebugMode);
 end;
 

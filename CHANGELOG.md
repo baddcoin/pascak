@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.9.0] - 2026-10-29
+
+### Performance
+- **~2x average speedup** across benchmarks (JSON 3.4x, Array 2.8x, String 1.9x, Arith 1.8x, Calls 1.7x, Dict 1.3x) via two targeted fixes to unconditional startup overhead.
+- `pascak` with no args: 2.0s -> 30ms (66x).
+
+### Fixed
+- **Sleep(1500) unconditional in runScript finally** - fired even for pure compute scripts with no HTTP/WS servers. Now guarded by server-count check.
+- **Script fallback ran test suite** - `cscript := scriptTest` dead assignment + `FileName := './storage/downloads/test.pas'` default caused every invocation with no args to run regression test. Replaced with proper `Usage:` print.
+
+### Added
+- **benchmarks/results_v1.9.0.md** — before/after comparison + per-op analysis.
+- **benchmarks/README.md** references both baseline snapshots.
+
+### Remaining overhead
+- ~470ms fixed per exec (Engine.Create + native registration + shutdown GC). Target for v1.9.1.
+
 ## [1.8.0] - 2026-10-28
 
 ### Added
