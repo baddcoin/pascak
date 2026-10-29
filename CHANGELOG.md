@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.10.3] - 2026-10-29
+
+### Added (docs)
+- **Cookbook recipe #15** — Hi-DPI GUI auto-scaling pattern (`gui2.setAutoScale()` workflow, testing via `PASCAK_GUI2_SCALE=N`).
+- **Cookbook recipe #16** — Optional chaining patterns (safe nested read, array access, null-safe assign, short-circuit RHS with side-effect skip).
+
+### Coverage
+- Recipe #15: covers v1.10.0 Hi-DPI feature end-to-end
+- Recipe #16: covers all optional chaining family (v1.1.0 `?.`, v1.2.7 `?.method()`, v1.6.2 `?:=`, v1.10.2 `?.[]`)
+- Both recipes include gotchas, security warnings, anti-patterns
+
+### Cookbook
+- 14 → 16 recipes (1553 lines)
+- Daftar Resep updated
+
 ## [1.10.2] - 2026-10-29
 
 ### Added

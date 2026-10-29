@@ -63,6 +63,8 @@ Ini memandu Anda ke reference kalau butuh detail signature.
 12. [Safe config loading](#12-safe-config-loading--defaults-with-secrets) — defaults + hide secrets
 13. [HTTP/2 client with retry](#13-http2-client-with-retry--rate-limit-awareness) — retry-aware fetch
 14. [Hot-reload dev workflow](#14-hot-reload-dev-workflow) — watch + auto-reload
+15. [Hi-DPI GUI](#15-hi-dpi-gui--auto-scaling-for-native-apps) — native GUI auto-scaling
+16. [Optional chaining patterns](#16-optional-chaining-patterns) — safe config + nested data
 
 ---
 
@@ -1389,6 +1391,133 @@ Setup:
 - **Anti-pattern**: Edit file di `/tmp` — Termux tidak punya `/tmp`, watcher silent fail. Selalu di `$HOME` atau project dir.
 - **Perf**: Wrapper adds ~1s restart overhead. Graceful shutdown window up to 2s if hooks slow. Total downtime ~1.5-3s. Untuk zero-downtime, wrapper bukan solution — deploy blue/green atau load balancer.
 - **Cross-platform**: `tools/pascak_dev.sh` uses bash + trap SIGINT/SIGTERM. Windows users: run under WSL or Git Bash.
+
+## 15. Hi-DPI GUI — auto-scaling for native apps
+
+**Kapan pakai**: Native GUI (gui2/SDL2) tampil terlalu kecil di layar high-DPI (Retina, 4K, Android 2-3× scale). `gui2.window(400, 300)` bikin window 400×300 **fisik piksel** — di layar 2× kelihatan setengah ukuran wajar.
+
+**Cross-ref**: [Tutorial Bab 28](../docs/tutorial.md) · [API ref gui2](../docs/pascak_api.md) · gui2.getScale · gui2.setAutoScale
+
+Contoh — deteksi DPI, opt-in auto-scale, gambar dengan logical coords:
+
+    begin
+      gui2.init();
+
+      // 1. Deteksi DPI (1.0 = 96 DPI baseline, 2.0 = Retina, 3.0 = 4K/TV)
+      var scale := gui2.getScale();
+      println("DPI scale: ", scale);
+
+      // 2. Aktifkan auto-scale (opt-in — default false, zero break)
+      gui2.setAutoScale(true);
+
+      // 3. Semua coords di bawah ini LOGICAL — SDL scales to physical
+      var win := gui2.newWindow("My App", 400, 300);
+      if win <= 0 then begin
+        println("no display");
+        exit;
+      end;
+
+      // Font: logical size 14 → physical (14 * scale)
+      gui2.setFont("/path/to/DejaVuSans.ttf", 14);
+
+      while gui2.isOpen(win) do
+      begin
+        gui2.clear(20, 20, 30);
+
+        // Rect: logical 100×50 at 50,50 → physical (100*scale)×(50*scale)
+        gui2.rect(50, 50, 100, 50, 100, 200, 100);
+
+        // Text: logical position, font auto-scaled
+        gui2.text(50, 120, "Hi-DPI OK", 255, 255, 255);
+
+        // Mouse: returns LOGICAL coords (physical / scale)
+        var mx := gui2.mouseX();
+        var my := gui2.mouseY();
+        gui2.text(50, 150, "Mouse: " + str(mx) + "," + str(my), 200, 200, 200);
+
+        gui2.present(win);
+        if not gui2.poll() then break;
+        gui2.delay(16);
+      end;
+
+      gui2.close(win);
+      gui2.quit();
+    end.
+
+**Notes**:
+
+- **Gotcha**: `setAutoScale(true)` **harus sebelum** `newWindow()`. Window fisik dibuat dengan size * scale; font di-load dengan size * scale. Ubah mid-run tidak retroactively resize existing window/font.
+- **Gotcha**: `mouseX`/`mouseY` return logical coords (physical / scale). Jangan re-multiply di user code — double-scale bug.
+- **Testing**: `PASCAK_GUI2_SCALE=2 ./pascak no display test.pas` — override DPI untuk testing tanpa hardware high-DPI. `=3` untuk 3× display.
+- **Anti-pattern**: Manual `* 2` di semua coord — patah kalau device 1.5× atau user pindah monitor. Selalu pakai `gui2.getScale()` sekali, guard dengan `setAutoScale(true)`.
+- **Perf**: Zero overhead. `Gui2Scale()` di setiap draw = `Round(V * FDPIScale)` sekali (integer). Tidak ada state atau rounding accumulation.
+- **Cross-platform**: Detection via `SDL_GetDisplayDPI` (SDL 2.0.4+). Fallback 1.0 kalau API tidak tersedia (SDL lama atau headless).
+
+## 16. Optional chaining patterns
+
+**Kapan pakai**: Akses data nested yang mungkin `null` / key missing — config files, JSON API responses, form input, environment. Juga untuk null-safe assignment ke struktur yang mungkin kosong.
+
+**Cross-ref**: [Tutorial Bab 29](../docs/tutorial.md) · [API ref optional chaining](../docs/pascak_api.md) · `?.` `?.[]` `??` `obj?.prop :=` `obj?.[idx] :=`
+
+### Pattern 1: Safe nested read
+
+    var cfg := {"db": null};
+    var host := cfg?.db?.host ?? "localhost";
+    println(host);    // "localhost"
+
+    var cfg2 := {"db": {"host": "prod.example.com"}};
+    println(cfg2?.db?.host ?? "localhost");  // "prod.example.com"
+
+### Pattern 2: Safe array access
+
+    var users := [{"name": "Alice"}, {"name": "Bob"}];
+
+    println(users?.[0]?.name);     // "Alice"
+    println(users?.[5]?.name);     // null (OOB)
+    println(users?.[5]?.name ?? "-");   // "-"
+
+    var nobody := null;
+    println(nobody?.[0]);          // null
+
+### Pattern 3: Null-safe assignment (config merge)
+
+    var cfg := {"db": null, "log": {"level": "info"}};
+
+    // Conditional set: no-op kalau target null
+    cfg?.db?.host := "db.local";    // no-op (db=null)
+    cfg?.log?.level := "debug";     // set (log != null)
+    cfg?.new_field := "hello";      // set (cfg != null)
+
+    // Conditional array index assign
+    var arr := [10, 20, 30];
+    arr?.[0] := 99;
+    var n := null;
+    n?.[0] := 42;                   // no-op, no crash
+
+### Pattern 4: Short-circuit RHS (avoid side effect)
+
+    var cnt := 0;
+    function bump() begin
+      cnt := cnt + 1;
+      return 1;
+    end;
+
+    var n := null;
+    n?.field := bump();      // bump NOT called
+    println(cnt);            // 0
+
+    var obj := {"field": 0};
+    obj?.field := bump();    // bump called once
+    println(cnt);            // 1
+
+**Notes**:
+
+- **Gotcha**: `??` cek `null` saja, bukan falsy. `0 ?? 42` = `0`, `"" ?? "x"` = `""`, `false ?? true` = `false`. Untuk fallback pada falsy juga, pakai ternary `?:`.
+- **Gotcha**: `?.` **short-circuit args**. `n?.foo(expensive())` — kalau `n` null, `expensive()` tidak dipanggil. Berguna untuk skip computation, tapi hati-hati kalau ada side-effect yang diharapkan di arg.
+- **Security**: Jangan pakai `??` untuk default password/secret. Lebih baik explicit check: `if cfg?.secret == null then throw "config: secret missing"`. Default "hunter2" lebih bahaya dari crash.
+- **Anti-pattern**: Chain terlalu panjang `a?.b?.c?.d?.e?.f` — sinyal struktur data tidak jelas. Refactor ke fungsi dengan explicit checks.
+- **Precedence**: `??` lebih rendah dari `or` / `and`. `a ?? b or c` = `a ?? (b or c)`. Pakai parenthesis: `(a ?? b) or c`.
+- **Mutation safety**: `obj?.nested := x` **hanya** update `obj.nested` kalau `obj != null`. Kalau `obj.nested` sendiri null, assignment **tidak** membuat dict baru — assignment ke null tetap no-op (bukan auto-create). Untuk auto-create, explicit `if obj.nested == null then obj.nested := {}`.
 
 ## Kontribusi Resep
 
