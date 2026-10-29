@@ -1738,6 +1738,7 @@ type
     FExceptionCount: Integer;
     FLockDepth: Integer;
     FStackLock: TCriticalSection;
+    FStackLockEnabled: Boolean;  { v1.10.4: skip lock when env opt-in }
     FContext: TEngineContext; 
     
     FMaxExecTimeMs: QWord;
@@ -8044,9 +8045,16 @@ end;
 
 destructor TValue.Destroy;
 begin
-  if FDataType = dtString then
-  begin
-    FreeQuotaCtx(Length(FStrVal) * SizeOf(Char));   // ✅ FASE 1.1
+  { v1.10.4: fast-exit for primitives (skip ICEO + case dispatch).
+    Numeric is by far the most common type; the InterlockedCompareExchange
+    + case in the refcount path was pure overhead for primitives. }
+  case FDataType of
+    dtNumeric, dtBoolean, dtNull, dtPointer: Exit;
+    dtString:
+      begin
+        FreeQuotaCtx(Length(FStrVal) * SizeOf(Char));
+        Exit;
+      end;
   end;
 
   if InterlockedCompareExchange(IsShuttingDown, 0, 0) = 0 then
@@ -16681,6 +16689,9 @@ begin
   FTop := 0; 
   FLockDepth := 0; 
   FStackLock := TCriticalSection.Create; 
+  { v1.10.4: default True. Env PASCAK_VM_FAST_STACK=1 disables.
+    Safe only when single-threaded (main VM). Worker VMs should re-enable. }
+  FStackLockEnabled := GetEnvironmentVariable('PASCAK_VM_FAST_STACK') <> '1';
   
   // ✅ TAHAP A: eksplisit init field baru
   FActiveChunks := nil;
@@ -16771,37 +16782,30 @@ end;
 
 procedure TVM.Push(Val: TValue);
 begin
-  FStackLock.Acquire;
+  if FStackLockEnabled then FStackLock.Acquire;
   try
     if FTop >= STACK_MAX then
-    begin
-      // PERBAIKAN LOGIKA: Val.Free dihapus. 
-      // Karena Val adalah referensi (managed by GC), memanggil Free di sini menyebabkan Double-Free.
       raise EScriptFatalError.CreateFmt('VM PANIC (Error 83): Stack Overflow pada Baris %d, Kolom %d', [errMSG.xrow, errMSG.xcol]); 
-    end;
-     
     FStack[FTop] := Val;
     Inc(FTop);
   finally
-    FStackLock.Release;
+    if FStackLockEnabled then FStackLock.Release;
   end;
 end;
 
 function TVM.Pop: TValue;
 begin
-  FStackLock.Acquire;
+  if FStackLockEnabled then FStackLock.Acquire;
   try
     if FTop <= 0 then
       raise EScriptFatalError.CreateFmt(
         'VM PANIC (Error 84): Stack Underflow pada Baris %d, Kolom %d',
         [errMSG.xrow, errMSG.xcol]);
-
     Dec(FTop);
     Result := FStack[FTop];
     FStack[FTop] := nil;
-    
   finally
-    FStackLock.Release;
+    if FStackLockEnabled then FStackLock.Release;
   end;
 end;
 
@@ -17622,18 +17626,15 @@ begin
             begin 
                 if (FTop >= 2) and (FStack[FTop-2].DataType = dtNumeric) and (FStack[FTop-1].DataType = dtNumeric) then
                 begin
-                  FStackLock.Acquire; 
+                  if FStackLockEnabled then FStackLock.Acquire;
                   try
                     TmpC := FStack[FTop-2];
                     a := FStack[FTop-1];
-                    
-                    // Alokasikan objek numerik baru untuk menggantikan slot stack tanpa mutasi langsung
                     FStack[FTop-2] := TValue.CreateNum(TmpC.FNumVal + a.FNumVal);
-                    
                     Dec(FTop);
                     FStack[FTop] := nil;
                   finally
-                    FStackLock.Release;
+                    if FStackLockEnabled then FStackLock.Release;
                   end;
                   
                   if Assigned(TmpC) then TmpC.Free; 
@@ -17666,7 +17667,7 @@ begin
             begin 
                 if (FTop >= 2) and (FStack[FTop-2].DataType = dtNumeric) and (FStack[FTop-1].DataType = dtNumeric) then
                 begin
-                  FStackLock.Acquire; // KUNCI MUTLAK: Amankan dari GC Marking dan Mutasi
+                  if FStackLockEnabled then FStackLock.Acquire;
                   try
                     case Inst.OpCode of
                       opcSub: FStack[FTop-2].FNumVal := FStack[FTop-2].FNumVal - FStack[FTop-1].FNumVal;
@@ -17674,13 +17675,11 @@ begin
                       opcDiv: FStack[FTop-2].FNumVal := VM_SafeDivide(FStack[FTop-2].FNumVal, FStack[FTop-1].FNumVal);
                       opcMod: FStack[FTop-2].FNumVal := VM_SafeMod(FStack[FTop-2].FNumVal, FStack[FTop-1].FNumVal);
                     end;
-                    
-                    // PERBAIKAN: Pergeseran pointer dan pengambilan referensi harus di dalam Lock!
                     Dec(FTop);
                     TmpC := FStack[FTop]; 
                     FStack[FTop] := nil;
                   finally
-                    FStackLock.Release;
+                    if FStackLockEnabled then FStackLock.Release;
                   end;
                   
                   // Pembebasan memori (Destructor) dilakukan dengan aman di luar Lock untuk menghindari Deadlock

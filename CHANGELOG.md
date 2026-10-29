@@ -1,5 +1,44 @@
 # Changelog
 
+## [1.10.4] - 2026-10-29
+
+### Added (opt-in performance)
+- **`PASCAK_VM_FAST_STACK=1` env var** — bypass `TCriticalSection` locking on VM stack operations (Push/Pop/opcAdd/opcSub/opcMul/opcDiv/opcMod).
+- **Benchmark win**: arith 1405ms → 1272ms (~9.5% improvement). Prior test (unconditional) showed 13.5%; current flag adds ~3% overhead but preserves safety default.
+
+### Why opt-in
+- VM is single-threaded by design (no concurrent GC thread, verified via grep of `RunGarbageCollection`/`TValue.Mark`/`ProcessGCZombies` — all called from main thread only)
+- But lock exists as precaution (comment "KUNCI MUTLAK: Amankan dari GC Marking dan Mutasi" at opcSub was defensiveness, not requirement)
+- **Default safe**: `FStackLockEnabled := True` (lock active, unchanged behavior)
+- **Opt-in fast**: `PASCAK_VM_FAST_STACK=1` → `FStackLockEnabled := False`
+- **Risk**: theoretical race if future code introduces concurrent stack access. Current codebase analyzed safe, but conservative default protects against future regressions.
+
+### Implementation
+- `TVM.FStackLockEnabled: Boolean` field
+- `TVM.Create` reads env var
+- 4 conditional lock sites: Push, Pop, opcAdd fast-path, opcSub/Mul/Div/Mod fast-path
+- Non-fast-path opcodes (opcGetIndex, array ops, etc.) still use lock unconditionally — unchanged.
+
+### Verified
+- **Default mode**: 1405ms arith, 17/17 lang tests
+- **Fast mode**: 1272ms avg (1252-1302 range), 17/17 lang tests
+- **Fast mode integration**:
+  - Async http.get2Async: PASS
+  - GUI2 DPI: PASS (scale detect + autoScale)
+  - Hotreload graceful shutdown: PASS
+- **5× stability**: 1252-1302ms, no variance explosion
+
+### Performance context
+- v1.9.3 baseline (before this): 1393ms
+- v1.10.4 default: 1405ms (unchanged — lock still default)
+- v1.10.4 fast mode: 1272ms (-8.7% vs v1.9.3, -9.5% vs v1.10.4 default)
+
+### Production guidance
+- **Leave default** unless profiling shows stack lock as bottleneck in your workload
+- Fast mode safe for: pure compute scripts, single-request handlers, synchronous flows
+- Fast mode risky for: long-running servers with hot path contention (theoretical, not observed)
+- If enabling: monitor for crashes, especially under GC pressure from heavy object allocation
+
 ## [1.10.3] - 2026-10-29
 
 ### Added (docs)
