@@ -26,7 +26,8 @@ Total runtime: ~10-15 seconds (7 benchmarks, 1 warm-up + 3 runs each).
 
 See results files:
 - [results_v1.8.0.md](results_v1.8.0.md) — initial baseline
-- [results_v1.9.0.md](results_v1.9.0.md) — after Sleep(1500) + script fallback fixes (~2x speedup)
+- [results_v1.9.0.md](results_v1.9.0.md) — Sleep(1500) + script fallback fixes (~2x speedup)
+- [results_v1.9.1.md](results_v1.9.1.md) — lazy worker pool (startup 489ms -> 277ms, cumulative 2-5x)
 
 Key findings:
 - Parser: **fast** (780K lines/sec)

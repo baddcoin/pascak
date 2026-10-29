@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.9.1] - 2026-10-29
+
+### Performance
+- **Lazy worker pool** — `TPascakEngine.InitializeRuntime` no longer spawns 8 eager worker threads at startup. Pool created on first async operation via `EnsureWorkerPoolForCtx`. Compute-only scripts never spawn threads.
+- **Startup: 489ms -> 277ms** (-43% vs v1.9.0).
+- **Cumulative v1.8.0 -> v1.9.1**: 2-5x speedup on compute benchmarks (Array 4.1x, JSON 5.1x, String 2.3x, Arith 2.0x).
+
+### Added
+- `PASCAK_WORKER_POOL=eager` env var — opt-in eager pool creation (for production servers that want pre-warmed workers).
+- `EnsureWorkerPoolForCtx(Ctx)` helper — lazy-create function.
+- `benchmarks/results_v1.9.1.md` — cumulative before/after analysis.
+
+### Behavior preserved
+- Async paths (`http.get2Async`, `http.listenAsync`, `spawn`) auto-create pool on first use (verified end-to-end).
+- Teardown frees lazy-created pool via else-branch fallback.
+- No regression on async workloads.
+
+### Remaining (v1.9.2 target)
+- Fixed ~277ms per exec: Engine.Create ~100ms + shutdown/GC ~140ms.
+- Deferred native module registration + faster CLI exit potentially add another ~130ms savings.
+
 ## [1.9.0] - 2026-10-29
 
 ### Performance

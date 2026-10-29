@@ -2067,6 +2067,16 @@ type
 
   
   procedure InitBuiltInRegistries; forward;
+{ v1.9.1: lazy-create worker pool for context }
+function EnsureWorkerPoolForCtx(Ctx: TEngineContext): TWorkerPool;
+begin
+  Result := nil;
+  if not Assigned(Ctx) then Exit;
+  if not Assigned(Ctx.WorkerPool) then
+    Ctx.WorkerPool := TWorkerPool.Create(8, Ctx);
+  Result := Ctx.WorkerPool;
+end;
+
   procedure initNativeCode(GEnvv: TSymbolTable); forward;
   function CallFFIWrapped(WrapperDict: TDictValue; 
       RawArgs: array of TValue): TValue; forward;
@@ -5137,7 +5147,15 @@ begin
     FContext.EventLoop := FEventLoop;
     
     // 9. Worker pool
-    FWorkerPool := TWorkerPool.Create(8, FContext);
+    // v1.9.1: lazy worker pool (created on first use).
+    // Opt-in eager via PASCAK_WORKER_POOL=eager (for production servers).
+    if GetEnvironmentVariable('PASCAK_WORKER_POOL') = 'eager' then
+    begin
+      FWorkerPool := TWorkerPool.Create(8, FContext);
+      FContext.WorkerPool := FWorkerPool;
+    end
+    else
+      FWorkerPool := nil;
     FContext.WorkerPool := FWorkerPool;
 
     // 10. Profiler & AllocTracker
@@ -5245,6 +5263,11 @@ begin
     FWorkerPool.Free; 
     if GlobalWorkerPool = FWorkerPool then GlobalWorkerPool := nil;
     FWorkerPool := nil;
+  end
+  else if Assigned(FContext) and Assigned(FContext.WorkerPool) then
+  begin
+    FContext.WorkerPool.Free;
+    FContext.WorkerPool := nil;
   end;
   
   // 2. Event loop
@@ -22298,9 +22321,10 @@ begin
 
   // ✨ PHASE 7: Akses WorkerPool via context
   Ctx := GetContextFromEnv(CallEnv);
-  if not Assigned(Ctx) or not Assigned(Ctx.WorkerPool) then
+  if not Assigned(Ctx) then
     raise EScriptRuntimeError.Create('Worker pool tidak tersedia di engine context');
   
+  EnsureWorkerPoolForCtx(Ctx);
   Ctx.WorkerPool.EnqueueTask(TargetFunc, TargetArgs, TargetCallback);
 
   Result := TValue.CreateBool(True);
@@ -27472,7 +27496,7 @@ begin
   RequestCount := 0;
 
   Ctx := GetContextFromEnv(CallEnv);
-  if not Assigned(Ctx) or not Assigned(Ctx.WorkerPool) then
+  if not Assigned(Ctx) then
   begin
     errMSG.callerror(144,
       'http.listenAsync: worker pool tidak tersedia',
@@ -27508,6 +27532,7 @@ begin
     FuncVal := TValue.CreateNative(@Worker_HandleClient);
     try
       try
+        EnsureWorkerPoolForCtx(Ctx);
         Ctx.WorkerPool.EnqueueTask(FuncVal, ArgsArr, nil);
         Inc(RequestCount);
       except
@@ -29805,12 +29830,13 @@ begin
   end;
 
   Ctx := GetContextFromEnv(CallEnv);
-  if (not Assigned(Ctx)) or (not Assigned(Ctx.WorkerPool)) then
+  if not Assigned(Ctx) then
   begin
     errMSG.callerror(144, 'http.get2Async: worker pool tidak tersedia',
                      errMSG.xrow, errMSG.xcol);
     Exit;
   end;
+  EnsureWorkerPoolForCtx(Ctx);
 
   NonCbCount := Args.Count - 1;
   PackList := TValueList.Create(True);
@@ -29828,6 +29854,7 @@ begin
 
   FuncVal := TValue.CreateNative(@Native_HTTPSync2);
   try
+    EnsureWorkerPoolForCtx(Ctx);
     Ctx.WorkerPool.EnqueueTask(FuncVal, PackedArgs, Callback);
   finally
     FuncVal.Free;
@@ -29913,7 +29940,7 @@ begin
   Callback := TValue(Args[1]);
   
   Ctx := GetContextFromEnv(CallEnv);
-  if not Assigned(Ctx) or not Assigned(Ctx.WorkerPool) then
+  if not Assigned(Ctx) then
   begin
     errMSG.callerror(144, 'http.getAsync: worker pool tidak tersedia',
                      errMSG.xrow, errMSG.xcol);
@@ -29923,6 +29950,7 @@ begin
   FuncVal := TValue.CreateNative(@Native_HTTPSync);
   UrlVal := TValue.CreateStr(Url);
   try
+    EnsureWorkerPoolForCtx(Ctx);
     Ctx.WorkerPool.EnqueueTask(FuncVal, UrlVal, Callback);
   finally
     FuncVal.Free;
@@ -39776,7 +39804,7 @@ begin
   if (not Assigned(E)) or (E^.ListenSock < 0) or E^.StopRequested then Exit;
 
   Ctx := GetContextFromEnv(CallEnv);
-  if (not Assigned(Ctx)) or (not Assigned(Ctx.WorkerPool)) then Exit;
+  if not Assigned(Ctx) then Exit;
 
   Guard := 0;
   while (Guard < 32) and NetAcceptTimeout(E^.ListenSock, 1, ClientSock) do
@@ -39801,6 +39829,7 @@ begin
     FuncVal := TValue.CreateNative(@Worker_HandleClient);
     try
       try
+        EnsureWorkerPoolForCtx(Ctx);
         Ctx.WorkerPool.EnqueueTask(FuncVal, ArgsArr, nil);
       except
         NetClose(ClientSock);
