@@ -60,6 +60,9 @@ Ini memandu Anda ke reference kalau butuh detail signature.
 9. [Scheduled job runner](#9-scheduled-job-runner) — setInterval + SQLite + DLQ
 10. [Broadcast backpressure](#10-broadcast-backpressure) — WS + queue + drop
 11. [REST+GUI app](#11-restgui-app--shared-state-dual-interface) — shared state, dual interface
+12. [Safe config loading](#12-safe-config-loading--defaults-with-secrets) — defaults + hide secrets
+13. [HTTP/2 client with retry](#13-http2-client-with-retry--rate-limit-awareness) — retry-aware fetch
+14. [Hot-reload dev workflow](#14-hot-reload-dev-workflow) — watch + auto-reload
 
 ---
 
@@ -1241,6 +1244,151 @@ Test dengan curl (REST) + browser (GUI):
 - **Payload limit** — REST body di-cap `HTTP_MAX_HEADER_BYTES` (16 MB). GUI WS frame di-cap 16 MB. Untuk upload file besar, gunakan `fs.writeAsync` chunk dari JS ke RPC.
 - **Anti-pattern**: jangan panggil `http.get("http://localhost:8080/...")` dari `gui.bind` — itu loopback HTTP ke diri sendiri (boros resource). Panggil `listItems()` langsung.
 - **Shutdown** — `onShutdown` register `sqliteClose(DB)`, `http.stop(API_HANDLE)`. Event loop sudah graceful exit kalau `gui.close` dipanggil.
+
+## 12. Safe config loading + defaults with secrets
+
+**Kapan pakai**: Load config dari file/env, dengan defaults untuk field opsional, dan hindari leak secret ke log/response.
+
+**Cross-ref**: [Tutorial Bab 29.5](../docs/tutorial.md#295--null-safe-assignment-v162) · [Tutorial Bab 31.12](../docs/tutorial.md) · jsonParse · fs.readFile · dict.omit
+
+Contoh — load config JSON, apply defaults, redact secrets:
+
+    function loadConfig(path) begin
+      var raw := null;
+      try raw := jsonParse(fs.readFile(path)) catch _ end;
+
+      // defaults kalau file hilang atau key kosong
+      var db := raw?.db ?? {};
+      var host := db?.host ?? "localhost";
+      var port := db?.port ?? 5432;
+      var user := db?.user ?? "app";
+
+      // secrets tidak boleh null-safe-assign silently
+      if (db?.password ?? null) == null then
+        throw "config: db.password wajib ada";
+
+      return {
+        "db": {"host": host, "port": port, "user": user,
+               "password": db.password},
+        "log_level": raw?.log_level ?? "info",
+        "api_url": raw?.api_url ?? "https://api.local"
+      }
+    end;
+
+    // Safe to log — omit secrets
+    function configPublicView(cfg) begin
+      return cfg.omit(["db"]).merge({
+        "db": cfg.db.omit(["password"])
+      })
+    end;
+
+**Notes**:
+
+- **Gotcha**: `raw?.db ?? {}` handles **both** `raw=null` (file missing) dan `raw={}` (empty config). Tanpa `?? {}`, `db?.host` pada `raw=null` short-circuit, tapi pada `raw={}` juga short-circuit karena `.db` missing → konsisten.
+- **Security**: `dict.omit` untuk redact saat serialize ke log/response. Jangan pernah return dict apa adanya kalau ada password field.
+- **Anti-pattern**: `if cfg == null then cfg := {}` — tidak catch case `cfg = {}` (empty dict). Pakai `?.` + `??` untuk chain-safe default.
+- **Perf**: `jsonParse` per request costly — cache di module-level global, reload hanya saat file change (atau via `--watch`).
+
+## 13. HTTP/2 client with retry + rate-limit awareness
+
+**Kapan pakai**: Fetch dari API dengan auto-retry (server GOAWAY, network hiccup), tanpa spam ke server yang throttle.
+
+**Cross-ref**: [API ref http.get2](../docs/pascak_api.md#http-client) · [Tutorial Bab 19](#bab-19--websocket-server) · http.get2 · sleep
+
+Contoh — resilient fetch dengan backoff dan rate-limit detect:
+
+    function fetchResilient(url, max_attempts) begin
+      var attempt := 0;
+      var backoff := 100;   // ms
+
+      while attempt < max_attempts do
+      begin
+        attempt := attempt + 1;
+        try
+          var r := http.get2(url);
+          // sukses: reset
+          return r;
+        catch e
+          // rate-limited: cooldown lebih panjang
+          if contains(e.message, "ENHANCE_YOUR_CALM") or
+             contains(e.message, "code=11") then
+          begin
+            var wait_ms := backoff * 4;  // 400ms, 1600ms, 6400ms
+            println("[fetch] rate limited, backing off " + str(wait_ms) + "ms");
+            sleep(wait_ms);
+            backoff := backoff * 4;
+          end
+          // retryable generic (GOAWAY NO_ERROR, conn closed)
+          else if contains(e.message, "retryable") then
+          begin
+            sleep(backoff);
+            backoff := backoff * 2;
+          end
+          // fatal — jangan retry
+          else
+            throw e;
+        end;
+      end;
+
+      throw "fetchResilient: max attempts (" + str(max_attempts) + ") exhausted"
+    end;
+
+    // Usage — 3 attempts max
+    var r := fetchResilient("https://api.example.com/data", 3);
+    println("status:", r.status, " body len:", len(r.body));
+
+**Notes**:
+
+- **Gotcha**: `http.get2` **sudah punya** retry internal (3 attempts, 100/200ms, v1.2.9). Recipe ini untuk kasus butuh **custom policy** — lebih banyak attempt, backoff lebih panjang, atau special handling rate-limit.
+- **Security**: Jangan retry POST/PUT tanpa idempotency key — bisa double-create. Untuk non-idempotent, hanya retry `connection closed` (sebelum request terkirim), bukan `GOAWAY` (bisa jadi server sudah proses).
+- **Anti-pattern**: Retry tanpa max_attempts — infinite loop kalau server permanent 429.
+- **Perf**: `http.get2` reuse H2 connection via pool (built-in singleflight). Rate limiter di v1.3.1 juga auto-backoff per-host — recipe ini untuk override custom.
+- **Detect pattern**: `ENHANCE_YOUR_CALM` / `code=11` = H2 rate-limit error. `retryable` = generic transient (see v1.2.8 classification).
+
+## 14. Hot-reload dev workflow
+
+**Kapan pakai**: Develop GUI app atau long-running service — edit code, browser auto-reload, no manual restart.
+
+**Cross-ref**: [Tutorial Bab 32](../docs/tutorial.md) · [API ref --watch/--hot](../docs/pascak_api.md#cli-flags) · tools/pascak_dev.sh
+
+Setup:
+
+    # 1. Terminal 1 — start wrapper (auto-restart)
+    tools/pascak_dev.sh 'src/,app.pas' app.pas --hot
+
+    # 2. Terminal 2 — edit code
+    vim src/app.pas
+
+    # 3. Browser (already open on http://localhost:8080)
+    #    -> edit save -> auto-reload tab
+
+**Struktur app.pas** (untuk hot-reload):
+
+    var h := gui.create(8080, "My App");
+
+    begin
+      gui.serve(h, "<html><body><h1>v1</h1></body></html>");
+      gui.start(h);
+      gui.run();
+      // post-gui.run statements run on graceful shutdown
+      println("cleanup done")
+    end.
+
+**Wrapper wrapper alternative** (kalau tidak butuh browser auto-reload):
+
+    while true; do
+      pascak --dev --watch . app.pas
+      sleep 1
+    done
+
+**Notes**:
+
+- **Gotcha**: `--hot` requires app served via `gui.serve` + `gui.start` + `gui.run`. For non-GUI script, `--watch` still works (restart on file change) but browser auto-reload does not apply.
+- **Gotcha**: `--hot` JS injection looks for `</body>` tag in served HTML. Ensure HTML has `<body>...</body>` structure. Kalau tidak ada, JS di-append di akhir (still works tapi page mungkin belum siap reload).
+- **Security**: `--hot` sets `PASCAK_EXEC_POLICY=allow-all` in wrapper. **Jangan pakai `--hot` di production**. Dev-only tool.
+- **Anti-pattern**: Edit file di `/tmp` — Termux tidak punya `/tmp`, watcher silent fail. Selalu di `$HOME` atau project dir.
+- **Perf**: Wrapper adds ~1s restart overhead. Graceful shutdown window up to 2s if hooks slow. Total downtime ~1.5-3s. Untuk zero-downtime, wrapper bukan solution — deploy blue/green atau load balancer.
+- **Cross-platform**: `tools/pascak_dev.sh` uses bash + trap SIGINT/SIGTERM. Windows users: run under WSL or Git Bash.
 
 ## Kontribusi Resep
 
