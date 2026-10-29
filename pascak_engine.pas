@@ -37987,6 +37987,10 @@ type
     CurrentMusic: Pointer;
     SoundMap: TGuiSoundMap;
     NextSoundID: Integer;
+    { v1.10.0: Hi-DPI support }
+    FDPIScale: Double;
+    FAutoScale: Boolean;
+    pGetDisplayDPI: function(displayIndex: Int32; ddpi, hdpi, vdpi: PSingle): Int32; cdecl;
     IsInit: Boolean;
     IsClosed: Boolean;
     LastError: string;
@@ -38266,6 +38270,10 @@ begin
   Pointer(State.pRenderDrawRect)     := GetProcAddress(State.LibHandle, 'SDL_RenderDrawRect');
   Pointer(State.pRenderFillRect)     := GetProcAddress(State.LibHandle, 'SDL_RenderFillRect');
   Pointer(State.pGetMouseState)      := GetProcAddress(State.LibHandle, 'SDL_GetMouseState');
+  // v1.10.0: Hi-DPI support (SDL 2.0.4+)
+  Pointer(State.pGetDisplayDPI) := GetProcAddress(State.LibHandle, 'SDL_GetDisplayDPI');
+  State.FDPIScale := 1.0;
+  State.FAutoScale := False;
   if not (Assigned(State.pInit) and Assigned(State.pQuit) and
           Assigned(State.pCreateWindow) and Assigned(State.pPollEvent)) then
   begin
@@ -38487,6 +38495,51 @@ begin
   Result := True;
 end;
 
+{ v1.10.0: Hi-DPI scale helpers — must be before first use }
+function Gui2DetectDPI: Double;
+var
+  DDpi: Single;
+  EnvVal: string;
+begin
+  Result := 1.0;
+  if not Assigned(GGuiSDL) then Exit;
+  EnvVal := GetEnvironmentVariable('PASCAK_GUI2_SCALE');
+  if EnvVal <> '' then
+  begin
+    try
+      Result := StrToFloat(EnvVal);
+    except
+      Result := 1.0;
+    end;
+    Exit;
+  end;
+  if not Assigned(GGuiSDL.pGetDisplayDPI) then Exit;
+  DDpi := 96.0;
+  try
+    if GGuiSDL.pGetDisplayDPI(0, @DDpi, nil, nil) = 0 then
+      if DDpi > 0 then
+        Result := DDpi / 96.0;
+  except
+  end;
+end;
+
+function Gui2Scale(const V: Integer): Integer; inline;
+begin
+  if Assigned(GGuiSDL) and GGuiSDL.FAutoScale then
+    Result := Round(V * GGuiSDL.FDPIScale)
+  else
+    Result := V;
+end;
+
+function Gui2Unscale(const V: Int32): Integer; inline;
+begin
+  if Assigned(GGuiSDL) and GGuiSDL.FAutoScale and (GGuiSDL.FDPIScale > 0) then
+    Result := Round(V / GGuiSDL.FDPIScale)
+  else
+    Result := V;
+end;
+
+
 function GuiSDLEnsureInit: Boolean;
 begin
   Result := False;
@@ -38505,6 +38558,8 @@ begin
   GGuiSDL.IsInit := True;
   GGuiSDL.IsClosed := False;
   Exit(True);
+  if Assigned(GGuiSDL) then
+    GGuiSDL.FDPIScale := Gui2DetectDPI;
 end;
 
 function Native_Gui2_Init(Args: TObjectList; CallEnv: TSymbolTable): TValue;
@@ -38544,6 +38599,32 @@ begin
   Result := GGuiSDL.Windows.Data[Idx];
 end;
 
+{ v1.10.0: Hi-DPI API }
+function Native_Gui2_GetScale(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+begin
+  if not Assigned(GGuiSDL) then Exit(TValue.CreateNum(1.0));
+  { v1.10.0: lazy DPI detect (GuiSDLEnsureInit may not have run yet if
+    script calls getScale before first window/font op) }
+  if (GGuiSDL.FDPIScale = 1.0) and Assigned(GGuiSDL.pGetDisplayDPI) then
+    GGuiSDL.FDPIScale := Gui2DetectDPI;
+  Result := TValue.CreateNum(GGuiSDL.FDPIScale);
+end;
+
+function Native_Gui2_SetAutoScale(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+begin
+  if not Assigned(GGuiSDL) then Exit(TValue.CreateBool(False));
+  if (Args.Count < 1) or (not Assigned(TValue(Args[0]))) then Exit(TValue.CreateBool(False));
+  GGuiSDL.FAutoScale := TValue(Args[0]).IsTrue;
+  Result := TValue.CreateBool(True);
+end;
+
+function Native_Gui2_GetAutoScale(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+begin
+  if not Assigned(GGuiSDL) then Exit(TValue.CreateBool(False));
+  Result := TValue.CreateBool(GGuiSDL.FAutoScale);
+end;
+
+
 function Native_Gui2_NewWindow(Args: TObjectList; CallEnv: TSymbolTable): TValue;
 var
   Title: string;
@@ -38566,7 +38647,7 @@ begin
   if H <= 0 then H := 600;
   NewWin := GGuiSDL.pCreateWindow(PAnsiChar(AnsiString(Title)),
     SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
-    Int32(W), Int32(H), SDL_WINDOW_SHOWN);
+    Int32(Gui2Scale(W)), Int32(Gui2Scale(H)), SDL_WINDOW_SHOWN);
   if not Assigned(NewWin) then Exit;
   NewRen := GGuiSDL.pCreateRenderer(NewWin, -1,
     SDL_RENDERER_ACCELERATED or SDL_RENDERER_PRESENTVSYNC);
@@ -38889,7 +38970,7 @@ begin
   G := Trunc(TValue(Args[5]).NumVal);
   B := Trunc(TValue(Args[6]).NumVal);
   GGuiSDL.pSetRenderDrawColor(GGuiSDL.Renderer, UInt8(R), UInt8(G), UInt8(B), 255);
-  Rect.x := X; Rect.y := Y; Rect.w := W; Rect.h := H;
+  Rect.x := Gui2Scale(X); Rect.y := Gui2Scale(Y); Rect.w := Gui2Scale(W); Rect.h := Gui2Scale(H);
   GGuiSDL.pRenderFillRect(GGuiSDL.Renderer, @Rect);
   Result := TValue.CreateBool(True);
 end;
@@ -38909,7 +38990,7 @@ begin
   G := Trunc(TValue(Args[5]).NumVal);
   B := Trunc(TValue(Args[6]).NumVal);
   GGuiSDL.pSetRenderDrawColor(GGuiSDL.Renderer, UInt8(R), UInt8(G), UInt8(B), 255);
-  Rect.x := X; Rect.y := Y; Rect.w := W; Rect.h := H;
+  Rect.x := Gui2Scale(X); Rect.y := Gui2Scale(Y); Rect.w := Gui2Scale(W); Rect.h := Gui2Scale(H);
   GGuiSDL.pRenderDrawRect(GGuiSDL.Renderer, @Rect);
   Result := TValue.CreateBool(True);
 end;
@@ -38956,7 +39037,7 @@ begin
   begin
     x := 0; y := 0;
     GGuiSDL.pGetMouseState(@x, @y);
-    Exit(TValue.CreateNum(x));
+    Exit(TValue.CreateNum(Gui2Unscale(x)));
   end;
   Result := TValue.CreateNum(GGuiSDL.LastMouseX);
 end;
@@ -38969,7 +39050,7 @@ begin
   begin
     x := 0; y := 0;
     GGuiSDL.pGetMouseState(@x, @y);
-    Exit(TValue.CreateNum(y));
+    Exit(TValue.CreateNum(Gui2Unscale(y)));
   end;
   Result := TValue.CreateNum(GGuiSDL.LastMouseY);
 end;
@@ -39045,7 +39126,7 @@ begin
     GGuiSDL.Font := nil;
   end;
   GGuiSDL.Font := GGuiSDL.pTTF_OpenFont(
-    PAnsiChar(AnsiString(SafePath)), Int32(Size));
+    PAnsiChar(AnsiString(SafePath)), Int32(Gui2Scale(Size)));
   if not Assigned(GGuiSDL.Font) then
   begin
     GGuiSDL.LastError := 'TTF_OpenFont: ' + SafePath;
@@ -39070,8 +39151,8 @@ begin
   if (not Assigned(GGuiSDL.Renderer)) or (not Assigned(GGuiSDL.Font)) then Exit;
   if not Assigned(GGuiSDL.pTTF_RenderText_Blended) then Exit;
   if TValue(Args[2]).DataType <> dtString then Exit;
-  X := Trunc(TValue(Args[0]).NumVal);
-  Y := Trunc(TValue(Args[1]).NumVal);
+  X := Gui2Scale(Trunc(TValue(Args[0]).NumVal));
+  Y := Gui2Scale(Trunc(TValue(Args[1]).NumVal));
   TextStr := TValue(Args[2]).StrVal;
   R := Trunc(TValue(Args[3]).NumVal);
   G := Trunc(TValue(Args[4]).NumVal);
@@ -39222,10 +39303,10 @@ begin
   if (Args.Count < 5) or (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Renderer)) then Exit;
   if (not Assigned(GGuiSDL.Textures)) or (not Assigned(GGuiSDL.pRenderCopy)) then Exit;
   ID := Trunc(TValue(Args[0]).NumVal);
-  X := Trunc(TValue(Args[1]).NumVal);
-  Y := Trunc(TValue(Args[2]).NumVal);
-  W := Trunc(TValue(Args[3]).NumVal);
-  H := Trunc(TValue(Args[4]).NumVal);
+  X := Gui2Scale(Trunc(TValue(Args[1]).NumVal));
+  Y := Gui2Scale(Trunc(TValue(Args[2]).NumVal));
+  W := Gui2Scale(Trunc(TValue(Args[3]).NumVal));
+  H := Gui2Scale(Trunc(TValue(Args[4]).NumVal));
   Idx := GGuiSDL.Textures.IndexOf(ID);
   if Idx < 0 then Exit;
   Entry := GGuiSDL.Textures.Data[Idx];
@@ -40456,6 +40537,9 @@ begin
   Gui2Def.Methods.Add('musicVolume', TVMFunction.Create);
   Gui2Def.Methods.Add('isMusicPlaying', TVMFunction.Create);
   Gui2Def.Methods.Add('isMusicPaused', TVMFunction.Create);
+  Gui2Def.Methods.Add('getScale', TVMFunction.Create);
+  Gui2Def.Methods.Add('setAutoScale', TVMFunction.Create);
+  Gui2Def.Methods.Add('getAutoScale', TVMFunction.Create);
   Gui2Def.Methods.Add('newWindow', TVMFunction.Create);
   Gui2Def.Methods.Add('focusWindow', TVMFunction.Create);
   Gui2Def.Methods.Add('closeWindow', TVMFunction.Create);
@@ -40505,6 +40589,9 @@ begin
   Gui2Inst.Members.DefineVar('musicVolume', TValue.CreateNative(@Native_Gui2_MusicVolume));
   Gui2Inst.Members.DefineVar('isMusicPlaying', TValue.CreateNative(@Native_Gui2_IsMusicPlaying));
   Gui2Inst.Members.DefineVar('isMusicPaused', TValue.CreateNative(@Native_Gui2_IsMusicPaused));
+  Gui2Inst.Members.DefineVar('getScale', TValue.CreateNative(@Native_Gui2_GetScale));
+  Gui2Inst.Members.DefineVar('setAutoScale', TValue.CreateNative(@Native_Gui2_SetAutoScale));
+  Gui2Inst.Members.DefineVar('getAutoScale', TValue.CreateNative(@Native_Gui2_GetAutoScale));
   Gui2Inst.Members.DefineVar('newWindow', TValue.CreateNative(@Native_Gui2_NewWindow));
   Gui2Inst.Members.DefineVar('focusWindow', TValue.CreateNative(@Native_Gui2_FocusWindow));
   Gui2Inst.Members.DefineVar('closeWindow', TValue.CreateNative(@Native_Gui2_CloseWindow));

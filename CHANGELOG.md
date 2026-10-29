@@ -1,5 +1,36 @@
 # Changelog
 
+## [1.10.0] - 2026-10-29
+
+### Added
+- **Hi-DPI auto-scaling for native GUI (gui2)** — opt-in scaling for high-DPI displays (Retina, 4K, Android 2-3× scale). Previously `gui2.window(400, 300)` created physically 400×300, appearing tiny on 2× devices.
+- `gui2.getScale()` — detect current DPI scale (1.0 = 96 DPI baseline, 2.0 = 2× display). Auto-detects via `SDL_GetDisplayDPI` (SDL 2.0.4+), fallback to 1.0.
+- `gui2.setAutoScale(enable)` — toggle auto-scaling for drawing/mouse/font.
+- `gui2.getAutoScale()` — query current state.
+- `PASCAK_GUI2_SCALE` env override — for testing without real DPI device (e.g., `PASCAK_GUI2_SCALE=2`).
+
+### Behavior (when autoScale = true)
+- **Window size**: `gui2.window(400, 300)` → physical `(400*scale) x (300*scale)`, logical stays 400×300.
+- **Drawing coords** (`rect`, `outlineRect`, `line`, `point`, `text`, `drawTextureScaled`): input logical × scale internally.
+- **Mouse coords** (`mouseX`, `mouseY`): physical ÷ scale = logical returned to script.
+- **Font size** (`setFont`): logical × scale in `TTF_OpenFont`.
+- **Backward compat**: default `autoScale = false`, so no break for existing code.
+
+### Implementation
+- `TGuiSDLState`: `FDPIScale: Double`, `FAutoScale: Boolean`, `pGetDisplayDPI` function pointer.
+- Helpers `Gui2DetectDPI`, `Gui2Scale`, `Gui2Unscale`.
+- Lazy DPI detect on first `getScale()` call, and on `GuiSDLEnsureInit`.
+
+### Verified
+- Scale detection: env override=2→2.0, =3→3.0, real=1.0 (Termux X11 fallback).
+- autoScale toggle: `setAutoScale(true)/false` reflected in `getAutoScale`.
+- Window creation with autoScale on: physical size scales, window opens, drawing works.
+- AutoScale off: existing behavior unchanged (no scaling).
+- Performance: all benchmarks stable vs v1.9.4 (no regression).
+
+### Example
+`examples/gui2_hidpi.pas` — demo showing scale detection, autoScale, drawing, mouse.
+
 ## [1.9.4] - 2026-10-29
 
 ### Fixed
