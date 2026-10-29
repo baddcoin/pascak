@@ -1,5 +1,35 @@
 # Changelog
 
+## [1.10.1] - 2026-10-29
+
+### Added
+- **Consolidated test infrastructure** — `tests/` directory with unified runner, replacing scattered `$HOME/test_*.pas` files.
+
+### Structure
+    tests/
+    ├── run.sh          # Unified runner
+    ├── helpers.sh      # Shared setup (binary copy to $HOME, exec-safe)
+    ├── lang/           # 16 language feature tests (deterministic PASS/FAIL)
+    ├── integration/    # 11 network/GUI/LSP tests (manual setup)
+    ├── fixtures/       # Mock servers, certs, hotreload test data
+    └── README.md       # Documentation
+
+### Features
+- **16/16 language tests** run with single command: `bash tests/run.sh lang`
+- Marker-based PASS/FAIL (each test has unique output marker)
+- Per-test timeout (20s default, override with `TEST_TIMEOUT=N`)
+- Auto-copy binary to `$HOME/pascak_test` (Termux `/storage/` = noexec)
+- Filter modes: `lang`, `integration`, single `.pas` file
+- `PASCAK_BIN=` env override for custom binary path
+
+### Verified
+- All 16 language tests PASS
+- Runner works from `/storage/` path (via `bash`, `-f` check, `$HOME` exec)
+
+### Notes
+- Integration tests (h2, hotreload, LSP, GUI2 DPI) require manual mock setup — documented in `tests/README.md`
+- Legacy `test/` directory (99 files, legacy diagnostics) left untouched
+
 ## [1.10.0] - 2026-10-29
 
 ### Added
