@@ -29,7 +29,8 @@ See results files:
 - [results_v1.9.0.md](results_v1.9.0.md) — Sleep(1500) + script fallback (~2x)
 - [results_v1.9.1.md](results_v1.9.1.md) — lazy worker pool (startup 489->277ms)
 - [results_v1.9.2.md](results_v1.9.2.md) — fast CLI exit (startup 277->68ms)
-- [results_v1.9.3.md](results_v1.9.3.md) — conditional WS poll (startup 68->45ms, **cumulative 11x JSON, 6.8x Array, 44x startup**)
+- [results_v1.9.3.md](results_v1.9.3.md) — conditional WS poll (startup 68->45ms)
+- [results_v1.9.4.md](results_v1.9.4.md) — server shutdown hang fix (no perf change)
 
 Key findings:
 - Parser: **fast** (780K lines/sec)

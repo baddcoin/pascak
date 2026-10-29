@@ -1823,6 +1823,7 @@ type
     // Mesin utama penahan Thread (Siklus Event Loop)
     procedure RunLoop(CallEnv: TSymbolTable); 
     function TickOnce(CallEnv: TSymbolTable): Integer;   // ✅ tambah
+    function HasPendingTasks: Boolean;   // v1.9.4: true if timers/IO tasks pending
 
   end;
   
@@ -5721,8 +5722,20 @@ end;
 
 procedure TPascakEngine.RunEventLoop;
 begin
-  if Assigned(FEventLoop) then
-    FEventLoop.RunLoop(FGlobalEnv);
+  if not Assigned(FEventLoop) then Exit;
+
+  // v1.9.4 fix: skip blocking loop when script returned naturally with
+  // no pending timers/IO tasks. Previously `RunLoop` (repeat..until False)
+  // hung forever because IsShuttingDown was only set AFTER this call.
+  //
+  // Pattern that broke: gui.start(); sleep(N); -- script returns naturally,
+  // no shutdown signal, RunLoop hangs.
+  //
+  // gui.run() pattern still works -- it calls FEventLoop.RunLoop directly
+  // (bypasses this function), so its blocking behavior is unaffected.
+  if not FEventLoop.HasPendingTasks then Exit;
+
+  FEventLoop.RunLoop(FGlobalEnv);
 end;
 
 procedure TPascakEngine.Shutdown;
@@ -20073,6 +20086,20 @@ end;
 { ✅ Non-blocking single iteration. Dipakai oleh Native_Sleep supaya
   worker pool / http async / timer callback dapat diproses selama
   script masih running, bukan hanya setelah script selesai. }
+function TEventLoop.HasPendingTasks: Boolean;
+begin
+  Result := False;
+  if Assigned(FTasks) then
+  begin
+    FLock.Acquire;
+    try
+      Result := FTasks.Count > 0;
+    finally
+      FLock.Release;
+    end;
+  end;
+end;
+
 function TEventLoop.TickOnce(CallEnv: TSymbolTable): Integer;
 var
   i, ReadyCount, DeadCount: Integer;
@@ -44766,8 +44793,20 @@ begin
       Res := Engine.ExecuteString(scr, 'test.pas');      
   TimingMark('exec');
       if Assigned(Res) then Res.Free;
-      
-      Engine.RunEventLoop;
+
+      // v1.9.4 fix: do NOT enter event loop implicitly here. Scripts that
+      // want live event processing must call gui.run()/Engine.RunEventLoop
+      // explicitly. Prior behavior hung forever for scripts using
+      // gui.start() + sleep() because gui.start() sets an interval timer
+      // (GUI poll), and RunLoop is repeat..until(IsShuttingDown) — never
+      // breaks because shutdown signal is only set AFTER this call.
+      //
+      // gui.run() pattern still works: it calls FEventLoop.RunLoop directly,
+      // bypassing this path, and exits cleanly via IsShuttingDown signal.
+      //
+      // Async scripts (http.get2Async) still complete: callback fires from
+      // worker thread; user waits via sleep/wait loop. Cleanup handles
+      // remaining thread join.
   TimingMark('event_loop');
       
       // ✅ FIX: set shutdown flag SEBELUM join thread.

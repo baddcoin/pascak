@@ -1,5 +1,33 @@
 # Changelog
 
+## [1.9.4] - 2026-10-29
+
+### Fixed
+- **Server script hang on shutdown** — scripts using `gui.start(); sleep(N);` pattern (without `gui.run()`) hung indefinitely after body completed.
+
+### Root cause
+1. `runScript` unconditionally called `Engine.RunEventLoop` after exec. `RunLoop` is `repeat..until(IsShuttingDown=1)` — never breaks because shutdown signal is only set AFTER this call. Chicken-and-egg.
+2. `gui.start()` sets an interval GUI poll timer, so `HasPendingTasks` stayed True even though user didn't request event processing.
+
+### Fix
+- `RunEventLoop` skips `RunLoop` when `HasPendingTasks = false`.
+- `runScript` no longer implicitly enters event loop. Scripts that need live event processing use `gui.run()` or `Engine.RunEventLoop` explicitly.
+
+### Behavior change (intentional)
+- `gui.start() + sleep()` pattern now exits cleanly after sleep (~3s incl 1.5s cleanup).
+- `gui.run()` pattern unchanged (blocks, drives event loop).
+- If user wants live server, must call `gui.run()`.
+
+### Verified
+- `gui.start(); sleep(1)` — exits cleanly (was infinite hang)
+- `gui.run()` + watcher — graceful shutdown works
+- async `http.get2Async` — works
+- Pure CLI `hi.pas` — 45ms startup unchanged
+- 17/18 language regression tests PASS (v129/v130 require mock server)
+
+### Performance
+- No perf impact. Benchmark medians stable within noise vs v1.9.3.
+
 ## [1.9.3] - 2026-10-29
 
 ### Performance
