@@ -39652,6 +39652,9 @@ type
     TLSContext: Pointer;
     TLSCertPath: string;
     TLSKeyPath: string;
+    { v1.11.0: asset hot-reload state }
+    HasAssetWatch: Boolean;
+    HotReloadInjected: Boolean;
     constructor Create(AHandle, APort, AWSPort: Integer; const ATitle: string);
     destructor Destroy; override;
   end;
@@ -40312,8 +40315,16 @@ begin
 
   WriteLn('[hot-reload] injected WS reload JS (WSPort=', WsPortStr, ')');
   Flush(Output);
+  App.HotReloadInjected := True;
 end;
 
+
+{ v1.11.0: forward declarations for gui.watch hot-reload asset }
+function HotWatch_IsDir(const Path: string): Boolean; forward;
+procedure HotWatch_AddFile(const Path: string; IsSource: Boolean = True); forward;
+function HotWatch_AddAssetDir(const Dir: string): Boolean; forward;
+procedure EnsureHotWatchThread; forward;
+function Native_GUI_Watch(Args: TObjectList; CallEnv: TSymbolTable): TValue; forward;
 
 function Native_GUI_Serve(Args: TObjectList; CallEnv: TSymbolTable): TValue;
 var
@@ -40333,10 +40344,52 @@ begin
   end;
   App.HTML := TValue(Args[1]).StrVal;
 
-  if GHotMode then
+  if (GHotMode or App.HasAssetWatch) and not App.HotReloadInjected then
     InjectHotReloadJS(App);
 
   Result := TValue.CreateBool(True);
+end;
+
+{ v1.11.0: gui.watch(handle, path) — asset hot-reload }
+function Native_GUI_Watch(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  App: TGuiApp;
+  Path: string;
+  Count: Integer;
+begin
+  if (Args.Count <> 2) or (TValue(Args[0]).DataType <> dtNumeric) or
+     (TValue(Args[1]).DataType <> dtString) then
+  begin
+    errMSG.callerror(140, 'gui.watch(handle, path)', errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateBool(False));
+  end;
+  App := GuiAppByHandle(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(App) then
+  begin
+    errMSG.callerror(144, 'gui.watch: invalid handle', errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateBool(False));
+  end;
+  Path := TValue(Args[1]).StrVal;
+  Count := 0;
+  if HotWatch_IsDir(Path) then
+  begin
+    if HotWatch_AddAssetDir(Path) then Inc(Count);
+  end
+  else
+  begin
+    HotWatch_AddFile(Path, False);
+    Inc(Count);
+  end;
+  if Count > 0 then
+  begin
+    EnsureHotWatchThread;
+    App.HasAssetWatch := True;
+    if not App.HotReloadInjected and (Length(App.HTML) > 0) then
+      InjectHotReloadJS(App);
+    WriteLn('[hot-reload] gui.watch(', Trunc(TValue(Args[0]).NumVal), ', ', Path, ') added ', Count, ' asset(s)');
+    Flush(Output);
+  end;
+  Result := TValue.CreateBool(Count > 0);
 end;
 
 function Native_GUI_Close(Args: TObjectList; CallEnv: TSymbolTable): TValue;
@@ -40555,6 +40608,8 @@ begin
   GuiInst.Members.DefineVar('create', TValue.CreateNative(@Native_GUI_Create));
   GuiInst.Members.DefineVar('createTLS', TValue.CreateNative(@Native_GUI_CreateTLS));
   GuiInst.Members.DefineVar('serve',  TValue.CreateNative(@Native_GUI_Serve));
+  { v1.11.0: gui.watch(handle, path) — asset hot-reload }
+  GuiInst.Members.DefineVar('watch',  TValue.CreateNative(@Native_GUI_Watch));
   GuiInst.Members.DefineVar('bind',   TValue.CreateNative(@Native_GUI_Bind));
   GuiInst.Members.DefineVar('open',   TValue.CreateNative(@Native_GUI_Open));
   GuiInst.Members.DefineVar('start',  TValue.CreateNative(@Native_GUI_Start));
@@ -46913,6 +46968,7 @@ type
     Path: string;
     InitialAge: LongInt;
     InitialSize: Int64;
+    IsSource: Boolean;
   end;
 
   THotWatchThread = class(TThread)
@@ -46951,7 +47007,7 @@ begin
   end;
 end;
 
-procedure HotWatch_AddFile(const Path: string);
+procedure HotWatch_AddFile(const Path: string; IsSource: Boolean);
 var
   Idx: Integer;
 begin
@@ -46960,6 +47016,46 @@ begin
   GHotWatchFiles[Idx].Path := Path;
   GHotWatchFiles[Idx].InitialAge := FileAge(Path);
   GHotWatchFiles[Idx].InitialSize := HotWatch_FileSize(Path);
+  GHotWatchFiles[Idx].IsSource := IsSource;
+end;
+
+function HotWatch_AddAssetDir(const Dir: string): Boolean;
+var
+  SR: TSearchRec;
+  Mask, FullPath: string;
+  HasSlash: Boolean;
+  Count: Integer;
+begin
+  Result := False;
+  Count := 0;
+  HasSlash := (Length(Dir) > 0) and (Dir[Length(Dir)] = '/');
+  if HasSlash then Mask := Dir + '*' else Mask := Dir + '/*';
+  if FindFirst(Mask, faAnyFile, SR) = 0 then
+  begin
+    try
+      repeat
+        if (SR.Name <> '.') and (SR.Name <> '..') and
+           ((SR.Attr and faDirectory) = 0) then
+        begin
+          if HasSlash then FullPath := Dir + SR.Name
+          else FullPath := Dir + '/' + SR.Name;
+          HotWatch_AddFile(FullPath, False);
+          Inc(Count);
+        end;
+      until FindNext(SR) <> 0;
+    finally
+      FindClose(SR);
+    end;
+  end;
+  Result := Count > 0;
+end;
+
+procedure EnsureHotWatchThread;
+begin
+  if Assigned(GHotWatchThread) then Exit;
+  GHotWatchThread := THotWatchThread.Create(True);
+  GHotWatchThread.FreeOnTerminate := False;
+  GHotWatchThread.Start;
 end;
 
 procedure HotWatch_AddDir(const Dir: string);
@@ -47091,6 +47187,21 @@ begin
         WriteLn('');
         WriteLn('[hot-reload] detected change in: ', GHotWatchFiles[I].Path);
 
+        { v1.11.0: asset files — reload only, do NOT halt }
+        if not GHotWatchFiles[I].IsSource then
+        begin
+          if Assigned(GWSEventLoop) then
+          begin
+            BroadcastHotReloadToGUI();
+            Sleep(300);
+          end;
+          GHotWatchFiles[I].InitialAge := CurAge;
+          GHotWatchFiles[I].InitialSize := CurSize;
+          Flush(Output);
+          Continue;
+        end;
+
+        { source file — existing behavior: broadcast + halt for restart }
         if GHotMode and Assigned(GWSEventLoop) then
         begin
           BroadcastHotReloadToGUI();

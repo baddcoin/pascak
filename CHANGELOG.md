@@ -1,5 +1,41 @@
 # Changelog
 
+## [1.11.0] - 2026-10-31
+
+### Added (feature)
+- **`gui.watch(handle, path)`** — asset hot-reload native. Watch file or directory (single-level), trigger browser reload via WS on change. Script keeps running (no `Halt`).
+
+### Behavior
+- **Asset files** (`.html/.css/.js/.txt/...`) → broadcast `{"type":"reload"}` to browser clients, update snapshot, continue polling
+- **Source files** (`.pas`) → existing behavior: broadcast + graceful shutdown + halt (for restart wrapper)
+- Differentiated via `THotWatchFile.IsSource: Boolean` field
+- WS reload JS injected lazily when `gui.watch` is called, even without `--watch` CLI flag
+
+### Use Case
+Browser GUI dev workflow: `gui.watch` monitors asset folder, browser auto-reloads on edit, pascak keeps running. Combine with external static server (live-server, python http.server, etc) for asset serving.
+
+### Implementation
+- `THotWatchFile.IsSource` — distinguishes source vs asset
+- `HotWatch_AddFile(Path, IsSource: Boolean = True)` — extended signature
+- `HotWatch_AddAssetDir(Dir): Boolean` — walk `*` (not just `*.pas`), single-level
+- `EnsureHotWatchThread` — lazy start if watcher not yet running
+- `Native_GUI_Watch` — new native, registered under `gui.watch`
+- `THotWatchThread.Execute` — split path: asset=continue polling, source=halt
+- `TGuiApp.HasAssetWatch` + `HotReloadInjected` — per-app inject state
+
+### Verified
+- **Build**: 47,449 lines compiled (+121 from baseline), EXIT 0, no warning
+- **Runtime smoke test**: `gui.watch(1, ...)` → `added 1 asset(s)`, `injected WS reload JS`, `detected change`, `broadcast reload`, no halt
+- **Regression**: 17/17 lang tests PASS
+- **Scope**: Termux-only path hardcoded in example (cross-platform = future)
+
+### Limitations
+- Asset dir walk is **single-level** (no recursive subdirs yet — future)
+- WS broadcast `0 client(s)` observed in smoke test (no browser opened) — expected; with real browser client, reload triggers
+- Thread safety: `gui.watch` should be called **before** `gui.start()` (documented, no lock yet)
+
+# Changelog
+
 ## [1.10.4] - 2026-10-29
 
 ### Added (opt-in performance)
