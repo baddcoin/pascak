@@ -2,7 +2,7 @@
 
 > Pascal-style scripting language with Python's expressiveness. Runs on any device with the Pascak VM (Termux, Linux, Windows, macOS).
 
-[![Version](https://img.shields.io/badge/version-v1.8.0-blue)]()
+[![Version](https://img.shields.io/badge/version-v1.10.4-blue)]()
 [![License](https://img.shields.io/badge/license-MIT-green)]()
 [![Platform](https://img.shields.io/badge/platform-Termux%20%7C%20Linux%20%7C%20Windows%20%7C%20macOS-lightgrey)]()
 
@@ -53,7 +53,7 @@ Save as `hello.pas`, then run `pascak hello.pas`.
 | **Network** | HTTP/1.1, HTTP/2 (multiplexing, retry, flow control, rate limit), WebSocket, TLS |
 | **Data** | SQLite, JSON, dict, array, regex, base64, crypto (SHA/AES/HMAC/PBKDF2) |
 | **GUI** | Browser (HTTP + WS RPC), Native SDL2 (window, drawing, keyboard, audio) |
-| **Dev Tools** | LSP (hover, completion, definition, signature help), linter, formatter, test runner, REPL, hot-reload |
+| **Dev Tools** | LSP (hover, completion, definition), linter, formatter, test runner, REPL, hot-reload |
 | **Security** | Sandbox, exec policy, rlimit, env sanitize |
 
 ## Examples
