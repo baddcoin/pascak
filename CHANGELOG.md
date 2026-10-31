@@ -1,5 +1,42 @@
 # Changelog
 
+## [1.11.12] - 2026-10-31
+
+### Fixed
+- **JIT deopt fatal error** in adaptive specialization path. Once
+  hot-patch activated (100+ numeric hits), polymorphic arithmetic crashed
+  with error 96/97/98/99 instead of gracefully falling back.
+
+### Root cause
+- opcAddNum / opcSubNum / opcMulNum / opcDivNum (superinstructions,
+  Phase 2) assume both operands numeric. On type change, they called
+  errMSG.callerror (fatal) instead of deoptimizing to generic path.
+- Reachability: any function called 100+ times with numbers, then once
+  with strings/objects/mixed -> FATAL.
+
+### Implementation
+- Replaced 4 fatal errMSG.callerror in else-branches with generic
+  fallback (replicating opcAdd / opcSub, opcMul, opcDiv, opcMod
+  generic logic):
+  - opcAddNum -> fallback: string concat / array merge / __add__ magic
+  - opcSubNum -> fallback: __sub__ magic
+  - opcMulNum -> fallback: string multiply / __mul__ magic
+  - opcDivNum -> fallback: __div__ magic
+
+### Verified
+- Deopt test: add(1, 2) called 150x (hot-patch) then add("hello", "world")
+  and add("x=", 42) -- previously FATAL, now returns expected results
+- Numeric path still works (specialized opcAddNum: add(1, 2) = 3)
+- Regression: 17/17 lang tests PASS
+
+### Backlog status
+- **Register VM: OBSOLETE** for Tier 1+2. Superinstructions (Phase 2)
+  and adaptive specialization (TypeFeedback + HitCount hot-patch) already
+  implemented. Deopt bug was the only correctness gap -- now fixed.
+- Tier 3 (full register VM) would be 1-2 weeks, 2-5x potential -- only
+  worth pursuing if user reports specific perf bottleneck that
+  superinstructions cannot solve.
+
 ## [1.11.11] - 2026-10-31
 
 ### Changed (perf)

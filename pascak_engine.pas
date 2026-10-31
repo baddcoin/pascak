@@ -19027,7 +19027,28 @@ begin
                 if Assigned(TmpC) then TmpC.Free;
               end
               else
-                errMSG.callerror(96, 'TVM.Run (opcAddNum: tipe berubah di runtime — JIT deopt)',                                 CurrentLine, CurrentCol);
+              begin
+                // v1.11.12: deopt -- fall back to generic opcAdd
+                b := Pop;
+                try
+                  a := Pop;
+                  try
+                    if (a.DataType = dtString) or (b.DataType = dtString) then
+                      Push(Helper_MergeStrings(a, b))
+                    else if (a.DataType = dtArray) and (b.DataType = dtArray) then
+                      Push(Helper_MergeArrays(a, b))
+                    else if (a.DataType = dtObject) then
+                    begin
+                      if a.ObjVal.Members.HasVar('__add__') or (a.ObjVal.Definition.Methods.IndexOf('__add__') <> -1) then
+                        Push(CallMagicMethod(a, '__add__', [b]))
+                      else
+                        errMSG.callerror(95,'TVM.Run',CurrentLine, CurrentCol);
+                    end
+                    else
+                      errMSG.callerror(96,'TVM.Run',CurrentLine, CurrentCol);
+                  finally a.Free; end;
+                finally b.Free; end;
+              end;
             end;
           
           opcSubNum:
@@ -19048,7 +19069,24 @@ begin
                 if Assigned(TmpC) then TmpC.Free;
               end
               else
-                errMSG.callerror(97, 'TVM.Run (opcSubNum: JIT deopt)', CurrentLine, CurrentCol);
+              begin
+                // v1.11.12: deopt -- fall back to generic opcSub (object magic)
+                b := Pop;
+                try
+                  a := Pop;
+                  try
+                    if (a.DataType = dtObject) then
+                    begin
+                      if a.ObjVal.Members.HasVar('__sub__') or (a.ObjVal.Definition.Methods.IndexOf('__sub__') <> -1) then
+                        Push(CallMagicMethod(a, '__sub__', [b]))
+                      else
+                        errMSG.callerror(97,'TVM.Run (Math Op)',CurrentLine, CurrentCol);
+                    end
+                    else
+                      errMSG.callerror(97,'TVM.Run (Math Op)',CurrentLine, CurrentCol);
+                  finally a.Free; end;
+                finally b.Free; end;
+              end;
             end;
           
           opcMulNum:
@@ -19069,7 +19107,28 @@ begin
                 if Assigned(TmpC) then TmpC.Free;
               end
               else
-                errMSG.callerror(98, 'TVM.Run (opcMulNum: JIT deopt)', CurrentLine, CurrentCol);
+              begin
+                // v1.11.12: deopt -- fall back to generic opcMul (string mult + object magic)
+                b := Pop;
+                try
+                  a := Pop;
+                  try
+                    if (a.DataType = dtString) and (b.DataType = dtNumeric) then
+                      Push(Helper_StringMultiply(a.StrVal, Trunc(b.NumVal)))
+                    else if (a.DataType = dtNumeric) and (b.DataType = dtString) then
+                      Push(Helper_StringMultiply(b.StrVal, Trunc(a.NumVal)))
+                    else if (a.DataType = dtObject) then
+                    begin
+                      if a.ObjVal.Members.HasVar('__mul__') or (a.ObjVal.Definition.Methods.IndexOf('__mul__') <> -1) then
+                        Push(CallMagicMethod(a, '__mul__', [b]))
+                      else
+                        errMSG.callerror(97,'TVM.Run (Math Op)',CurrentLine, CurrentCol);
+                    end
+                    else
+                      errMSG.callerror(97,'TVM.Run (Math Op)',CurrentLine, CurrentCol);
+                  finally a.Free; end;
+                finally b.Free; end;
+              end;
             end;
           
           opcDivNum:
@@ -19093,7 +19152,24 @@ begin
                 if Assigned(TmpC) then TmpC.Free;
               end
               else
-                errMSG.callerror(99, 'TVM.Run (opcDivNum: JIT deopt)', CurrentLine, CurrentCol);
+              begin
+                // v1.11.12: deopt -- fall back to generic opcDiv (object magic)
+                b := Pop;
+                try
+                  a := Pop;
+                  try
+                    if (a.DataType = dtObject) then
+                    begin
+                      if a.ObjVal.Members.HasVar('__div__') or (a.ObjVal.Definition.Methods.IndexOf('__div__') <> -1) then
+                        Push(CallMagicMethod(a, '__div__', [b]))
+                      else
+                        errMSG.callerror(97,'TVM.Run (Math Op)',CurrentLine, CurrentCol);
+                    end
+                    else
+                      errMSG.callerror(97,'TVM.Run (Math Op)',CurrentLine, CurrentCol);
+                  finally a.Free; end;
+                finally b.Free; end;
+              end;
             end;
           
           opcGetIndexArrayInt:
