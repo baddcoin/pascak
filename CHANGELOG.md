@@ -1,5 +1,39 @@
 # Changelog
 
+## [1.11.9] - 2026-10-31
+
+### Fixed
+- **304 Not Modified response had Content-Type + Content-Length headers**
+  (RFC 7232 §4.1 violation). Browser ignored it (no body in 304), but
+  HTTP proxies/tools could be confused.
+
+### Root cause
+- pascak_http.pas IsBodyless computation did not include 304 -- server
+  default Content-Type text/plain; charset=utf-8 and Content-Length: 0
+  appended to 304 responses.
+- Engine worker loop (pascak_engine.pas ApplyResponseDict +
+  Worker_HandleClient) unconditionally added default Content-Type
+  before raw build. Two separate sources, both needed guards.
+
+### Implementation
+- pascak_http.pas:621 -- extend IsBodyless to include Status = 304
+  (skip Content-Length default)
+- pascak_engine.pas:26705 -- guard ApplyResponseDict CT default with
+  Resp.Status <> 304
+- pascak_engine.pas:27084 -- guard worker loop CT default with
+  StatusCode <> 304
+
+### Verified (smoke test 3 scenarios)
+- 200: ETag + Content-Type: text/html + Content-Length: 46 + body (unchanged)
+- 304: ETag + Cache-Control: no-cache + Connection/Keep-Alive, NO
+  Content-Type, NO Content-Length, empty body
+- Regression: bash tests/run.sh lang -> 17/17 PASS
+
+### RFC reference
+- RFC 7232 §4.1: 304 response MUST NOT have message body; headers listed
+  should be limited to Cache-Control, Content-Location, Date, ETag,
+  Expires, Vary.
+
 ## [1.11.8] - 2026-10-31
 
 ### Fixed

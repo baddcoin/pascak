@@ -616,7 +616,9 @@ begin
   
   // RFC 7230 §3.3.2: 1xx dan 204 adalah "bodyless" — tidak boleh
   // punya Content-Length, dan secara implisit tidak punya body sama sekali.
-  IsBodyless := ((Status >= 100) and (Status < 200)) or (Status = 204);
+  { v1.11.9: 304 Not Modified is bodyless per RFC 7232 §4.1 —
+    no Content-Type, no Content-Length (browser uses cached value). }
+  IsBodyless := ((Status >= 100) and (Status < 200)) or (Status = 204) or (Status = 304);
   
   if (not IsBodyless) and (not HasContentLength) then
     Head := Head + 'Content-Length: ' + IntToStr(Length(Body)) + #13#10;

@@ -26701,7 +26701,8 @@ begin
     Body.Free;
   end;
   
-  if Resp.GetHeader('Content-Type') = '' then
+  { v1.11.9: 304 Not Modified must not have Content-Type (RFC 7232 §4.1) }
+  if (Resp.Status <> 304) and (Resp.GetHeader('Content-Type') = '') then
     Resp.SetHeader('Content-Type', 'text/plain; charset=utf-8');
 end;
 
@@ -27079,7 +27080,8 @@ begin
         if StatusCode = 0 then StatusCode := 200;
         StatusText := HTTPStatusText(StatusCode);
 
-        if RespNames.IndexOf('Content-Type') < 0 then
+        { v1.11.9: 304 Not Modified must not have Content-Type (RFC 7232 §4.1) }
+        if (StatusCode <> 304) and (RespNames.IndexOf('Content-Type') < 0) then
         begin
           RespNames.Add('Content-Type');
           RespValues.Add('text/plain; charset=utf-8');
