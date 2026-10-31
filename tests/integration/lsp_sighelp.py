@@ -49,10 +49,10 @@ p.stdin.write(frame({"jsonrpc":"2.0","method":"textDocument/didOpen",
   "params":{"textDocument":{"uri":"file:///t.pas","languageId":"pascak","version":1,"text":SRC}}}))
 p.stdin.flush()
 
-# Line 5 (0-based): "  println(add(1, 2));"
-# 0-based indices: 0-1 sp, 2-8 println, 9 '(', 10-12 add, 13 '(', 14 '1', 15 ',', 16 sp, 17 '2', 18 ')', 19 ')', 20 ';'
+FAIL = 0
 
-def sig_at(char, label):
+def sig_at(char, expect_func, expect_active, label):
+    global FAIL
     p.stdin.write(frame({"jsonrpc":"2.0","id":100,"method":"textDocument/signatureHelp",
       "params":{"textDocument":{"uri":"file:///t.pas"},"position":{"line":5,"character":char}}}))
     p.stdin.flush()
@@ -60,25 +60,36 @@ def sig_at(char, label):
     s = r.get("result")
     print(f"--- {label} (char {char}) ---")
     if s:
-        print("  label:", s["signatures"][0]["label"])
-        print("  params:", [p.get("label") for p in s["signatures"][0].get("parameters",[])])
-        print("  activeParameter:", s.get("activeParameter"))
+        label0 = s["signatures"][0]["label"]
+        active = s.get("activeParameter")
+        print(f"  label: {label0}")
+        print(f"  activeParameter: {active}")
+        if expect_func:
+            ok = (expect_func in label0) and (active == expect_active)
+            print(f"  {'PASS' if ok else 'FAIL'}: expect '{expect_func}' active={expect_active}")
+            if not ok: FAIL += 1
     else:
         print("  NONE")
+        if expect_func is not None:
+            print(f"  FAIL: expected '{expect_func}', got NONE")
+            FAIL += 1
     print()
 
-sig_at(11, "inside add(1|)")        # before '1' → add, param 0
-sig_at(15, "after add(1|, ...")     # before ',' → add, param 0
-sig_at(17, "add(1, |2)")            # before '2' → add, param 1
-sig_at(10, "println(|)")            # after '(' → println, param 0
+sig_at(10, "println", 0, "inside println args, before add")
+sig_at(14, "add", 0, "inside add(1|,)")
+sig_at(16, "add", 1, "inside add(1, |) after comma")
+sig_at(17, "add", 1, "inside add(1, |2)")
+sig_at(19, "println", 0, "after add() returns, back in println")
 
-# Not in call
 p.stdin.write(frame({"jsonrpc":"2.0","id":200,"method":"textDocument/signatureHelp",
   "params":{"textDocument":{"uri":"file:///t.pas"},"position":{"line":3,"character":0}}}))
 p.stdin.flush()
 r = read_response(p, 200)
 print("--- not in call (line 3) ---")
 print("  result:", r.get("result"))
+if r.get("result") is not None:
+    print("  FAIL: expected None")
+    FAIL += 1
 print()
 
 p.stdin.write(frame({"jsonrpc":"2.0","id":5,"method":"shutdown","params":{}}))
@@ -87,3 +98,5 @@ read_response(p, 5)
 p.stdin.write(frame({"jsonrpc":"2.0","method":"exit"}))
 p.stdin.flush()
 p.wait(timeout=3)
+
+print(f"=== RESULT: {'FAIL' if FAIL else 'PASS'} ({FAIL} failures) ===")

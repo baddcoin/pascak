@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.11.6] - 2026-10-31
+
+### Verified (LSP Phase 4)
+- **textDocument/signatureHelp** fully functional (already implemented pre-session, verified runtime)
+- signatureHelpProvider capability correctly declared (trigger: `(`, `,`)
+- Runtime verified 5 scenarios:
+  - Inside outer function args -> outer signature + param 0
+  - Inside nested function args (before comma) -> inner signature + param 0
+  - Inside nested function args (after comma) -> inner signature + param 1
+  - Return from nested function -> outer signature + param 0
+  - Not in call context -> nil
+
+### Test fix
+- tests/integration/lsp_sighelp.py: fix activeParameter expectation at char 16
+  (after comma = param 1, not 0); strict PASS/FAIL assertions added
+
+### Backlog
+- LSP Phase 4 marked DONE -- was "pending" in stale backlog context but
+  actually implemented. Pattern matches v1.2.6, v1.2.7, H2 4c: verify
+  runtime > trust backlog label.
+
 ## [1.11.5] - 2026-10-31
 
 ### Docs (tutorial)
