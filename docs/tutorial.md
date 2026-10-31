@@ -37,6 +37,9 @@ di folder project.
 26. [Embedding In-Process](#bab-26--embedding-in-process)
 27. [GUI Browser-Based](#bab-27--gui-browser-based)
 28. [Native GUI (SDL2)](#bab-28--native-gui-sdl2)
+29. [Optional Chaining & Null-Coalescing](#bab-29--optional-chaining--null-coalescing)
+30. [Enum](#bab-30--enum)
+31. [Destructuring](#bab-31--destructuring)
 ```
 
 ## 1. Setup & Hello World
@@ -3746,6 +3749,84 @@ Untuk production deployment GUI ke **banyak device**, rekomendasi: pakai **mkcer
     var cert := sys.env("HOME") + "/server.crt";
     var key  := sys.env("HOME") + "/server.key";
     var h := gui.createTLS(8080, cert, key, 8081, "App");
+
+### 27.20 — gui.watch(handle, path) -> bool (v1.11.0)
+
+Asset hot-reload programatik. Watch file atau directory, browser
+auto-reload saat file berubah. Script tetap running (tidak restart
+seperti CLI `--watch` di Bab 32).
+
+**Signature**:
+
+    var ok := gui.watch(h, "./public");
+
+**Behavior**:
+- File atau directory (single-level walk di v1.11.0, recursive di v1.11.1)
+- File change -> broadcast WS `{"type":"reload"}` -> client JS `location.reload()`
+- Script tidak halt (beda dengan `--watch` CLI yang restart process)
+
+**Contoh minimal**:
+
+    var h := gui.create(8080);
+    begin
+      gui.watch(h, "./public");
+      gui.serve(h, "<html><body><h1>Reload Test</h1></body></html>");
+      gui.start(h);
+      gui.run(h);
+    end.
+
+**Use case**: edit CSS/HTML/JS -> refresh browser tanpa restart pascak.
+Kombinasikan dengan `gui.serveDir` (27.21) untuk full static workflow.
+CLI `--hot` (Bab 32) untuk restart process + browser reload bersamaan.
+
+**Batasan v1.11.0**:
+- Directory walk single-level (v1.11.1 recursive)
+- Panggil `gui.watch` sebelum `gui.start` (thread safety)
+
+### 27.21 — gui.serveDir(handle, path) -> bool (v1.11.1)
+
+Static file serving untuk browser GUI. Serve file dari `path` dengan
+MIME detection otomatis + SPA fallback.
+
+**Signature**:
+
+    var ok := gui.serveDir(h, "./public");
+
+**Behavior**:
+- `GET /` -> `index.html` (implicit)
+- `GET /foo.css` -> file, `Content-Type: text/css`
+- `GET /sub/app.js` -> nested recursive
+- `GET /missing` -> fallback ke `App.HTML` (SPA pattern)
+- `GET /../etc/passwd` -> rejected (path traversal safe)
+
+**Implikasi**: `serveDir` **implicit hot-reload**:
+- Auto-watch root folder (recursive)
+- Auto-inject WS reload JS (tidak perlu `gui.watch` lagi)
+
+**Contoh lengkap**:
+
+    var h := gui.create(8080);
+    begin
+      gui.serveDir(h, "./public");
+      gui.start(h);
+      gui.run(h);
+    end.
+
+**Workflow**:
+1. Buat `./public/index.html` + `style.css`
+2. Jalankan script
+3. Buka `http://127.0.0.1:8080/`
+4. Edit `style.css` -> browser auto-reload
+
+**Path safety**: reject `..`, backslash, `#0`, canonical `ExpandFileName`
+harus prefix-match root.
+
+**Batasan v1.11.1**:
+- Tidak ada caching header (ETag, 304) -- future
+- Tidak ada range request (streaming file besar) -- future
+- Symlink resolution tanpa depth limit
+
+**Full example**: `examples/gui_hotreload_asset.pas`
 
 
 ---

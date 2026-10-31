@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.11.2] - 2026-10-31
+
+### Docs (tutorial)
+- **Bab 27.20** -- `gui.watch(handle, path)` (v1.11.0 asset hot-reload, programmatic)
+- **Bab 27.21** -- `gui.serveDir(handle, path)` (v1.11.1 static serving + implicit hot-reload)
+- TOC updated: Bab 29 (Optional Chaining), Bab 30 (Enum), Bab 31 (Destructuring) were missing
+
+### Known debt (deferred to next docs session)
+- Tutorial Bab 32 malformed (`### 32` inside Bab 31) -- restructure to `## Bab 32`
+- Duplicate `### 31.13` (Optional Method v1.2.7 + Function Param v1.6.0) -- renumber to 31.13/31.14
+- `## Bonus -- HTTP/2 Client` -- promote to `## Bab 33` for consistency
+
 ## [1.11.1] - 2026-10-31
 
 ### Added (feature)
