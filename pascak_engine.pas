@@ -35146,6 +35146,11 @@ begin
   InterlockedExchange(GSignalPendingTERM, 1);
 end;
 
+{ v1.11.8: no-op SIGPIPE handler — send() returns EPIPE, not exit 141 }
+procedure HandleSigPipeIgnoreCdecl(sig: cint); cdecl;
+begin
+end;
+
 procedure InstallSignalHandlers;
 begin
   if GSignalInstalled then Exit;
@@ -47437,6 +47442,13 @@ var
   LintStrict: Boolean;
 
 begin
+  { v1.11.8: install SIGPIPE ignore at CLI entry (all modes).
+    Must be before any network I/O so client send() to closed socket
+    returns EPIPE instead of killing process with exit 141. }
+  {$IFDEF UNIX}
+  fpSignal(SIGPIPE, @HandleSigPipeIgnoreCdecl);
+  {$ENDIF}
+
   // v1.9.0: removed cscript := scriptTest
   
   SetExceptionMask([exInvalidOp, exDenormalized, exZeroDivide, exOverflow, exUnderflow, exPrecision]);

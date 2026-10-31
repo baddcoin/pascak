@@ -1,5 +1,36 @@
 # Changelog
 
+## [1.11.8] - 2026-10-31
+
+### Fixed
+- **SIGPIPE kills process (exit 141)** on send() to closed socket
+- Root cause: SIGPIPE default disposition = terminate process. Client writing
+  to peer-closed socket (e.g. after H2 GOAWAY, or HTTPS close without RST)
+  received SIGPIPE and died with exit code 128 + 13 = 141.
+- Fix: install no-op SIGPIPE handler at CLI entry (all modes: CLI, LSP,
+  REPL, test, fmt, lint). send() now returns EPIPE instead of killing
+  process.
+
+### Implementation
+- HandleSigPipeIgnoreCdecl(sig: cint); cdecl; -- no-op handler
+- fpSignal(SIGPIPE, @HandleSigPipeIgnoreCdecl) in RunCLI body (right
+  after begin, before any network I/O)
+- Wrapped in IFDEF UNIX (Windows uses WSAEPIPE semantics, not signals)
+- Removed attempted registration from InstallSignalHandlers -- that
+  function only fires on user signal.on() call, too late for h2_auto_retry
+
+### Verified (smoke test)
+- Before fix: h2_auto_retry -> exit 141 at Request 2 (fresh conn close)
+- After fix: h2_auto_retry -> exit 0, both requests complete:
+  - Request 1: status=200, version=h2, body=OK-after-retry (GOAWAY retry)
+  - Request 2: status2=200, body2=OK-after-retry (fresh conn)
+  - Pool stats: hits=1, misses=4
+- Regression: bash tests/run.sh lang -> 17/17 PASS
+
+### Known minor (deferred)
+- Output may be cut at SIGTERM flush if timeout sends SIGTERM during
+  buffered output. Not SIGPIPE-related, cosmetic.
+
 ## [1.11.7] - 2026-10-31
 
 ### Added (feature)
