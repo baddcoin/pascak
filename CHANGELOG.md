@@ -1,5 +1,43 @@
 # Changelog
 
+## [1.11.10] - 2026-10-31
+
+### Added (feature)
+- **Last-Modified / If-Modified-Since** (RFC 7232 §3.3 + §3.4) -- completes
+  HTTP caching for gui.serveDir. Combined with existing ETag/If-None-Match
+  (v1.11.7).
+
+### Behavior
+- 200 response includes Last-Modified: <RFC 1123 GMT> (mtime of file)
+- 304 via If-Modified-Since when file mtime <= client timestamp
+- If-None-Match takes precedence over If-Modified-Since (RFC 7232 §6):
+  - If both present: ETag must match for 304, IMS is ignored
+  - If only IMS: IMS comparison determines 304
+- Existing ETag/INM path unchanged
+
+### Implementation
+- GetFileMTime(Path): Int64 -- FileDateToDateTime + DateTimeToUnix(UTC)
+- FormatRFC1123(UnixSecs): string -- "Sat, 31 Oct 2026 12:30:26 GMT"
+  via UnixToDateTime(UTC) + DecodeDateTime + const day/month arrays
+- ParseRFC1123(S): Int64 -- manual parse (no locale deps), EncodeDateTime
+  + DateTimeToUnix(UTC)
+- Static branch: add Last-Modified header, add IMS 304 branch gated on
+  SIfNoneMatch = '' (INM precedence)
+
+### Verified (5 smoke test scenarios)
+- 200: Last-Modified: Sat, 31 Oct 2026 12:30:26 GMT (RFC 1123 format)
+- 304 via If-None-Match: matching ETag -> 304, no body
+- 304 via If-Modified-Since: file unchanged -> 304, no body
+- 200 via If-Modified-Since: past date (2020) -> 200 + body
+- 200 via wrong ETag + IMS present -> 200 (INM wins over IMS per RFC §6)
+- Regression: 17/17 lang tests PASS
+
+### RFC reference
+- RFC 7232 §3.3: Last-Modified response header
+- RFC 7232 §3.4: If-Modified-Since request header
+- RFC 7232 §6: If-None-Match precedence over If-Modified-Since
+- RFC 1123: date format "Sun, 06 Nov 1994 08:49:37 GMT"
+
 ## [1.11.9] - 2026-10-31
 
 ### Fixed

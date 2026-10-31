@@ -39860,6 +39860,81 @@ begin
 end;
 
 { v1.11.7: ETag helper — strong tag from mtime + size }
+{ v1.11.10: Last-Modified / If-Modified-Since helpers }
+function GetFileMTime(const Path: string): Int64;
+var
+  SR: TSearchRec;
+begin
+  Result := 0;
+  if FindFirst(Path, faAnyFile, SR) = 0 then
+  begin
+    try
+      Result := DateTimeToUnix(FileDateToDateTime(SR.Time), False);
+    finally
+      FindClose(SR);
+    end;
+  end;
+end;
+
+function FormatRFC1123(UnixSecs: Int64): string;
+const
+  DAYS: array[0..6] of string = ('Sun','Mon','Tue','Wed','Thu','Fri','Sat');
+  MONTHS: array[1..12] of string = ('Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec');
+var
+  DT: TDateTime;
+  Y, M, D, H, Mi, S, MS: Word;
+  WDay: Integer;
+begin
+  DT := UnixToDateTime(UnixSecs, True);
+  DecodeDateTime(DT, Y, M, D, H, Mi, S, MS);
+  WDay := DayOfWeek(DT);
+  Result := DAYS[WDay - 1] + ', ' +
+            Format('%.2d', [D]) + ' ' +
+            MONTHS[M] + ' ' +
+            Format('%.4d', [Y]) + ' ' +
+            Format('%.2d', [H]) + ':' +
+            Format('%.2d', [Mi]) + ':' +
+            Format('%.2d', [S]) + ' GMT';
+end;
+
+function ParseRFC1123(const S: string): Int64;
+const
+  MONTHS: array[1..12] of string = ('Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec');
+var
+  P, D, M, Y, H, Mi, Se, I: Integer;
+  MonthStr: string;
+begin
+  Result := 0;
+  if Length(S) < 25 then Exit;
+  P := Pos(',', S);
+  if P = 0 then Exit;
+  P := P + 2;
+  if P + 20 > Length(S) then Exit;
+  try
+    D := StrToInt(Copy(S, P, 2));
+    MonthStr := Copy(S, P + 3, 3);
+    Y := StrToInt(Copy(S, P + 7, 4));
+    H := StrToInt(Copy(S, P + 12, 2));
+    Mi := StrToInt(Copy(S, P + 15, 2));
+    Se := StrToInt(Copy(S, P + 18, 2));
+  except
+    Exit;
+  end;
+  M := 0;
+  for I := 1 to 12 do
+    if MONTHS[I] = MonthStr then
+    begin
+      M := I;
+      Break;
+    end;
+  if M = 0 then Exit;
+  try
+    Result := DateTimeToUnix(EncodeDateTime(Y, M, D, H, Mi, Se, 0), True);
+  except
+    Result := 0;
+  end;
+end;
+
 function GetFileETag(const Path: string): string;
 var
   SR: TSearchRec;
@@ -39923,6 +39998,9 @@ var
   ReqPath, SFilePath, SContent, SCT: string;
   { v1.11.7: caching }
   SETag, SIfNoneMatch: string;
+  { v1.11.10: Last-Modified / If-Modified-Since }
+  SMTime, SIfModUnix: Int64;
+  SIfModSince: string;
 begin
   App := GuiAppsGetLast;
   if not Assigned(App) then
@@ -39944,19 +40022,36 @@ begin
       begin
         SCT := MimeTypeFromExt(SFilePath);
         SETag := GetFileETag(SFilePath);
+        SMTime := GetFileMTime(SFilePath);
         SIfNoneMatch := ExtractReqHeader(Args, 'if-none-match');
+        SIfModSince := ExtractReqHeader(Args, 'if-modified-since');
         D := TDictValue.Create;
         H := TDictValue.Create;
         H.SetValue('Cache-Control', TValue.CreateStr('no-cache'));
         if SETag <> '' then
           H.SetValue('ETag', TValue.CreateStr(SETag));
-        { v1.11.7: 304 short-circuit — skip file read }
+        if SMTime > 0 then
+          H.SetValue('Last-Modified', TValue.CreateStr(FormatRFC1123(SMTime)));
+        { v1.11.7: 304 via If-None-Match }
         if (SETag <> '') and (SIfNoneMatch = SETag) then
         begin
           D.SetValue('status', TValue.CreateNum(304));
           D.SetValue('headers', TValue.CreateDict(H));
           D.SetValue('body', TValue.CreateStr(''));
           Exit(TValue.CreateDict(D));
+        end;
+        { v1.11.10: 304 via If-Modified-Since — only if INM absent
+          (RFC 7232 §6: INM takes precedence over IMS when both present) }
+        if (SIfNoneMatch = '') and (SMTime > 0) and (SIfModSince <> '') then
+        begin
+          SIfModUnix := ParseRFC1123(SIfModSince);
+          if (SIfModUnix > 0) and (SMTime <= SIfModUnix) then
+          begin
+            D.SetValue('status', TValue.CreateNum(304));
+            D.SetValue('headers', TValue.CreateDict(H));
+            D.SetValue('body', TValue.CreateStr(''));
+            Exit(TValue.CreateDict(D));
+          end;
         end;
         SContent := ReadFileToString(SFilePath);
         H.SetValue('Content-Type', TValue.CreateStr(SCT));
