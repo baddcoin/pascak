@@ -39852,6 +39852,59 @@ begin
   end;
 end;
 
+{ v1.11.7: ETag helper — strong tag from mtime + size }
+function GetFileETag(const Path: string): string;
+var
+  SR: TSearchRec;
+begin
+  Result := '';
+  if FindFirst(Path, faAnyFile, SR) = 0 then
+  begin
+    Result := '"' + IntToHex(QWord(SR.Time), 16) + '-' + IntToHex(Int64(SR.Size), 16) + '"';
+    FindClose(SR);
+  end;
+end;
+
+{ v1.11.7: case-insensitive request header extractor }
+function ExtractReqHeader(Args: TObjectList; const Name: string): string;
+var
+  Req, HeadersVal, HV: TValue;
+  Keys: TStringArray;
+  I: Integer;
+  LowerName: string;
+begin
+  Result := '';
+  if Args.Count < 1 then Exit;
+  Req := TValue(Args[0]);
+  if (not Assigned(Req)) or (Req.DataType <> dtDict) then Exit;
+  HeadersVal := Req.DictVal.GetValueClone('headers');
+  if (not Assigned(HeadersVal)) or (HeadersVal.DataType <> dtDict) then
+  begin
+    if Assigned(HeadersVal) then HeadersVal.Free;
+    Exit;
+  end;
+  try
+    LowerName := LowerCase(Name);
+    Keys := HeadersVal.DictVal.GetKeys;
+    for I := 0 to High(Keys) do
+    begin
+      if LowerCase(Keys[I]) = LowerName then
+      begin
+        HV := HeadersVal.DictVal.GetValueClone(Keys[I]);
+        try
+          if Assigned(HV) and (HV.DataType = dtString) then
+            Result := HV.StrVal;
+        finally
+          if Assigned(HV) then HV.Free;
+        end;
+        Exit;
+      end;
+    end;
+  finally
+    HeadersVal.Free;
+  end;
+end;
+
 function Native_GUI_HttpHandler(Args: TObjectList; CallEnv: TSymbolTable): TValue;
 var
   App: TGuiApp;
@@ -39861,6 +39914,8 @@ var
   Script, WsScheme: string;
   { v1.11.1: static serving }
   ReqPath, SFilePath, SContent, SCT: string;
+  { v1.11.7: caching }
+  SETag, SIfNoneMatch: string;
 begin
   App := GuiAppsGetLast;
   if not Assigned(App) then
@@ -39880,10 +39935,23 @@ begin
       SFilePath := ResolveStaticFilePath(App.StaticRoot, ReqPath);
       if (SFilePath <> '') and FileExists(SFilePath) then
       begin
-        SContent := ReadFileToString(SFilePath);
         SCT := MimeTypeFromExt(SFilePath);
+        SETag := GetFileETag(SFilePath);
+        SIfNoneMatch := ExtractReqHeader(Args, 'if-none-match');
         D := TDictValue.Create;
         H := TDictValue.Create;
+        H.SetValue('Cache-Control', TValue.CreateStr('no-cache'));
+        if SETag <> '' then
+          H.SetValue('ETag', TValue.CreateStr(SETag));
+        { v1.11.7: 304 short-circuit — skip file read }
+        if (SETag <> '') and (SIfNoneMatch = SETag) then
+        begin
+          D.SetValue('status', TValue.CreateNum(304));
+          D.SetValue('headers', TValue.CreateDict(H));
+          D.SetValue('body', TValue.CreateStr(''));
+          Exit(TValue.CreateDict(D));
+        end;
+        SContent := ReadFileToString(SFilePath);
         H.SetValue('Content-Type', TValue.CreateStr(SCT));
         D.SetValue('status', TValue.CreateNum(200));
         D.SetValue('headers', TValue.CreateDict(H));

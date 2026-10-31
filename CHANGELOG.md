@@ -1,5 +1,41 @@
 # Changelog
 
+## [1.11.7] - 2026-10-31
+
+### Added (feature)
+- **GUI static file caching** -- ETag + If-None-Match + 304 Not Modified
+- `gui.serveDir` responses now include:
+  - `ETag: "<mtime_hex>-<size_hex>"` (strong, quoted)
+  - `Cache-Control: no-cache` (must revalidate -- required for hot-reload correctness)
+- `If-None-Match` matching ETag -> 304 Not Modified (no body, no file read)
+- File change -> ETag changes -> fresh 200 (hot-reload preserved)
+
+### Behavior
+- First GET: `200 OK` + `ETag` + `Cache-Control: no-cache` + body
+- Revalidate (matching ETag): `304 Not Modified` + no body (skip `ReadFileToString`)
+- Revalidate (wrong ETag): `200 OK` + body
+- File modified: new ETag -> `200 OK` + fresh body
+
+### Implementation
+- `GetFileETag(Path)` -- strong ETag from `FindFirst` mtime + size
+- `ExtractReqHeader(Args, Name)` -- case-insensitive lookup (`if-none-match` == `If-None-Match`)
+- Static branch: ETag/MIME computed first, 304 short-circuit skips file read
+- `Cache-Control: no-cache` -- browser MUST revalidate every request (no stale during dev)
+
+### Verified (smoke test)
+- Test 1: initial GET -> 200 + ETag + Cache-Control
+- Test 2: ETag extract -> `"000000006AE5D3E9-...-002E"`
+- Test 3: If-None-Match matching -> 304 Not Modified + Content-Length: 0
+- Test 4: wrong ETag -> 200 + body
+- Test 5: file touched -> new ETag -> 200 + v2 body (hot-reload correctness)
+- Bonus: hot-reload watcher still fires on change
+
+### Known minor issue (deferred)
+- 304 response includes `Content-Type: text/plain` (HTTP server default fallback).
+  RFC 7232 says 304 should not have Content-Type. Browser ignores it; cosmetic only.
+  Fix requires HTTP server writer touch (pascak_http.pas) -- defer to v1.11.8 if
+  proxy/tooling complains.
+
 ## [1.11.6] - 2026-10-31
 
 ### Verified (LSP Phase 4)
