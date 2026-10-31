@@ -29820,10 +29820,15 @@ begin
   for Attempt := 1 to MaxAttempts do
   begin
     WaitMs := RateGetWaitMs(Host);
-    if WaitMs > QWord(60000) then
+    { v1.11.11: cap worker sleep to 5s to prevent worker pool starvation
+      under concurrent async requests to rate-limited hosts. Callers
+      should implement higher-level retry with backoff instead of
+      blocking a worker thread for up to 60s. }
+    if WaitMs > QWord(5000) then
       raise Exception.Create(
-        'http.get2: rate limited - try again in ' +
-        IntToStr(Int64(WaitMs div 1000)) + 's');
+        'http.get2: rate limited (backoff ' +
+        IntToStr(Int64(WaitMs div 1000)) + 's > 5s cap) — ' +
+        'retry from caller with backoff');
     if WaitMs > 0 then
       Sleep(Cardinal(WaitMs));
 

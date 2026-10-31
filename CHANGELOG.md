@@ -1,5 +1,37 @@
 # Changelog
 
+## [1.11.11] - 2026-10-31
+
+### Changed (perf)
+- **Worker pool sleep cap reduced from 60s to 5s** in Native_HTTP_Get2
+  rate-limiter path. Under concurrent get2Async to rate-limited hosts,
+  workers were blocked up to 60s each by Sleep(WaitMs), causing worker
+  pool starvation for WS/GUI/timer tasks.
+
+### Behavior
+- Backoff > 5s: fast-fail with clear error message
+  ("rate limited (backoff Ns > 5s cap) -- retry from caller with backoff")
+- Backoff <= 5s: worker sleeps, retries (existing behavior)
+- Callers now responsible for caller-level retry with backoff on >5s cap
+- Existing h2_ratelimit_backoff test still PASSES (backoff within 5s)
+
+### Rationale
+- Workers SHOULD NOT block long: standard pattern (Go net/http,
+  Node async) is fast-fail + caller-side backoff, not worker-blocking
+- 12x reduction in worst-case worker starvation (60s -> 5s)
+- Zero async restructuring risk (1-line change)
+
+### Deferred (premature optimization)
+- Full async timer-deferral pattern (pre-check rate, schedule re-enqueue
+  via event loop, worker never blocks). Complex (2-3h, async path
+  fragile), only needed if user reports worker starvation >5s.
+
+### Verified
+- h2_ratelimit_backoff: err1 fast-fail + r2 status=200 recovery (EXIT 0)
+- Stress mock log: 8 burst connections from 5 concurrent requests --
+  workers dispatch concurrently (not blocked 16s+ by backoff)
+- Regression: 17/17 lang tests PASS
+
 ## [1.11.10] - 2026-10-31
 
 ### Added (feature)
