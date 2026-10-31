@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.11.3] - 2026-10-31
+
+### Fixed (tutorial structure)
+- **Bab 32 malformed** -- `### 32` was inside Bab 31; promoted to `## Bab 32 -- Hot-Reload & Dev Workflow` with subsections 32.1 (CLI --watch), 32.2 (Dev wrapper), 32.3 (Graceful chain)
+- **Duplicate `### 31.13`** -- renumbered Function Param Destructuring to `### 31.14` (Optional Method stays 31.13)
+- **`## Bonus -- HTTP/2 Client`** -- promoted to `## Bab 33 -- HTTP/2 Client`
+
+### Changed
+- Dev wrapper content (was `**Dev wrapper...**` bold) promoted to `### 32.2` proper heading
+- Graceful chain content (was `**Graceful chain...**` bold) promoted to `### 32.3` proper heading
+- TOC extended: Bab 32 (Hot-Reload) + Bab 33 (HTTP/2)
+
+### Verified
+- 11 structural check markers all clean (unique headings, no duplicates, no orphan content)
+- Boundary sanity: 31.13->31.14, 31.14->Bab32, 32.3->Bab33 all smooth
+- `## Latihan Lanjutan` preserved at tail
+- Docs-only patch, no code change, no build
+
 ## [1.11.2] - 2026-10-31
 
 ### Docs (tutorial)

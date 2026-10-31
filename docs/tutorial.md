@@ -40,6 +40,8 @@ di folder project.
 29. [Optional Chaining & Null-Coalescing](#bab-29--optional-chaining--null-coalescing)
 30. [Enum](#bab-30--enum)
 31. [Destructuring](#bab-31--destructuring)
+32. [Hot-Reload & Dev Workflow](#bab-32--hot-reload--dev-workflow)
+33. [HTTP/2 Client](#bab-33--http2-client)
 ```
 
 ## 1. Setup & Hello World
@@ -5027,7 +5029,70 @@ Ini penting untuk performance (skip expensive arg) dan safety
 - Hanya method call (bukan constructor `new X?.()`)
 - Single-call per `?.` (tidak support `obj?.a()?.b()` chained calls)
 
-### 32 — Hot-Reload dengan --watch (v1.4.0)
+### 31.14 — Function Param Destructuring (v1.6.0)
+
+Function parameters can destructure directly:
+
+    function f({a, b}, x) begin
+      return a + b + x;
+    end;
+    println(f({"a": 1, "b": 2}, 3));    // 6
+
+    function g([x, y]) begin
+      return x + y;
+    end;
+    println(g([10, 20]));                // 30
+
+**Nested + default**:
+
+    function h({cfg: {port}, u, v = 5}) begin
+      return port + u + v;
+    end;
+    println(h({"cfg": {"port": 80}, "u": 10}));   // 95
+
+**Multiple patterns**:
+
+    function two({x}, {y}) begin
+      return x + y;
+    end;
+    println(two({"x": 100}, {"y": 200}));         // 300
+
+**Mixed normal + pattern**:
+
+    function mixed(a, {b, c}, d) begin
+      return a + b + c + d;
+    end;
+    println(mixed(1, {"b": 2, "c": 3}, 4));       // 10
+
+**Implementation**: parser detects pattern in param position, generates
+synthetic `__fp_N`, injects `var {destructure} = __fp_N;` prelude at
+body start. Zero overhead beyond equivalent manual destructuring.
+
+**Rest element in param (v1.6.1)**:
+
+    function f({a, b, ...rest}) begin
+      return a + b + rest.c + rest.d;
+    end;
+    println(f({"a": 1, "b": 2, "c": 3, "d": 4}));    // 10
+
+    function g([x, ...tail]) begin
+      return x + len(tail);
+    end;
+    println(g([10, 20, 30, 40]));                     // 13
+
+    function h({cfg: {port, ...other}}) begin
+      return port + other.host;
+    end;
+    println(h({"cfg": {"port": 80, "host": 100}}));   // 180
+
+Semantics match destructuring statement rest (v1.2.6).
+
+**Batasan (v1.6.1)**:
+- Rest must be at end of pattern (existing parser restriction)
+
+## Bab 32 — Hot-Reload & Dev Workflow
+
+### 32.1 — CLI --watch (v1.4.0)
 
 Hot-reload untuk dev workflow: edit code -> auto-restart.
 
@@ -5104,68 +5169,7 @@ before — SPEC auto-promoted to script.
 - Directory watch non-recursive
 - JS injection falls back to append if no closing body tag
 
-### 31.13 — Function Param Destructuring (v1.6.0)
-
-Function parameters can destructure directly:
-
-    function f({a, b}, x) begin
-      return a + b + x;
-    end;
-    println(f({"a": 1, "b": 2}, 3));    // 6
-
-    function g([x, y]) begin
-      return x + y;
-    end;
-    println(g([10, 20]));                // 30
-
-**Nested + default**:
-
-    function h({cfg: {port}, u, v = 5}) begin
-      return port + u + v;
-    end;
-    println(h({"cfg": {"port": 80}, "u": 10}));   // 95
-
-**Multiple patterns**:
-
-    function two({x}, {y}) begin
-      return x + y;
-    end;
-    println(two({"x": 100}, {"y": 200}));         // 300
-
-**Mixed normal + pattern**:
-
-    function mixed(a, {b, c}, d) begin
-      return a + b + c + d;
-    end;
-    println(mixed(1, {"b": 2, "c": 3}, 4));       // 10
-
-**Implementation**: parser detects pattern in param position, generates
-synthetic `__fp_N`, injects `var {destructure} = __fp_N;` prelude at
-body start. Zero overhead beyond equivalent manual destructuring.
-
-**Rest element in param (v1.6.1)**:
-
-    function f({a, b, ...rest}) begin
-      return a + b + rest.c + rest.d;
-    end;
-    println(f({"a": 1, "b": 2, "c": 3, "d": 4}));    // 10
-
-    function g([x, ...tail]) begin
-      return x + len(tail);
-    end;
-    println(g([10, 20, 30, 40]));                     // 13
-
-    function h({cfg: {port, ...other}}) begin
-      return port + other.host;
-    end;
-    println(h({"cfg": {"port": 80, "host": 100}}));   // 180
-
-Semantics match destructuring statement rest (v1.2.6).
-
-**Batasan (v1.6.1)**:
-- Rest must be at end of pattern (existing parser restriction)
-
-**Dev wrapper tools/pascak_dev.sh (v1.8.0)**:
+### 32.2 — Dev wrapper tools/pascak_dev.sh (v1.8.0)
 
 Production-grade wrapper combining graceful shutdown + auto-restart:
 
@@ -5185,7 +5189,7 @@ Production-grade wrapper combining graceful shutdown + auto-restart:
 - Colored output
 - PASCAK_BIN / RESTART_DELAY env overrides
 
-**Graceful chain (v1.7.0 + v1.8.0)**:
+### 32.3 — Graceful chain (v1.7.0 + v1.8.0)
 1. Edit file -> watcher detects
 2. IsShuttingDown -> gui.run returns
 3. Shutdown hooks, WS clean close
@@ -5193,7 +5197,7 @@ Production-grade wrapper combining graceful shutdown + auto-restart:
 
 Zero state leak, no port conflicts.
 
-## Bonus — HTTP/2 Client
+## Bab 33 — HTTP/2 Client
 
 Pascak juga mendukung HTTP/2 client via ALPN negotiation (RFC 7301).
 Ini bukan pengganti http.get untuk semua kasus. Berguna saat server
