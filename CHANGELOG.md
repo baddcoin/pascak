@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.11.4] - 2026-10-31
+
+### Test infrastructure
+- **mock_server.py**: configurable enhance count via `MOCK_ENHANCE_N` env var (default 3)
+- **mock_server.py**: proper h2 response on OK path (headers + body + end_stream)
+- Per-test config: `h2_auto_retry` uses 1, `h2_ratelimit_backoff` uses 3
+
+### Verified (H2 Session 4c)
+- **Retry wrapper**: GOAWAY -> retry on fresh connection -> 200 OK (proven runtime)
+- **Rate limiter**: ENHANCE_YOUR_CALM x 3 -> backoff -> retry success (proven runtime)
+- **GOAWAY parse**: LastStreamID + error_code correctly extracted
+- **Retryable classification**: ENHANCE_YOUR_CALM -> retryable=True
+
+### Known issues (separate ticket)
+- Client exit 141 (SIGPIPE) when writing to closed socket after final response -- not H2 4c blocker
+
 ## [1.11.3] - 2026-10-31
 
 ### Fixed (tutorial structure)
