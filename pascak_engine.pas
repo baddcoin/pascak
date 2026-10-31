@@ -39655,6 +39655,8 @@ type
     { v1.11.0: asset hot-reload state }
     HasAssetWatch: Boolean;
     HotReloadInjected: Boolean;
+    { v1.11.1: static file serving }
+    StaticRoot: string;
     constructor Create(AHandle, APort, AWSPort: Integer; const ATitle: string);
     destructor Destroy; override;
   end;
@@ -39794,6 +39796,62 @@ begin
   Result := TValue.CreateBool(False);
 end;
 
+{ v1.11.1: helper — extract path from HTTP request dict }
+function ExtractReqPath(Args: TObjectList): string;
+var
+  Req, PathVal: TValue;
+begin
+  Result := '';
+  if Args.Count < 1 then Exit;
+  Req := TValue(Args[0]);
+  if (not Assigned(Req)) or (Req.DataType <> dtDict) then Exit;
+  PathVal := Req.DictVal.GetValueClone('path');
+  try
+    if Assigned(PathVal) and (PathVal.DataType = dtString) then
+      Result := PathVal.StrVal;
+  finally
+    if Assigned(PathVal) then PathVal.Free;
+  end;
+end;
+
+{ v1.11.1: resolve req path to file inside root; '' if invalid/traversal }
+function ResolveStaticFilePath(const Root, ReqPath: string): string;
+var
+  Rel, NormRoot, FullPath, Padded: string;
+begin
+  Result := '';
+  if (Root = '') or (ReqPath = '') then Exit;
+  Rel := ReqPath;
+  if Rel = '/' then Rel := '/index.html';
+  if (Length(Rel) > 0) and (Rel[1] = '/') then
+    Rel := Copy(Rel, 2, Length(Rel));
+  if Pos('\', Rel) > 0 then Exit;
+  if Pos(#0, Rel) > 0 then Exit;
+  Padded := '/' + Rel + '/';
+  if Pos('/../', Padded) > 0 then Exit;
+  NormRoot := ExpandFileName(IncludeTrailingPathDelimiter(Root));
+  FullPath := ExpandFileName(NormRoot + Rel);
+  if Copy(FullPath, 1, Length(NormRoot)) <> NormRoot then Exit;
+  Result := FullPath;
+end;
+
+{ v1.11.1: read file bytes as string }
+function ReadFileToString(const Path: string): string;
+var
+  FS: TFileStream;
+begin
+  Result := '';
+  if not FileExists(Path) then Exit;
+  FS := TFileStream.Create(Path, fmOpenRead or fmShareDenyNone);
+  try
+    SetLength(Result, FS.Size);
+    if FS.Size > 0 then
+      FS.ReadBuffer(Result[1], FS.Size);
+  finally
+    FS.Free;
+  end;
+end;
+
 function Native_GUI_HttpHandler(Args: TObjectList; CallEnv: TSymbolTable): TValue;
 var
   App: TGuiApp;
@@ -39801,6 +39859,8 @@ var
   Body, Html: string;
   WsPort: Integer;
   Script, WsScheme: string;
+  { v1.11.1: static serving }
+  ReqPath, SFilePath, SContent, SCT: string;
 begin
   App := GuiAppsGetLast;
   if not Assigned(App) then
@@ -39809,6 +39869,28 @@ begin
     D.SetValue('status', TValue.CreateNum(500));
     D.SetValue('body', TValue.CreateStr('no GUI app'));
     Exit(TValue.CreateDict(D));
+  end;
+
+  { v1.11.1: static file serving — try first, fall through to HTML }
+  if App.StaticRoot <> '' then
+  begin
+    ReqPath := ExtractReqPath(Args);
+    if ReqPath <> '' then
+    begin
+      SFilePath := ResolveStaticFilePath(App.StaticRoot, ReqPath);
+      if (SFilePath <> '') and FileExists(SFilePath) then
+      begin
+        SContent := ReadFileToString(SFilePath);
+        SCT := MimeTypeFromExt(SFilePath);
+        D := TDictValue.Create;
+        H := TDictValue.Create;
+        H.SetValue('Content-Type', TValue.CreateStr(SCT));
+        D.SetValue('status', TValue.CreateNum(200));
+        D.SetValue('headers', TValue.CreateDict(H));
+        D.SetValue('body', TValue.CreateStr(SContent));
+        Exit(TValue.CreateDict(D));
+      end;
+    end;
   end;
 
   Html := App.HTML;
@@ -40325,6 +40407,8 @@ procedure HotWatch_AddFile(const Path: string; IsSource: Boolean = True); forwar
 function HotWatch_AddAssetDir(const Dir: string): Boolean; forward;
 procedure EnsureHotWatchThread; forward;
 function Native_GUI_Watch(Args: TObjectList; CallEnv: TSymbolTable): TValue; forward;
+{ v1.11.1: static file serving }
+function Native_GUI_ServeDir(Args: TObjectList; CallEnv: TSymbolTable): TValue; forward;
 
 function Native_GUI_Serve(Args: TObjectList; CallEnv: TSymbolTable): TValue;
 var
@@ -40390,6 +40474,41 @@ begin
     Flush(Output);
   end;
   Result := TValue.CreateBool(Count > 0);
+end;
+
+{ v1.11.1: gui.serveDir(handle, path) — static file serving }
+function Native_GUI_ServeDir(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  App: TGuiApp;
+  Path: string;
+begin
+  if (Args.Count <> 2) or (TValue(Args[0]).DataType <> dtNumeric) or
+     (TValue(Args[1]).DataType <> dtString) then
+  begin
+    errMSG.callerror(140, 'gui.serveDir(handle, path)', errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateBool(False));
+  end;
+  App := GuiAppByHandle(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(App) then
+  begin
+    errMSG.callerror(144, 'gui.serveDir: invalid handle', errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateBool(False));
+  end;
+  Path := TValue(Args[1]).StrVal;
+  if not HotWatch_IsDir(Path) then
+  begin
+    errMSG.callerror(140, 'gui.serveDir: path bukan direktori', errMSG.xrow, errMSG.xcol);
+    Exit(TValue.CreateBool(False));
+  end;
+  App.StaticRoot := Path;
+  App.HasAssetWatch := True;
+  HotWatch_AddAssetDir(Path);
+  EnsureHotWatchThread;
+  if not App.HotReloadInjected and (Length(App.HTML) > 0) then
+    InjectHotReloadJS(App);
+  WriteLn('[gui] serveDir(', Trunc(TValue(Args[0]).NumVal), ', ', Path, ') static root set');
+  Flush(Output);
+  Result := TValue.CreateBool(True);
 end;
 
 function Native_GUI_Close(Args: TObjectList; CallEnv: TSymbolTable): TValue;
@@ -40610,6 +40729,8 @@ begin
   GuiInst.Members.DefineVar('serve',  TValue.CreateNative(@Native_GUI_Serve));
   { v1.11.0: gui.watch(handle, path) — asset hot-reload }
   GuiInst.Members.DefineVar('watch',  TValue.CreateNative(@Native_GUI_Watch));
+  { v1.11.1: gui.serveDir(handle, path) }
+  GuiInst.Members.DefineVar('serveDir', TValue.CreateNative(@Native_GUI_ServeDir));
   GuiInst.Members.DefineVar('bind',   TValue.CreateNative(@Native_GUI_Bind));
   GuiInst.Members.DefineVar('open',   TValue.CreateNative(@Native_GUI_Open));
   GuiInst.Members.DefineVar('start',  TValue.CreateNative(@Native_GUI_Start));
@@ -47020,6 +47141,7 @@ begin
 end;
 
 function HotWatch_AddAssetDir(const Dir: string): Boolean;
+{ v1.11.1: recursive walk (subdirs included) }
 var
   SR: TSearchRec;
   Mask, FullPath: string;
@@ -47034,11 +47156,15 @@ begin
   begin
     try
       repeat
-        if (SR.Name <> '.') and (SR.Name <> '..') and
-           ((SR.Attr and faDirectory) = 0) then
+        if (SR.Name = '.') or (SR.Name = '..') then Continue;
+        if HasSlash then FullPath := Dir + SR.Name
+        else FullPath := Dir + '/' + SR.Name;
+        if (SR.Attr and faDirectory) <> 0 then
         begin
-          if HasSlash then FullPath := Dir + SR.Name
-          else FullPath := Dir + '/' + SR.Name;
+          if HotWatch_AddAssetDir(FullPath) then Inc(Count);
+        end
+        else
+        begin
           HotWatch_AddFile(FullPath, False);
           Inc(Count);
         end;

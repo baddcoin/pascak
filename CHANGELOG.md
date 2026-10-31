@@ -1,5 +1,48 @@
 # Changelog
 
+## [1.11.1] - 2026-10-31
+
+### Added (feature)
+- **`gui.serveDir(handle, path)`** - static file serving native. Serves files from `path` at HTTP GET, with `MimeTypeFromExt` Content-Type. Falls through to `App.HTML` when file not found (SPA pattern).
+- **Recursive asset dir walk** - `HotWatch_AddAssetDir` now walks subdirectories (was single-level in v1.11.0).
+
+### Behavior
+- `GET /` -> `index.html` (implicit)
+- `GET /foo.css` -> file with Content-Type text/css
+- `GET /sub/app.js` -> nested file served
+- `GET /nonexistent` -> 200 `App.HTML` fallback (SPA)
+- `GET /../etc/passwd` -> traversal rejected, 200 `App.HTML` fallback (no leak)
+- `gui.serveDir` implies hot-reload (auto-injects WS reload JS, auto-watches root) - `gui.watch` not needed
+
+### Path Safety
+- Reject `..` segments and #0 bytes
+- Reject backslash (Windows path)
+- Canonical ExpandFileName must prefix-match root
+- Does NOT use GetSafeSandboxedPath (internal resolver; sandbox applies to user script fs.read, not HTTP serving)
+
+### Implementation
+- `TGuiApp.StaticRoot: string` field
+- `Native_GUI_ServeDir` - validate dir, set StaticRoot, recursive watch, lazy WS inject
+- `Native_GUI_HttpHandler` - pre-HTML static branch via ExtractReqPath + ResolveStaticFilePath + ReadFileToString
+- `HotWatch_AddAssetDir` - recursive walk
+- `ExtractReqPath`, `ResolveStaticFilePath`, `ReadFileToString` - helpers
+
+### Verified
+- Build: 47565 lines, EXIT 0
+- Smoke test (5 scenario):
+  - `/` -> 200 text/html
+  - `/style.css` -> 200 text/css
+  - `/sub/app.js` -> 200 application/javascript (recursive)
+  - `/../etc/passwd` -> 200 HTML fallback (no traversal leak)
+  - `/missing.txt` -> 200 HTML fallback (SPA pattern)
+- Regression: 17/17 lang tests PASS
+
+### Limitations
+- No symlink resolution depth limit yet
+- No caching headers (future)
+- No range request support
+- No 304 / If-Modified-Since
+
 ## [1.11.0] - 2026-10-31
 
 ### Added (feature)
@@ -33,8 +76,6 @@ Browser GUI dev workflow: `gui.watch` monitors asset folder, browser auto-reload
 - Asset dir walk is **single-level** (no recursive subdirs yet — future)
 - WS broadcast `0 client(s)` observed in smoke test (no browser opened) — expected; with real browser client, reload triggers
 - Thread safety: `gui.watch` should be called **before** `gui.start()` (documented, no lock yet)
-
-# Changelog
 
 ## [1.10.4] - 2026-10-29
 
