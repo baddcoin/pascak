@@ -4180,17 +4180,109 @@ Canvas drawing dengan stroke replay:
 
 **Untuk kebutuhan lebih**: load langsung via `dll.load("libSDL2_image.so")` dan pakai `native.struct` untuk surface — sama seperti FFI patterns di Bab 10-12.
 
-### 28.12 — Ringkasan API
+### 28.12 — Ringkasan API (52 native)
 
-| Kategori | Fungsi |
-|----------|--------|
-| **Window** | `init`, `window`, `isOpen`, `close`, `quit`, `setTitle` |
-| **Render** | `clear`, `present`, `delay`, `getTicks` |
-| **Draw** | `rect`, `outlineRect`, `line`, `point` |
-| **Input** | `poll`, `mouseX`, `mouseY`, `mouseButton`, `keyMod`, `keyName` |
-| **Text** | `setFont`, `text`, `measureText` |
+**52 fungsi** native GUI. Kategori: window/lifecycle, drawing, input,
+text, texture, audio, hi-DPI, utility.
 
-**19 fungsi** — cukup untuk build dashboard, form, game sederhana, tool native.
+#### Window & Lifecycle (13)
+
+| Method | Signature | Notes |
+|---|---|---|
+| `init()` | `() -> bool` | Init SDL2 + subsystems |
+| `window(title, w, h)` | `(str, num, num) -> handle` | Create main window (v0.10) |
+| `newWindow(title, [w], [h])` | `(str, [num], [num]) -> handle` | Multi-window (v1.0.0) |
+| `focusWindow(handle)` | `(num) -> bool` | Switch focused window |
+| `closeWindow(handle)` | `(num) -> bool` | Close specific window |
+| `listWindows()` | `() -> arr` | Array of handles |
+| `getFocusedWindow()` | `() -> num` | Current focused handle |
+| `isOpen()` | `() -> bool` | Window still open? |
+| `close()` | `() -> void` | Close current window |
+| `quit()` | `() -> void` | Shutdown SDL2 |
+| `setTitle(title)` | `(str) -> void` | Update window title |
+| `poll()` | `() -> arr` | Event poll -> array |
+| `delay(ms)` | `(num) -> void` | Sleep ms |
+
+#### Utility (2)
+
+| Method | Signature | Notes |
+|---|---|---|
+| `getTicks()` | `() -> num` | ms since init |
+| `getScale()` | `() -> num` | Hi-DPI scale factor |
+
+#### Hi-DPI (2, v1.10.0)
+
+| Method | Signature | Notes |
+|---|---|---|
+| `setAutoScale(enable)` | `(bool) -> void` | Toggle auto-scaling |
+| `getAutoScale()` | `() -> bool` | Query current state |
+
+#### Drawing (6)
+
+| Method | Signature | Notes |
+|---|---|---|
+| `clear([r,g,b,a])` | `([num*4]) -> void` | Clear with color (default black) |
+| `present()` | `() -> void` | Flip back buffer to screen |
+| `rect(x, y, w, h, [r,g,b,a])` | `(num*4, [num*4]) -> void` | Filled rectangle |
+| `outlineRect(x, y, w, h, [r,g,b,a])` | same | Unfilled rectangle |
+| `line(x1, y1, x2, y2, [r,g,b,a])` | `(num*4, [num*4]) -> void` | Line segment |
+| `point(x, y, [r,g,b,a])` | `(num*2, [num*4]) -> void` | Single pixel |
+
+#### Input (5)
+
+| Method | Signature | Notes |
+|---|---|---|
+| `mouseX()` | `() -> num` | Cursor X |
+| `mouseY()` | `() -> num` | Cursor Y |
+| `mouseButton(idx)` | `(num) -> bool` | 0=left, 1=mid, 2=right |
+| `keyMod()` | `() -> num` | Modifier bitmask |
+| `keyName(code)` | `(num) -> str` | Key name from code |
+
+#### Text (3)
+
+| Method | Signature | Notes |
+|---|---|---|
+| `setFont(path, [size])` | `(str, [num]) -> bool` | Load TTF font |
+| `text(str, x, y, [r,g,b,a])` | `(str, num*2, [num*4]) -> void` | Render text |
+| `measureText(str)` | `(str) -> dict` | `{w, h}` of rendered text |
+
+#### Texture (5, v0.11.1)
+
+| Method | Signature | Notes |
+|---|---|---|
+| `loadTexture(path)` | `(str) -> handle` | Load image |
+| `texSize(handle)` | `(num) -> dict` | `{w, h}` |
+| `drawTexture(handle, x, y)` | `(num, num, num) -> void` | Draw 1:1 |
+| `drawTextureScaled(handle, x, y, w, h)` | `(num*5) -> void` | Draw scaled |
+| `freeTexture(handle)` | `(num) -> void` | Free GPU memory |
+
+#### Music (12, v0.11.2-v0.11.3)
+
+| Method | Signature | Notes |
+|---|---|---|
+| `loadMusic(path)` | `(str) -> handle` | Load music stream |
+| `playMusic([handle])` | `([num]) -> void` | Play |
+| `pauseMusic()` | `() -> void` | Pause |
+| `resumeMusic()` | `() -> void` | Resume |
+| `stopMusic()` | `() -> void` | Stop + rewind |
+| `freeMusic(handle)` | `(num) -> void` | Free |
+| `musicPos()` | `() -> num` | Position (sec) |
+| `musicDuration()` | `() -> num` | Duration (sec) |
+| `seekMusic(pos)` | `(num) -> void` | Jump to position |
+| `musicVolume([vol])` | `([num]) -> num` | Get/set 0-128 |
+| `isMusicPlaying()` | `() -> bool` | Status |
+| `isMusicPaused()` | `() -> bool` | Status |
+
+#### Sound Effects (3, v0.11.2)
+
+| Method | Signature | Notes |
+|---|---|---|
+| `loadSound(path)` | `(str) -> handle` | Load WAV/OGG |
+| `playSound(handle)` | `(num) -> void` | Fire-and-forget |
+| `freeSound(handle)` | `(num) -> void` | Free |
+
+**Untuk browser-based GUI**, lihat Bab 27.
+**Untuk HTTP/2 client**, lihat Bab 33.
 
 **Examples siap-pakai**:
 - `examples/hello_gui2.pas` — window minimal
@@ -4199,10 +4291,10 @@ Canvas drawing dengan stroke replay:
 - `examples/text_demo_gui2.pas` — colored text + measureText
 - `examples/gui2_counter.pas` — click counter
 - `examples/gui2_paint.pas` — mouse drawing
-
-**Untuk browser-based GUI** (HTTP + WS), lihat Bab 27.
-**Untuk HTTP/2 client**, lihat Bonus chapter.
-
+- `examples/gui2_hidpi.pas` — Hi-DPI auto-scaling (v1.10.0)
+- `examples/gui2_multi_window.pas` — multi-window (v1.0.0)
+- `examples/gui2_image_viewer.pas` — image display
+- `examples/gui2_audio_demo.pas` — music + sound effects
 
 ### 28.13 — Multi-Window (v1.0.0)
 

@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.11.5] - 2026-10-31
+
+### Docs (tutorial)
+- **Bab 28.12** -- rewrite "Ringkasan API" from 19 fungsi (v0.10) to full 52 API reference
+- Full signature tables per category:
+  - Window & Lifecycle (13): init, window, newWindow, focusWindow, closeWindow, listWindows, getFocusedWindow, isOpen, close, quit, setTitle, poll, delay
+  - Utility (2): getTicks, getScale
+  - Hi-DPI (2, v1.10.0): setAutoScale, getAutoScale
+  - Drawing (6): clear, present, rect, outlineRect, line, point
+  - Input (5): mouseX, mouseY, mouseButton, keyMod, keyName
+  - Text (3): setFont, text, measureText
+  - Texture (5, v0.11.1): loadTexture, texSize, drawTexture, drawTextureScaled, freeTexture
+  - Music (12, v0.11.2-v0.11.3): loadMusic, playMusic, pauseMusic, resumeMusic, stopMusic, freeMusic, musicPos, musicDuration, seekMusic, musicVolume, isMusicPlaying, isMusicPaused
+  - Sound Effects (3, v0.11.2): loadSound, playSound, freeSound
+- Examples list expanded: 6 -> 10 (added hidpi, multi_window, image_viewer, audio_demo)
+- Cross-link Bab 27 (browser GUI) + Bab 33 (HTTP/2)
+
 ## [1.11.4] - 2026-10-31
 
 ### Test infrastructure
