@@ -19029,6 +19029,10 @@ begin
               else
               begin
                 // v1.11.12: deopt -- fall back to generic opcAdd
+                { v1.11.13: reset to generic opcode so future executions
+                  take the fast generic path, not this fallback. HitCount
+                  is >= 200 so re-specialization won't trigger. }
+                CurrentFrame^.Chunk.Code[CurrentFrame^.IP - 1].OpCode := opcAdd;
                 b := Pop;
                 try
                   a := Pop;
@@ -19071,6 +19075,8 @@ begin
               else
               begin
                 // v1.11.12: deopt -- fall back to generic opcSub (object magic)
+                { v1.11.13: reset to generic opcode (see opcAddNum) }
+                CurrentFrame^.Chunk.Code[CurrentFrame^.IP - 1].OpCode := opcSub;
                 b := Pop;
                 try
                   a := Pop;
@@ -19109,6 +19115,8 @@ begin
               else
               begin
                 // v1.11.12: deopt -- fall back to generic opcMul (string mult + object magic)
+                { v1.11.13: reset to generic opcode (see opcAddNum) }
+                CurrentFrame^.Chunk.Code[CurrentFrame^.IP - 1].OpCode := opcMul;
                 b := Pop;
                 try
                   a := Pop;
@@ -19154,6 +19162,8 @@ begin
               else
               begin
                 // v1.11.12: deopt -- fall back to generic opcDiv (object magic)
+                { v1.11.13: reset to generic opcode (see opcAddNum) }
+                CurrentFrame^.Chunk.Code[CurrentFrame^.IP - 1].OpCode := opcDiv;
                 b := Pop;
                 try
                   a := Pop;

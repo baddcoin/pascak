@@ -1,5 +1,41 @@
 # Changelog
 
+## [1.11.13] - 2026-11-01
+
+### Fixed (perf)
+- **Re-specialization after JIT deopt**. Once a superinstruction hot-patched
+  (e.g. opcAddNum) and deoptimized on type change, it stayed on opcAddNum
+  forever -- every subsequent call went through the fallback duplicate
+  code path (slower than generic opcAdd + type check).
+
+### Root cause
+- v1.11.12 deopt fix added fallback logic but did not reset OpCode. HitCount
+  was already >= 200 so re-specialization block never triggers.
+
+### Fix
+- On deopt, reset OpCode to generic:
+  - opcAddNum -> opcAdd
+  - opcSubNum -> opcSub
+  - opcMulNum -> opcMul
+  - opcDivNum -> opcDiv
+- Future executions take generic fast path instead of specialized-fallback
+- HitCount >= 200 prevents re-specialization loop
+
+### Verified
+- Despec test: add(1, 2) 150x warmup -> add("a","b") triggers deopt,
+  subsequent add("x","y") + add("p","q") use generic opcAdd (fast path)
+- Regression: 17/17 lang tests PASS
+
+### Backlog status
+- Tier 2.5 full (fused cmp+jump) still deferred. Assessment this session:
+  - opcLess runtime supports mixed types (numeric, string, coercion)
+  - Fused variant would need deopt framework (fixed-size Code array,
+    cannot re-expand 1 -> 2 instructions)
+  - Risk medium-high (jump offset remap subtle bugs)
+  - Effort 1.5-2h, needs fresh session
+- This release is the **low-risk subset** of Tier 2.5: re-specialization
+  fix (20 min, zero deopt risk).
+
 ## [1.11.12] - 2026-10-31
 
 ### Fixed
