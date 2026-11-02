@@ -38155,6 +38155,9 @@ type
     CurrentMusic: Pointer;
     SoundMap: TGuiSoundMap;
     NextSoundID: Integer;
+    { v1.11.14: keyboard state + text input }
+    PressedKeys: TStringList;
+    TextInputActive: Boolean;
     { v1.10.0: Hi-DPI support }
     FDPIScale: Double;
     FAutoScale: Boolean;
@@ -38168,6 +38171,9 @@ type
     pDestroyWindow: procedure(win: Pointer); cdecl;
     pGetError: function(): PAnsiChar; cdecl;
     pPollEvent: function(event: Pointer): Int32; cdecl;
+    { v1.11.14: text input }
+    pStartTextInput: procedure(); cdecl;
+    pStopTextInput: procedure(); cdecl;
     pSetWindowTitle: procedure(win: Pointer; title: PAnsiChar); cdecl;
     pGetTicks: function(): UInt32; cdecl;
     pDelay: procedure(ms: UInt32); cdecl;
@@ -38232,6 +38238,7 @@ const
   SDL_QUIT_EVENT            = $100;
   SDL_KEYDOWN               = $300;
   SDL_KEYUP                 = $301;
+  SDL_TEXTINPUT             = $303;
   SDL_MOUSEMOTION           = $400;
   SDL_MOUSEBUTTONDOWN       = $401;
   SDL_MOUSEBUTTONUP         = $402;
@@ -38298,11 +38305,20 @@ begin
   LastMouseY := 0;
   MouseButtonState := 0;
   ModState := 0;
+  PressedKeys := TStringList.Create;
+  PressedKeys.Sorted := True;
+  PressedKeys.Duplicates := dupIgnore;
+  TextInputActive := False;
 end;
 
 destructor TGuiSDLState.Destroy;
 begin
   EnsureCleanup;
+  if Assigned(PressedKeys) then
+  begin
+    PressedKeys.Free;
+    PressedKeys := nil;
+  end;
   inherited;
 end;
 
@@ -38425,6 +38441,9 @@ begin
   Pointer(State.pDestroyWindow)      := GetProcAddress(State.LibHandle, 'SDL_DestroyWindow');
   Pointer(State.pGetError)           := GetProcAddress(State.LibHandle, 'SDL_GetError');
   Pointer(State.pPollEvent)          := GetProcAddress(State.LibHandle, 'SDL_PollEvent');
+  { v1.11.14: text input }
+  Pointer(State.pStartTextInput)     := GetProcAddress(State.LibHandle, 'SDL_StartTextInput');
+  Pointer(State.pStopTextInput)      := GetProcAddress(State.LibHandle, 'SDL_StopTextInput');
   Pointer(State.pSetWindowTitle)     := GetProcAddress(State.LibHandle, 'SDL_SetWindowTitle');
   Pointer(State.pGetTicks)           := GetProcAddress(State.LibHandle, 'SDL_GetTicks');
   Pointer(State.pDelay)              := GetProcAddress(State.LibHandle, 'SDL_Delay');
@@ -38964,6 +38983,41 @@ begin
   end;
 end;
 
+{ v1.11.14: gui2.keyDown(name) -> bool — persistent key state }
+function Native_Gui2_KeyDown(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  Name: string;
+begin
+  Result := TValue.CreateBool(False);
+  if (Args.Count <> 1) or (TValue(Args[0]).DataType <> dtString) then Exit;
+  if not Assigned(GGuiSDL) then Exit;
+  if not Assigned(GGuiSDL.PressedKeys) then Exit;
+  Name := UpperCase(Trim(TValue(Args[0]).StrVal));
+  Result := TValue.CreateBool(GGuiSDL.PressedKeys.IndexOf(Name) >= 0);
+end;
+
+{ v1.11.14: gui2.textInputEnabled(bool) — toggle SDL_StartTextInput }
+function Native_Gui2_TextInputEnabled(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  Enable: Boolean;
+begin
+  Result := TValue.CreateBool(False);
+  if (Args.Count <> 1) then Exit;
+  if (TValue(Args[0]).DataType <> dtBoolean) then Exit;
+  if not Assigned(GGuiSDL) then Exit;
+  Enable := TValue(Args[0]).BoolVal;
+  if Enable then
+  begin
+    if Assigned(GGuiSDL.pStartTextInput) then GGuiSDL.pStartTextInput();
+  end
+  else
+  begin
+    if Assigned(GGuiSDL.pStopTextInput) then GGuiSDL.pStopTextInput();
+  end;
+  GGuiSDL.TextInputActive := Enable;
+  Result := TValue.CreateBool(True);
+end;
+
 function Native_Gui2_Poll(Args: TObjectList; CallEnv: TSymbolTable): TValue;
 var
   HasEvent: Int32;
@@ -38972,6 +39026,10 @@ var
   ModBits: UInt16;
   MouseBtn: UInt8;
   MX, MY: Int32;
+  { v1.11.14: text input + key state }
+  TmpPtr: PAnsiChar;
+  TextStr, KeyName: string;
+  KIdx: Integer;
 begin
   Result := TValue.CreateStr('none');
   if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.EventBuf)) then Exit;
@@ -38980,6 +39038,18 @@ begin
   if HasEvent = 0 then Exit;
   EvType := PUInt32(GGuiSDL.EventBuf)^;
   case EvType of
+    SDL_TEXTINPUT:
+      begin
+        { v1.11.14: UTF-8 text at offset 12, up to 32 bytes }
+        TmpPtr := PAnsiChar(PByte(GGuiSDL.EventBuf) + 12);
+        TextStr := '';
+        while (TmpPtr^ <> #0) and (Length(TextStr) < 32) do
+        begin
+          TextStr := TextStr + TmpPtr^;
+          Inc(TmpPtr);
+        end;
+        Exit(TValue.CreateStr('textinput:' + TextStr));
+      end;
     SDL_QUIT_EVENT:
       Exit(TValue.CreateStr('quit'));
     SDL_KEYDOWN:
@@ -38987,14 +39057,26 @@ begin
         KeyCode := PInt32(PByte(GGuiSDL.EventBuf) + 20)^;
         ModBits := PUInt16(PByte(GGuiSDL.EventBuf) + 24)^;
         GGuiSDL.ModState := ModBits;
-        Exit(TValue.CreateStr('key:' + GuiKeyName(KeyCode)));
+        KeyName := GuiKeyName(KeyCode);
+        { v1.11.14: track pressed keys for gui2.keyDown() }
+        if Assigned(GGuiSDL.PressedKeys) then
+          if GGuiSDL.PressedKeys.IndexOf(KeyName) < 0 then
+            GGuiSDL.PressedKeys.Add(KeyName);
+        Exit(TValue.CreateStr('key:' + KeyName));
       end;
     SDL_KEYUP:
       begin
         KeyCode := PInt32(PByte(GGuiSDL.EventBuf) + 20)^;
         ModBits := PUInt16(PByte(GGuiSDL.EventBuf) + 24)^;
         GGuiSDL.ModState := ModBits;
-        Exit(TValue.CreateStr('keyup:' + GuiKeyName(KeyCode)));
+        KeyName := GuiKeyName(KeyCode);
+        { v1.11.14: release key }
+        if Assigned(GGuiSDL.PressedKeys) then
+        begin
+          KIdx := GGuiSDL.PressedKeys.IndexOf(KeyName);
+          if KIdx >= 0 then GGuiSDL.PressedKeys.Delete(KIdx);
+        end;
+        Exit(TValue.CreateStr('keyup:' + KeyName));
       end;
     SDL_MOUSEMOTION:
       begin
@@ -41056,6 +41138,9 @@ begin
   Gui2Inst.Members.DefineVar('init', TValue.CreateNative(@Native_Gui2_Init));
   Gui2Inst.Members.DefineVar('window', TValue.CreateNative(@Native_Gui2_Window));
   Gui2Inst.Members.DefineVar('poll', TValue.CreateNative(@Native_Gui2_Poll));
+  { v1.11.14: text input + key state }
+  Gui2Inst.Members.DefineVar('keyDown', TValue.CreateNative(@Native_Gui2_KeyDown));
+  Gui2Inst.Members.DefineVar('textInputEnabled', TValue.CreateNative(@Native_Gui2_TextInputEnabled));
   Gui2Inst.Members.DefineVar('isOpen', TValue.CreateNative(@Native_Gui2_IsOpen));
   Gui2Inst.Members.DefineVar('clear', TValue.CreateNative(@Native_Gui2_Clear));
   Gui2Inst.Members.DefineVar('present', TValue.CreateNative(@Native_Gui2_Present));

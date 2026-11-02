@@ -1,5 +1,45 @@
 # Changelog
 
+## [1.11.14] - 2026-11-02
+
+### Added (feature) — GUI Widget Toolkit Phase 1 Foundation
+- **SDL_TEXTINPUT event binding** — poll() now returns 'textinput:<utf8>'
+  for actual character input (unicode, IME, compose). Previously only
+  'key:<name>' events available, insufficient for text input widgets.
+- **gui2.keyDown(name) -> bool** — persistent key state tracking.
+  PressedKeys TStringList maintained in poll() via KEYDOWN/KEYUP events.
+  Enables key repeat detection, hotkeys (Ctrl+S), game-like WASD input.
+- **gui2.textInputEnabled(bool) -> bool** — toggle SDL_StartTextInput /
+  SDL_StopTextInput. Controls on-screen keyboard on mobile (Termux).
+
+### Root cause for adding
+Probe for GUI widget toolkit (v1.13.0-plan) revealed SDL_TEXTINPUT not
+bound in v1.11.13. Hard blocker for Edit/Memo/ComboBox widgets. Without
+it: no unicode text, no IME, no compose input.
+
+### Implementation
+- TGuiSDLState: PressedKeys (TStringList, Sorted+dupIgnore), TextInputActive
+- Bindings: pStartTextInput, pStopTextInput (loaded in EnsureInit)
+- SDL_TEXTINPUT = $303 constant
+- poll(): SDL_TEXTINPUT case reads UTF-8 from offset 12 (32 byte max)
+- poll(): KEYDOWN tracks KeyName in PressedKeys, KEYUP releases
+- Native_Gui2_KeyDown: case-insensitive lookup
+- Native_Gui2_TextInputEnabled: calls SDL_StartTextInput/StopTextInput
+- Registration: gui2.keyDown, gui2.textInputEnabled
+
+### Verified
+- Build: 47928 lines, EXIT 0
+- API smoke test (no window):
+  - gui2.init() -> true (SDL2 loaded)
+  - gui2.keyDown('A') -> false (no keys pressed, native works)
+  - gui2.textInputEnabled != null -> true (native exists)
+- Regression: 17/17 lang tests PASS
+- Full interactive text input test deferred to Phase 4 (needs X11 setup)
+
+### Next phase
+Phase 2: Widget base class + event dispatch (2-3 sesi)
+See docs/gui_widgets/phase_plan.md on feat/gui-widgets branch.
+
 ## [1.11.13] - 2026-11-01
 
 ### Fixed (perf)
