@@ -1,5 +1,52 @@
 # Changelog
 
+## [1.11.16] - 2026-11-03
+
+### Added (feature) -- GUI Widget Toolkit Phase 2b
+- **Mouse event dispatch** -- poll() mouse events now route to widgets
+- **TGuiWidget.HandleMouse(MX, MY, Btn, Down): Boolean** virtual method
+- **TGuiWidget.HandleKey(Key, Down): Boolean** virtual (declaration only)
+- **TGuiWidget.HandleText(UTF8): Boolean** virtual (declaration only)
+- **TGuiSDLWindow.FocusedWidgetID** + **MouseCaptureID** event state
+- **TGuiWidget.ClickCount** tracking field
+- **gui2.widgetGetClicks(id)** -> num -- read click count
+
+### Architecture (Phase 2b scope)
+- `GuiHitTest(MX, MY)` -- topmost widget at position (reverse z-order)
+- `GuiDispatchMouse(MX, MY, Btn, Down)` -- route to captured widget first,
+  else hit-test
+- Mouse capture: mousedown inside widget sets MouseCaptureID; mouseup
+  releases (enables drag semantics for future widgets)
+- `FocusedWidgetID` set on mousedown (foundation for keyboard routing)
+- `TGuiPlaceholderWidget.HandleMouse` -- increments ClickCount on mouseup
+  within bounds (mimics onClick, used for testing)
+
+### poll() hooks
+- SDL_MOUSEMOTION: dispatches to captured widget (Down=true, drag path)
+- SDL_MOUSEBUTTONDOWN: dispatch + capture
+- SDL_MOUSEBUTTONUP: dispatch + release capture
+
+### Deferred to Phase 2c (next session)
+- Keyboard event dispatch (HandleKey routing to FocusedWidgetID)
+- Text input dispatch (HandleText routing)
+- Focus chain (Tab/Shift+Tab navigation via FocusNext)
+- onClick callback wiring (currently only ClickCount for testing)
+
+### Verified
+- Build: 48326 lines (+133 vs v1.11.15), EXIT 0
+- Phase 2b smoke test:
+  - 2 placeholders created (ids 1, 2)
+  - Fresh click counts = 0 (correct initial state)
+  - widgetGetClicks API exists (not null)
+  - Invalid id 999 returns 0 (graceful)
+- Regression: 17/17 lang tests PASS
+- Full interactive click test deferred to Phase 3 (Button, when visually actionable)
+
+### Next phase
+Phase 2c: keyboard dispatch + focus chain (1-2 sesi)
+Phase 3: Button widget (1 sesi)
+See docs/gui_widgets/phase_plan.md on feat/gui-widgets.
+
 ## [1.11.15] - 2026-11-02
 
 ### Added (feature) — GUI Widget Toolkit Phase 2a

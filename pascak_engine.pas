@@ -38127,8 +38127,14 @@ type
     X, Y, W, H: Integer;
     Visible: Boolean;
     Enabled: Boolean;
+    { v1.11.16: click tracking for testing event dispatch }
+    ClickCount: Integer;
     constructor Create(AID: Integer; AOwner: Pointer);
     procedure Draw(GuiState: Pointer); virtual; abstract;
+    { v1.11.16: event handlers -- return True if event consumed }
+    function HandleMouse(MX, MY, Btn: Integer; Down: Boolean): Boolean; virtual;
+    function HandleKey(const Key: string; Down: Boolean): Boolean; virtual;
+    function HandleText(const UTF8: string): Boolean; virtual;
   end;
 
   { v1.11.15: minimal concrete widget for testing infrastructure }
@@ -38138,6 +38144,8 @@ type
     constructor Create(AID: Integer; AOwner: Pointer;
       AX, AY, AW, AH: Integer; AR, AG, AB, AA: UInt8);
     procedure Draw(GuiState: Pointer); override;
+    { v1.11.16: mouse event dispatch }
+    function HandleMouse(MX, MY, Btn: Integer; Down: Boolean): Boolean; override;
   end;
 
   TGuiSDLWindow = class
@@ -38150,6 +38158,9 @@ type
     IsClosed: Boolean;
     { v1.11.15: widget toolkit }
     Widgets: TObjectList;
+    { v1.11.16: event dispatch state }
+    FocusedWidgetID: Integer;
+    MouseCaptureID: Integer;
     constructor Create(AWin, ARen: Pointer; AW, AH: Integer; const AT: string);
     destructor Destroy; override;
   end;
@@ -38282,6 +38293,8 @@ begin
   Title := AT;
   IsClosed := False;
   Widgets := TObjectList.Create(True);
+  FocusedWidgetID := 0;
+  MouseCaptureID := 0;
 end;
 
 destructor TGuiSDLWindow.Destroy;
@@ -38315,6 +38328,23 @@ begin
   X := 0; Y := 0; W := 100; H := 30;
   Visible := True;
   Enabled := True;
+  ClickCount := 0;
+end;
+
+{ v1.11.16: default event handlers -- not consumed }
+function TGuiWidget.HandleMouse(MX, MY, Btn: Integer; Down: Boolean): Boolean;
+begin
+  Result := False;
+end;
+
+function TGuiWidget.HandleKey(const Key: string; Down: Boolean): Boolean;
+begin
+  Result := False;
+end;
+
+function TGuiWidget.HandleText(const UTF8: string): Boolean;
+begin
+  Result := False;
 end;
 
 constructor TGuiPlaceholderWidget.Create(AID: Integer; AOwner: Pointer;
@@ -38340,6 +38370,21 @@ begin
   RectArr[0] := X; RectArr[1] := Y;
   RectArr[2] := W; RectArr[3] := H;
   St.pRenderFillRect(St.Renderer, @RectArr[0]);
+end;
+
+function TGuiPlaceholderWidget.HandleMouse(MX, MY, Btn: Integer;
+  Down: Boolean): Boolean;
+begin
+  Result := False;
+  if not Visible or not Enabled then Exit;
+  { v1.11.16: only react to left button }
+  if Btn <> 1 then Exit;
+  { v1.11.16: hit-test }
+  if (MX < X) or (MX >= X + W) or (MY < Y) or (MY >= Y + H) then Exit;
+  { v1.11.16: on release -- increment click count (mimics onClick) }
+  if not Down then
+    Inc(ClickCount);
+  Result := True;
 end;
 
 constructor TGuiSDLState.Create;
@@ -39273,6 +39318,84 @@ begin
   Result := TValue.CreateBool(True);
 end;
 
+{ v1.11.16: hit-test topmost widget at (MX, MY) in focused window }
+function GuiHitTest(MX, MY: Integer): TGuiWidget;
+var
+  Idx, I: Integer;
+  W: TGuiSDLWindow;
+  Widget: TGuiWidget;
+begin
+  Result := nil;
+  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Windows)) then Exit;
+  Idx := GGuiSDL.Windows.IndexOf(GGuiSDL.FocusedWindowID);
+  if Idx < 0 then Exit;
+  W := GGuiSDL.Windows.Data[Idx];
+  if not Assigned(W) or not Assigned(W.Widgets) then Exit;
+  { v1.11.16: topmost first -- iterate reverse (z-order) }
+  for I := W.Widgets.Count - 1 downto 0 do
+  begin
+    Widget := TGuiWidget(W.Widgets[I]);
+    if not Widget.Visible or not Widget.Enabled then Continue;
+    if (MX >= Widget.X) and (MX < Widget.X + Widget.W) and
+       (MY >= Widget.Y) and (MY < Widget.Y + Widget.H) then
+    begin
+      Result := Widget;
+      Exit;
+    end;
+  end;
+end;
+
+{ v1.11.16: dispatch mouse event to captured widget or hit-test }
+procedure GuiDispatchMouse(MX, MY, Btn: Integer; Down: Boolean);
+var
+  Idx: Integer;
+  W: TGuiSDLWindow;
+  Target: TGuiWidget;
+begin
+  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Windows)) then Exit;
+  Idx := GGuiSDL.Windows.IndexOf(GGuiSDL.FocusedWindowID);
+  if Idx < 0 then Exit;
+  W := GGuiSDL.Windows.Data[Idx];
+  if not Assigned(W) then Exit;
+  { v1.11.16: route to captured widget first (drag) }
+  if W.MouseCaptureID > 0 then
+  begin
+    Target := GuiFindWidget(W.MouseCaptureID);
+    if Assigned(Target) then
+    begin
+      Target.HandleMouse(MX, MY, Btn, Down);
+      if not Down then
+        W.MouseCaptureID := 0;
+      Exit;
+    end
+    else
+      W.MouseCaptureID := 0;
+  end;
+  { v1.11.16: no capture -- hit-test }
+  Target := GuiHitTest(MX, MY);
+  if Assigned(Target) then
+  begin
+    if Target.HandleMouse(MX, MY, Btn, Down) then
+    begin
+      if Down then
+        W.MouseCaptureID := Target.ID;
+      W.FocusedWidgetID := Target.ID;
+    end;
+  end;
+end;
+
+{ v1.11.16: gui2.widgetGetClicks(id) -> num }
+function Native_Gui2_WidgetGetClicks(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget;
+begin
+  Result := TValue.CreateNum(0);
+  if Args.Count <> 1 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  Result := TValue.CreateNum(W.ClickCount);
+end;
+
 function Native_Gui2_Poll(Args: TObjectList; CallEnv: TSymbolTable): TValue;
 var
   HasEvent: Int32;
@@ -39339,6 +39462,8 @@ begin
         MY := PInt32(PByte(GGuiSDL.EventBuf) + 24)^;
         GGuiSDL.LastMouseX := MX;
         GGuiSDL.LastMouseY := MY;
+        { v1.11.16: dispatch to captured widget (drag) -- Down=true, no click }
+        GuiDispatchMouse(MX, MY, 0, True);
         Exit(TValue.CreateStr('mousemove'));
       end;
     SDL_MOUSEBUTTONDOWN:
@@ -39350,6 +39475,8 @@ begin
         MY := PInt32(PByte(GGuiSDL.EventBuf) + 24)^;
         GGuiSDL.LastMouseX := MX;
         GGuiSDL.LastMouseY := MY;
+        { v1.11.16: dispatch mousedown -- widget captures }
+        GuiDispatchMouse(MX, MY, MouseBtn, True);
         Exit(TValue.CreateStr('mousedown:' + IntToStr(MouseBtn)));
       end;
     SDL_MOUSEBUTTONUP:
@@ -39357,6 +39484,10 @@ begin
         MouseBtn := PUInt8(PByte(GGuiSDL.EventBuf) + 16)^;
         if (MouseBtn >= 1) and (MouseBtn <= 3) then
           GGuiSDL.MouseButtonState := GGuiSDL.MouseButtonState and not (UInt32(1) shl (MouseBtn - 1));
+        MX := PInt32(PByte(GGuiSDL.EventBuf) + 20)^;
+        MY := PInt32(PByte(GGuiSDL.EventBuf) + 24)^;
+        { v1.11.16: dispatch mouseup -- release capture }
+        GuiDispatchMouse(MX, MY, MouseBtn, False);
         Exit(TValue.CreateStr('mouseup:' + IntToStr(MouseBtn)));
       end;
   end;
@@ -41406,6 +41537,8 @@ begin
   Gui2Inst.Members.DefineVar('widgetSetEnabled', TValue.CreateNative(@Native_Gui2_WidgetSetEnabled));
   Gui2Inst.Members.DefineVar('widgetGetBounds', TValue.CreateNative(@Native_Gui2_WidgetGetBounds));
   Gui2Inst.Members.DefineVar('widgetDestroy', TValue.CreateNative(@Native_Gui2_WidgetDestroy));
+  { v1.11.16: event dispatch }
+  Gui2Inst.Members.DefineVar('widgetGetClicks', TValue.CreateNative(@Native_Gui2_WidgetGetClicks));
   Gui2Inst.Members.DefineVar('isOpen', TValue.CreateNative(@Native_Gui2_IsOpen));
   Gui2Inst.Members.DefineVar('clear', TValue.CreateNative(@Native_Gui2_Clear));
   Gui2Inst.Members.DefineVar('present', TValue.CreateNative(@Native_Gui2_Present));
