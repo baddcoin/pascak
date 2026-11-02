@@ -1,5 +1,43 @@
 # Changelog
 
+## [1.11.15] - 2026-11-02
+
+### Added (feature) — GUI Widget Toolkit Phase 2a
+- **TGuiWidget** abstract base class (ID, bounds, visible, enabled, Draw virtual)
+- **TGuiPlaceholderWidget** minimal concrete widget (colored rect) for Phase 2a validation
+- **TGuiSDLWindow.Widgets: TObjectList** per-window widget storage, auto-freed
+- **gui2.placeholder(x, y, w, h, [r, g, b, a])** -> widget ID
+- **gui2.widgetCount()** -> count in focused window
+- **gui2.widgetsDraw()** -- call Draw on all widgets (visual)
+- **gui2.widgetSetPos / widgetSetSize / widgetSetVisible / widgetSetEnabled**
+- **gui2.widgetGetBounds(id)** -> {x, y, w, h} or null
+- **gui2.widgetDestroy(id)** -> bool
+
+### Architecture (Phase 2a scope)
+- Global widget ID counter (NextWidgetID in TGuiSDLState)
+- Per-window TObjectList owns widgets (auto-free on window destroy)
+- GuiFindWidget(ID) helper -- cross-window lookup by ID
+- Forward declaration for FPC reference-order requirement
+
+### Deferred to Phase 2b (next session)
+- Event dispatch: poll() -> hit-test -> HandleMouse/HandleKey/HandleText
+- Focus chain (Tab/Shift+Tab navigation)
+- Mouse capture state for drag
+- These require TGuiWidget virtual methods for events (currently only Draw)
+
+### Verified
+- Build: 48193 lines (+197 vs v1.11.14), EXIT 0
+- Widget API smoke test (X11 with ZINK software fallback):
+  - widgetCount: 0 -> 2 -> 1 -> 0 (correct lifecycle)
+  - bounds: x=10 y=10 w=100 h=50 initial, x=50 y=60 w=200 h=100 after setPos/Size
+  - destroy returns true, count decrements
+- Regression: 17/17 lang tests PASS
+
+### Next phase
+Phase 2b: event dispatch (2-3 sesi)
+Phase 3: Button widget (1 sesi)
+See docs/gui_widgets/phase_plan.md on feat/gui-widgets.
+
 ## [1.11.14] - 2026-11-02
 
 ### Added (feature) — GUI Widget Toolkit Phase 1 Foundation

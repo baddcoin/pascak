@@ -38119,6 +38119,27 @@ type
 
   TGuiSoundMap = specialize TFPGMap<Integer, Pointer>;
 
+  { v1.11.15: widget base class (Phase 2a) }
+  TGuiWidget = class
+  public
+    ID: Integer;
+    OwnerWindow: Pointer;
+    X, Y, W, H: Integer;
+    Visible: Boolean;
+    Enabled: Boolean;
+    constructor Create(AID: Integer; AOwner: Pointer);
+    procedure Draw(GuiState: Pointer); virtual; abstract;
+  end;
+
+  { v1.11.15: minimal concrete widget for testing infrastructure }
+  TGuiPlaceholderWidget = class(TGuiWidget)
+  public
+    R, G, B, A: UInt8;
+    constructor Create(AID: Integer; AOwner: Pointer;
+      AX, AY, AW, AH: Integer; AR, AG, AB, AA: UInt8);
+    procedure Draw(GuiState: Pointer); override;
+  end;
+
   TGuiSDLWindow = class
   public
     Window: Pointer;
@@ -38127,6 +38148,8 @@ type
     Width, Height: Integer;
     Title: string;
     IsClosed: Boolean;
+    { v1.11.15: widget toolkit }
+    Widgets: TObjectList;
     constructor Create(AWin, ARen: Pointer; AW, AH: Integer; const AT: string);
     destructor Destroy; override;
   end;
@@ -38158,6 +38181,8 @@ type
     { v1.11.14: keyboard state + text input }
     PressedKeys: TStringList;
     TextInputActive: Boolean;
+    { v1.11.15: widget toolkit }
+    NextWidgetID: Integer;
     { v1.10.0: Hi-DPI support }
     FDPIScale: Double;
     FAutoScale: Boolean;
@@ -38256,10 +38281,16 @@ begin
   Height := AH;
   Title := AT;
   IsClosed := False;
+  Widgets := TObjectList.Create(True);
 end;
 
 destructor TGuiSDLWindow.Destroy;
 begin
+  if Assigned(Widgets) then
+  begin
+    Widgets.Free;
+    Widgets := nil;
+  end;
   if Assigned(EventBuf) then
   begin
     try FreeMem(EventBuf); except end;
@@ -38273,6 +38304,42 @@ begin
   Tex := ATex;
   Width := AW;
   Height := AH;
+end;
+
+{ v1.11.15: widget base class implementation }
+constructor TGuiWidget.Create(AID: Integer; AOwner: Pointer);
+begin
+  inherited Create;
+  ID := AID;
+  OwnerWindow := AOwner;
+  X := 0; Y := 0; W := 100; H := 30;
+  Visible := True;
+  Enabled := True;
+end;
+
+constructor TGuiPlaceholderWidget.Create(AID: Integer; AOwner: Pointer;
+  AX, AY, AW, AH: Integer; AR, AG, AB, AA: UInt8);
+begin
+  inherited Create(AID, AOwner);
+  X := AX; Y := AY; W := AW; H := AH;
+  R := AR; G := AG; B := AB; A := AA;
+end;
+
+procedure TGuiPlaceholderWidget.Draw(GuiState: Pointer);
+var
+  St: TGuiSDLState;
+  RectArr: array[0..3] of Int32;
+begin
+  if not Visible then Exit;
+  St := TGuiSDLState(GuiState);
+  if not Assigned(St) then Exit;
+  if not Assigned(St.Renderer) then Exit;
+  if not Assigned(St.pSetRenderDrawColor) then Exit;
+  if not Assigned(St.pRenderFillRect) then Exit;
+  St.pSetRenderDrawColor(St.Renderer, R, G, B, A);
+  RectArr[0] := X; RectArr[1] := Y;
+  RectArr[2] := W; RectArr[3] := H;
+  St.pRenderFillRect(St.Renderer, @RectArr[0]);
 end;
 
 constructor TGuiSDLState.Create;
@@ -38309,6 +38376,7 @@ begin
   PressedKeys.Sorted := True;
   PressedKeys.Duplicates := dupIgnore;
   TextInputActive := False;
+  NextWidgetID := 1;
 end;
 
 destructor TGuiSDLState.Destroy;
@@ -38981,6 +39049,193 @@ begin
     else
       Result := 'unknown:' + IntToStr(KeyCode);
   end;
+end;
+
+{ v1.11.15: forward declaration — definition later in file }
+function GuiFindWidget(ID: Integer): TGuiWidget; forward;
+
+{ v1.11.15: gui2.widgetSetPos(id, x, y) }
+function Native_Gui2_WidgetSetPos(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget;
+begin
+  Result := TValue.CreateBool(False);
+  if Args.Count <> 3 then Exit;
+  if (TValue(Args[0]).DataType <> dtNumeric) then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  W.X := Trunc(TValue(Args[1]).NumVal);
+  W.Y := Trunc(TValue(Args[2]).NumVal);
+  Result := TValue.CreateBool(True);
+end;
+
+{ v1.11.15: gui2.widgetSetSize(id, w, h) }
+function Native_Gui2_WidgetSetSize(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget;
+begin
+  Result := TValue.CreateBool(False);
+  if Args.Count <> 3 then Exit;
+  if (TValue(Args[0]).DataType <> dtNumeric) then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  W.W := Trunc(TValue(Args[1]).NumVal);
+  W.H := Trunc(TValue(Args[2]).NumVal);
+  Result := TValue.CreateBool(True);
+end;
+
+{ v1.11.15: gui2.widgetSetVisible(id, bool) }
+function Native_Gui2_WidgetSetVisible(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget;
+begin
+  Result := TValue.CreateBool(False);
+  if Args.Count <> 2 then Exit;
+  if (TValue(Args[0]).DataType <> dtNumeric) then Exit;
+  if (TValue(Args[1]).DataType <> dtBoolean) then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  W.Visible := TValue(Args[1]).BoolVal;
+  Result := TValue.CreateBool(True);
+end;
+
+{ v1.11.15: gui2.widgetSetEnabled(id, bool) }
+function Native_Gui2_WidgetSetEnabled(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget;
+begin
+  Result := TValue.CreateBool(False);
+  if Args.Count <> 2 then Exit;
+  if (TValue(Args[0]).DataType <> dtNumeric) then Exit;
+  if (TValue(Args[1]).DataType <> dtBoolean) then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  W.Enabled := TValue(Args[1]).BoolVal;
+  Result := TValue.CreateBool(True);
+end;
+
+{ v1.11.15: gui2.widgetGetBounds(id) -> {x, y, w, h} or null }
+function Native_Gui2_WidgetGetBounds(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget; D: TDictValue;
+begin
+  Result := TValue.CreateNull;
+  if Args.Count <> 1 then Exit;
+  if (TValue(Args[0]).DataType <> dtNumeric) then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  D := TDictValue.Create;
+  try
+    D.SetValue('x', TValue.CreateNum(W.X));
+    D.SetValue('y', TValue.CreateNum(W.Y));
+    D.SetValue('w', TValue.CreateNum(W.W));
+    D.SetValue('h', TValue.CreateNum(W.H));
+    Result := TValue.CreateDict(D);
+  except
+    D.Free;
+    raise;
+  end;
+end;
+
+{ v1.11.15: gui2.widgetDestroy(id) -> bool }
+function Native_Gui2_WidgetDestroy(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  I, J, ID: Integer;
+  W: TGuiSDLWindow;
+  Widget: TGuiWidget;
+begin
+  Result := TValue.CreateBool(False);
+  if Args.Count <> 1 then Exit;
+  if (TValue(Args[0]).DataType <> dtNumeric) then Exit;
+  ID := Trunc(TValue(Args[0]).NumVal);
+  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Windows)) then Exit;
+  for I := 0 to GGuiSDL.Windows.Count - 1 do
+  begin
+    W := GGuiSDL.Windows.Data[I];
+    if not Assigned(W) or not Assigned(W.Widgets) then Continue;
+    for J := 0 to W.Widgets.Count - 1 do
+    begin
+      Widget := TGuiWidget(W.Widgets[J]);
+      if Widget.ID = ID then
+      begin
+        W.Widgets.Delete(J);
+        Result := TValue.CreateBool(True);
+        Exit;
+      end;
+    end;
+  end;
+end;
+
+{ v1.11.15: find widget by ID across all windows }
+function GuiFindWidget(ID: Integer): TGuiWidget;
+var
+  I, J: Integer;
+  W: TGuiSDLWindow;
+begin
+  Result := nil;
+  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Windows)) then Exit;
+  for I := 0 to GGuiSDL.Windows.Count - 1 do
+  begin
+    W := GGuiSDL.Windows.Data[I];
+    if not Assigned(W) or not Assigned(W.Widgets) then Continue;
+    for J := 0 to W.Widgets.Count - 1 do
+      if TGuiWidget(W.Widgets[J]).ID = ID then
+      begin
+        Result := TGuiWidget(W.Widgets[J]);
+        Exit;
+      end;
+  end;
+end;
+
+{ v1.11.15: gui2.placeholder(x, y, w, h, [r], [g], [b], [a]) -> widget id }
+function Native_Gui2_Placeholder(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  W: TGuiSDLWindow;
+  Widget: TGuiPlaceholderWidget;
+  X, Y, WW, HH, ID: Integer;
+  R, G, B, A: Integer;
+begin
+  Result := TValue.CreateNum(0);
+  if (Args.Count < 4) or (Args.Count > 8) then Exit;
+  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Windows)) then Exit;
+  X := Trunc(TValue(Args[0]).NumVal);
+  Y := Trunc(TValue(Args[1]).NumVal);
+  WW := Trunc(TValue(Args[2]).NumVal);
+  HH := Trunc(TValue(Args[3]).NumVal);
+  R := 200; G := 100; B := 150; A := 255;
+  if (Args.Count >= 5) and (TValue(Args[4]).DataType = dtNumeric) then R := Trunc(TValue(Args[4]).NumVal);
+  if (Args.Count >= 6) and (TValue(Args[5]).DataType = dtNumeric) then G := Trunc(TValue(Args[5]).NumVal);
+  if (Args.Count >= 7) and (TValue(Args[6]).DataType = dtNumeric) then B := Trunc(TValue(Args[6]).NumVal);
+  if (Args.Count >= 8) and (TValue(Args[7]).DataType = dtNumeric) then A := Trunc(TValue(Args[7]).NumVal);
+  W := GuiCurrentWindow;
+  if not Assigned(W) or not Assigned(W.Widgets) then Exit;
+  ID := GGuiSDL.NextWidgetID;
+  Inc(GGuiSDL.NextWidgetID);
+  Widget := TGuiPlaceholderWidget.Create(ID, W,
+    X, Y, WW, HH, UInt8(R), UInt8(G), UInt8(B), UInt8(A));
+  W.Widgets.Add(Widget);
+  Result := TValue.CreateNum(ID);
+end;
+
+{ v1.11.15: gui2.widgetCount() -> number of widgets in focused window }
+function Native_Gui2_WidgetCount(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiSDLWindow;
+begin
+  Result := TValue.CreateNum(0);
+  if not Assigned(GGuiSDL) then Exit;
+  W := GuiCurrentWindow;
+  if not Assigned(W) or not Assigned(W.Widgets) then Exit;
+  Result := TValue.CreateNum(W.Widgets.Count);
+end;
+
+{ v1.11.15: gui2.widgetsDraw() — draw all widgets in focused window }
+function Native_Gui2_WidgetsDraw(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  W: TGuiSDLWindow;
+  I: Integer;
+begin
+  Result := TValue.CreateBool(False);
+  if not Assigned(GGuiSDL) then Exit;
+  W := GuiCurrentWindow;
+  if not Assigned(W) or not Assigned(W.Widgets) then Exit;
+  for I := 0 to W.Widgets.Count - 1 do
+    TGuiWidget(W.Widgets[I]).Draw(GGuiSDL);
+  Result := TValue.CreateBool(True);
 end;
 
 { v1.11.14: gui2.keyDown(name) -> bool — persistent key state }
@@ -41141,6 +41396,16 @@ begin
   { v1.11.14: text input + key state }
   Gui2Inst.Members.DefineVar('keyDown', TValue.CreateNative(@Native_Gui2_KeyDown));
   Gui2Inst.Members.DefineVar('textInputEnabled', TValue.CreateNative(@Native_Gui2_TextInputEnabled));
+  { v1.11.15: widget toolkit }
+  Gui2Inst.Members.DefineVar('placeholder', TValue.CreateNative(@Native_Gui2_Placeholder));
+  Gui2Inst.Members.DefineVar('widgetCount', TValue.CreateNative(@Native_Gui2_WidgetCount));
+  Gui2Inst.Members.DefineVar('widgetsDraw', TValue.CreateNative(@Native_Gui2_WidgetsDraw));
+  Gui2Inst.Members.DefineVar('widgetSetPos', TValue.CreateNative(@Native_Gui2_WidgetSetPos));
+  Gui2Inst.Members.DefineVar('widgetSetSize', TValue.CreateNative(@Native_Gui2_WidgetSetSize));
+  Gui2Inst.Members.DefineVar('widgetSetVisible', TValue.CreateNative(@Native_Gui2_WidgetSetVisible));
+  Gui2Inst.Members.DefineVar('widgetSetEnabled', TValue.CreateNative(@Native_Gui2_WidgetSetEnabled));
+  Gui2Inst.Members.DefineVar('widgetGetBounds', TValue.CreateNative(@Native_Gui2_WidgetGetBounds));
+  Gui2Inst.Members.DefineVar('widgetDestroy', TValue.CreateNative(@Native_Gui2_WidgetDestroy));
   Gui2Inst.Members.DefineVar('isOpen', TValue.CreateNative(@Native_Gui2_IsOpen));
   Gui2Inst.Members.DefineVar('clear', TValue.CreateNative(@Native_Gui2_Clear));
   Gui2Inst.Members.DefineVar('present', TValue.CreateNative(@Native_Gui2_Present));
