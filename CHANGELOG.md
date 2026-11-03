@@ -1,5 +1,46 @@
 # Changelog
 
+## [1.11.17] - 2026-11-03
+
+### Added (feature) -- GUI Widget Toolkit Phase 2c
+- **Keyboard event dispatch** -- KEYDOWN/KEYUP route to FocusedWidgetID
+- **Text input dispatch** -- SDL_TEXTINPUT routes to FocusedWidgetID
+- **Focus chain** -- Tab / Shift+Tab navigation via gui2.widgetFocusNext()
+- **Programmatic focus** -- gui2.widgetFocus(id)
+- **Focus query** -- gui2.widgetGetFocused() -> focused id (0 = none)
+- **Key tracking** -- gui2.widgetGetKeyCount(id), TGuiWidget.KeyCount field
+- **TGuiWidget.Focusable: Boolean** (default True, widgets can opt-out)
+
+### Architecture
+- GuiFocusNext(Reverse) -- cycle focusable/visible/enabled widgets
+  - Handles wrap-around (last -> first, first -> last for reverse)
+  - Skips non-focusable widgets automatically
+- GuiDispatchKey(Key, Down) -- route to focused widget HandleKey
+- GuiDispatchText(UTF8) -- route to focused widget HandleText
+- TAB key triggers GuiFocusNext (Shift+TAB = reverse), also dispatched
+- TGuiPlaceholderWidget.HandleKey/HandleText -- increment KeyCount for testing
+
+### poll() hooks
+- SDL_KEYDOWN: track pressed keys + Tab navigation + GuiDispatchKey
+- SDL_KEYUP: release pressed key + GuiDispatchKey(down=False)
+- SDL_TEXTINPUT: GuiDispatchText to focused widget
+
+### Verified
+- Build: 48500+ lines (~174 vs v1.11.16), EXIT 0
+- Phase 2c smoke test (X11 ZINK):
+  - 3 placeholders created (ids 1, 2, 3)
+  - Focus chain: 0 -> 1 -> 2 -> 3 -> 1 (wrap) -> 3 (reverse)
+  - All 4 natives exist (widgetFocusNext, widgetFocus, widgetGetFocused, widgetGetKeyCount)
+  - Key counts 0 (no hardware input in script test)
+- Regression: 17/17 lang tests PASS
+
+### MVP Status
+Phase 1 + 2a + 2b + 2c = foundation complete. Next phase:
+- Phase 3: Button widget (1 sesi) -- first visually actionable widget
+- Then Edit (Phase 4), Memo (Phase 5), etc.
+
+See docs/gui_widgets/phase_plan.md on feat/gui-widgets.
+
 ## [1.11.16] - 2026-11-03
 
 ### Added (feature) -- GUI Widget Toolkit Phase 2b

@@ -38129,6 +38129,9 @@ type
     Enabled: Boolean;
     { v1.11.16: click tracking for testing event dispatch }
     ClickCount: Integer;
+    { v1.11.17: focus chain + key tracking }
+    Focusable: Boolean;
+    KeyCount: Integer;
     constructor Create(AID: Integer; AOwner: Pointer);
     procedure Draw(GuiState: Pointer); virtual; abstract;
     { v1.11.16: event handlers -- return True if event consumed }
@@ -38146,6 +38149,9 @@ type
     procedure Draw(GuiState: Pointer); override;
     { v1.11.16: mouse event dispatch }
     function HandleMouse(MX, MY, Btn: Integer; Down: Boolean): Boolean; override;
+    { v1.11.17: keyboard event dispatch }
+    function HandleKey(const Key: string; Down: Boolean): Boolean; override;
+    function HandleText(const UTF8: string): Boolean; override;
   end;
 
   TGuiSDLWindow = class
@@ -38329,6 +38335,8 @@ begin
   Visible := True;
   Enabled := True;
   ClickCount := 0;
+  Focusable := True;
+  KeyCount := 0;
 end;
 
 { v1.11.16: default event handlers -- not consumed }
@@ -38384,6 +38392,27 @@ begin
   { v1.11.16: on release -- increment click count (mimics onClick) }
   if not Down then
     Inc(ClickCount);
+  Result := True;
+end;
+
+{ v1.11.17: keyboard events increment KeyCount for testing }
+function TGuiPlaceholderWidget.HandleKey(const Key: string;
+  Down: Boolean): Boolean;
+begin
+  Result := False;
+  if not Visible or not Enabled then Exit;
+  if Down then
+  begin
+    Inc(KeyCount);
+    Result := True;
+  end;
+end;
+
+function TGuiPlaceholderWidget.HandleText(const UTF8: string): Boolean;
+begin
+  Result := False;
+  if not Visible or not Enabled then Exit;
+  Inc(KeyCount);
   Result := True;
 end;
 
@@ -39318,6 +39347,82 @@ begin
   Result := TValue.CreateBool(True);
 end;
 
+{ v1.11.17: focus next/prev widget (Tab navigation) }
+procedure GuiFocusNext(Reverse: Boolean);
+var
+  Idx, I, CurIdx, StartIdx: Integer;
+  W: TGuiSDLWindow;
+begin
+  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Windows)) then Exit;
+  Idx := GGuiSDL.Windows.IndexOf(GGuiSDL.FocusedWindowID);
+  if Idx < 0 then Exit;
+  W := GGuiSDL.Windows.Data[Idx];
+  if not Assigned(W) or not Assigned(W.Widgets) then Exit;
+  if W.Widgets.Count = 0 then Exit;
+  { find current focused widget index in list }
+  CurIdx := -1;
+  for I := 0 to W.Widgets.Count - 1 do
+    if TGuiWidget(W.Widgets[I]).ID = W.FocusedWidgetID then
+    begin
+      CurIdx := I;
+      Break;
+    end;
+  { iterate next focusable }
+  for I := 1 to W.Widgets.Count do
+  begin
+    if Reverse then
+      StartIdx := (CurIdx - I + W.Widgets.Count) mod W.Widgets.Count
+    else
+      StartIdx := (CurIdx + I) mod W.Widgets.Count;
+    if CurIdx < 0 then StartIdx := I - 1;
+    if StartIdx < 0 then StartIdx := W.Widgets.Count + StartIdx;
+    if (StartIdx >= 0) and (StartIdx < W.Widgets.Count) then
+      if TGuiWidget(W.Widgets[StartIdx]).Focusable and
+         TGuiWidget(W.Widgets[StartIdx]).Visible and
+         TGuiWidget(W.Widgets[StartIdx]).Enabled then
+      begin
+        W.FocusedWidgetID := TGuiWidget(W.Widgets[StartIdx]).ID;
+        Exit;
+      end;
+  end;
+end;
+
+{ v1.11.17: dispatch key event to focused widget }
+procedure GuiDispatchKey(const Key: string; Down: Boolean);
+var
+  Idx: Integer;
+  W: TGuiSDLWindow;
+  Target: TGuiWidget;
+begin
+  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Windows)) then Exit;
+  Idx := GGuiSDL.Windows.IndexOf(GGuiSDL.FocusedWindowID);
+  if Idx < 0 then Exit;
+  W := GGuiSDL.Windows.Data[Idx];
+  if not Assigned(W) or (W.FocusedWidgetID = 0) then Exit;
+  Target := GuiFindWidget(W.FocusedWidgetID);
+  if not Assigned(Target) then Exit;
+  if not Target.Visible or not Target.Enabled then Exit;
+  Target.HandleKey(Key, Down);
+end;
+
+{ v1.11.17: dispatch text input to focused widget }
+procedure GuiDispatchText(const UTF8: string);
+var
+  Idx: Integer;
+  W: TGuiSDLWindow;
+  Target: TGuiWidget;
+begin
+  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Windows)) then Exit;
+  Idx := GGuiSDL.Windows.IndexOf(GGuiSDL.FocusedWindowID);
+  if Idx < 0 then Exit;
+  W := GGuiSDL.Windows.Data[Idx];
+  if not Assigned(W) or (W.FocusedWidgetID = 0) then Exit;
+  Target := GuiFindWidget(W.FocusedWidgetID);
+  if not Assigned(Target) then Exit;
+  if not Target.Visible or not Target.Enabled then Exit;
+  Target.HandleText(UTF8);
+end;
+
 { v1.11.16: hit-test topmost widget at (MX, MY) in focused window }
 function GuiHitTest(MX, MY: Integer): TGuiWidget;
 var
@@ -39396,6 +39501,66 @@ begin
   Result := TValue.CreateNum(W.ClickCount);
 end;
 
+{ v1.11.17: gui2.widgetFocusNext([reverse]) -- Tab/Shift+Tab navigation }
+function Native_Gui2_WidgetFocusNext(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var Reverse: Boolean;
+begin
+  Result := TValue.CreateBool(False);
+  Reverse := False;
+  if (Args.Count >= 1) and (TValue(Args[0]).DataType = dtBoolean) then
+    Reverse := TValue(Args[0]).BoolVal;
+  GuiFocusNext(Reverse);
+  Result := TValue.CreateBool(True);
+end;
+
+{ v1.11.17: gui2.widgetFocus(id) -- programmatic focus }
+function Native_Gui2_WidgetFocus(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  Idx: Integer;
+  W: TGuiSDLWindow;
+  Target: TGuiWidget;
+begin
+  Result := TValue.CreateBool(False);
+  if Args.Count <> 1 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Windows)) then Exit;
+  Idx := GGuiSDL.Windows.IndexOf(GGuiSDL.FocusedWindowID);
+  if Idx < 0 then Exit;
+  W := GGuiSDL.Windows.Data[Idx];
+  if not Assigned(W) then Exit;
+  Target := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(Target) or not Target.Focusable then Exit;
+  W.FocusedWidgetID := Target.ID;
+  Result := TValue.CreateBool(True);
+end;
+
+{ v1.11.17: gui2.widgetGetFocused() -> focused widget id (0 if none) }
+function Native_Gui2_WidgetGetFocused(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  Idx: Integer;
+  W: TGuiSDLWindow;
+begin
+  Result := TValue.CreateNum(0);
+  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Windows)) then Exit;
+  Idx := GGuiSDL.Windows.IndexOf(GGuiSDL.FocusedWindowID);
+  if Idx < 0 then Exit;
+  W := GGuiSDL.Windows.Data[Idx];
+  if not Assigned(W) then Exit;
+  Result := TValue.CreateNum(W.FocusedWidgetID);
+end;
+
+{ v1.11.17: gui2.widgetGetKeyCount(id) -> num -- keys handled by widget }
+function Native_Gui2_WidgetGetKeyCount(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget;
+begin
+  Result := TValue.CreateNum(0);
+  if Args.Count <> 1 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  Result := TValue.CreateNum(W.KeyCount);
+end;
+
 function Native_Gui2_Poll(Args: TObjectList; CallEnv: TSymbolTable): TValue;
 var
   HasEvent: Int32;
@@ -39426,6 +39591,8 @@ begin
           TextStr := TextStr + TmpPtr^;
           Inc(TmpPtr);
         end;
+        { v1.11.17: dispatch text to focused widget }
+        GuiDispatchText(TextStr);
         Exit(TValue.CreateStr('textinput:' + TextStr));
       end;
     SDL_QUIT_EVENT:
@@ -39440,6 +39607,15 @@ begin
         if Assigned(GGuiSDL.PressedKeys) then
           if GGuiSDL.PressedKeys.IndexOf(KeyName) < 0 then
             GGuiSDL.PressedKeys.Add(KeyName);
+        { v1.11.17: Tab navigation, then dispatch to focused widget }
+        if KeyName = 'TAB' then
+        begin
+          if (GGuiSDL.ModState and KMOD_SHIFT) <> 0 then
+            GuiFocusNext(True)
+          else
+            GuiFocusNext(False);
+        end;
+        GuiDispatchKey(KeyName, True);
         Exit(TValue.CreateStr('key:' + KeyName));
       end;
     SDL_KEYUP:
@@ -39454,6 +39630,8 @@ begin
           KIdx := GGuiSDL.PressedKeys.IndexOf(KeyName);
           if KIdx >= 0 then GGuiSDL.PressedKeys.Delete(KIdx);
         end;
+        { v1.11.17: dispatch keyup to focused widget }
+        GuiDispatchKey(KeyName, False);
         Exit(TValue.CreateStr('keyup:' + KeyName));
       end;
     SDL_MOUSEMOTION:
@@ -41539,6 +41717,11 @@ begin
   Gui2Inst.Members.DefineVar('widgetDestroy', TValue.CreateNative(@Native_Gui2_WidgetDestroy));
   { v1.11.16: event dispatch }
   Gui2Inst.Members.DefineVar('widgetGetClicks', TValue.CreateNative(@Native_Gui2_WidgetGetClicks));
+  { v1.11.17: focus chain + keyboard dispatch }
+  Gui2Inst.Members.DefineVar('widgetFocusNext', TValue.CreateNative(@Native_Gui2_WidgetFocusNext));
+  Gui2Inst.Members.DefineVar('widgetFocus', TValue.CreateNative(@Native_Gui2_WidgetFocus));
+  Gui2Inst.Members.DefineVar('widgetGetFocused', TValue.CreateNative(@Native_Gui2_WidgetGetFocused));
+  Gui2Inst.Members.DefineVar('widgetGetKeyCount', TValue.CreateNative(@Native_Gui2_WidgetGetKeyCount));
   Gui2Inst.Members.DefineVar('isOpen', TValue.CreateNative(@Native_Gui2_IsOpen));
   Gui2Inst.Members.DefineVar('clear', TValue.CreateNative(@Native_Gui2_Clear));
   Gui2Inst.Members.DefineVar('present', TValue.CreateNative(@Native_Gui2_Present));
