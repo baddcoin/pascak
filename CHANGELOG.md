@@ -1,5 +1,51 @@
 # Changelog
 
+## [1.11.18] - 2026-11-03
+
+### Added (feature) -- GUI Widget Toolkit Phase 3 (MVP MILESTONE)
+- **TGuiButton** widget -- first visually actionable widget
+- Click tracking (Pressed state, ClickCount)
+- Hover state (Hovered field, updated via mousemove)
+- Keyboard activation (Enter/Space when focused -> ClickCount)
+- Caption text (display deferred to Phase 3b for TTF helper extraction)
+
+### Natives (3)
+- **gui2.button(x, y, w, h, caption, [r], [g], [b])** -> widget id
+- **gui2.buttonSetCaption(id, str)** -> bool
+- **gui2.buttonGetCaption(id)** -> str
+
+### Implementation
+- TGuiButton extends TGuiWidget with Caption, Hovered, Pressed state
+- Draw: rect fill + border, state-based color (normal/hover/pressed)
+- HandleMouse: press on mousedown, click on mouseup within bounds
+- HandleKey: Enter/Space activation when focused
+- Naming note: Caption (not Label) -- Pascal reserved word
+
+### Verified
+- Build: 48629 lines (+60 vs v1.11.17), EXIT 0
+- Smoke test: 3 buttons created, captions, set/getCaption work,
+  click counts 0 (no hardware input), bounds correct, all natives exist
+- Regression: 17/17 lang tests PASS
+
+### MVP STATUS: COMPLETE
+Phase 1 (foundation) + 2a (infrastructure) + 2b (mouse) + 2c (keyboard)
++ 3 (Button) = working widget toolkit MVP.
+
+User can now:
+- Create clickable buttons with captions
+- Detect clicks via gui2.widgetGetClicks(id)
+- Navigate focus via Tab
+- Activate buttons via Enter/Space
+
+### Deferred
+- Button caption text display (needs TTF helper refactor)
+- onClick callback (needs VM context design -- Phase 3b)
+- Hover detection (mousemove tracking to set Hovered flag)
+- Edit widget (Phase 4)
+- Memo widget (Phase 5)
+
+See docs/gui_widgets/phase_plan.md on feat/gui-widgets.
+
 ## [1.11.17] - 2026-11-03
 
 ### Added (feature) -- GUI Widget Toolkit Phase 2c

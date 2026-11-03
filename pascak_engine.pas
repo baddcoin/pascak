@@ -38154,6 +38154,23 @@ type
     function HandleText(const UTF8: string): Boolean; override;
   end;
 
+  { v1.11.18: Button widget (Phase 3 MVP) -- visual + click tracking.
+    onClick callback deferred to Phase 3b (needs VM context design).
+    Note: Caption (not Label) -- Label is Pascal reserved word. }
+  TGuiButton = class(TGuiWidget)
+  public
+    Caption: string;
+    R, G, B: UInt8;
+    Hovered: Boolean;
+    Pressed: Boolean;
+    constructor Create(AID: Integer; AOwner: Pointer;
+      AX, AY, AW, AH: Integer; const ACaption: string;
+      AR, AG, AB: UInt8);
+    procedure Draw(GuiState: Pointer); override;
+    function HandleMouse(MX, MY, Btn: Integer; Down: Boolean): Boolean; override;
+    function HandleKey(const Key: string; Down: Boolean): Boolean; override;
+  end;
+
   TGuiSDLWindow = class
   public
     Window: Pointer;
@@ -38414,6 +38431,109 @@ begin
   if not Visible or not Enabled then Exit;
   Inc(KeyCount);
   Result := True;
+end;
+
+{ v1.11.18: Button widget implementation }
+constructor TGuiButton.Create(AID: Integer; AOwner: Pointer;
+  AX, AY, AW, AH: Integer; const ACaption: string;
+  AR, AG, AB: UInt8);
+begin
+  inherited Create(AID, AOwner);
+  X := AX; Y := AY; W := AW; H := AH;
+  Caption := ACaption;
+  R := AR; G := AG; B := AB;
+  Hovered := False;
+  Pressed := False;
+end;
+
+procedure TGuiButton.Draw(GuiState: Pointer);
+var
+  St: TGuiSDLState;
+  RectArr: array[0..3] of Int32;
+  CR, CG, CB: UInt8;
+begin
+  if not Visible then Exit;
+  St := TGuiSDLState(GuiState);
+  if not Assigned(St) then Exit;
+  if not Assigned(St.Renderer) then Exit;
+  { v1.11.18: state-based background color }
+  if Pressed then
+  begin
+    CR := R div 2; CG := G div 2; CB := B div 2;
+  end
+  else if Hovered then
+  begin
+    CR := UInt8((Integer(R) + 255) div 2);
+    CG := UInt8((Integer(G) + 255) div 2);
+    CB := UInt8((Integer(B) + 255) div 2);
+  end
+  else
+  begin
+    CR := R; CG := G; CB := B;
+  end;
+  { v1.11.18: fill background }
+  if Assigned(St.pSetRenderDrawColor) and Assigned(St.pRenderFillRect) then
+  begin
+    St.pSetRenderDrawColor(St.Renderer, CR, CG, CB, 255);
+    RectArr[0] := X; RectArr[1] := Y;
+    RectArr[2] := W; RectArr[3] := H;
+    St.pRenderFillRect(St.Renderer, @RectArr[0]);
+  end;
+  { v1.11.18: border (darker) }
+  if Assigned(St.pRenderDrawRect) then
+  begin
+    St.pSetRenderDrawColor(St.Renderer, CR div 2, CG div 2, CB div 2, 255);
+    RectArr[0] := X; RectArr[1] := Y;
+    RectArr[2] := W; RectArr[3] := H;
+    St.pRenderDrawRect(St.Renderer, @RectArr[0]);
+  end;
+  { v1.11.18b: label rendering deferred -- needs TTF helper extraction }
+end;
+
+function TGuiButton.HandleMouse(MX, MY, Btn: Integer; Down: Boolean): Boolean;
+begin
+  Result := False;
+  if not Visible or not Enabled then Exit;
+  if Btn <> 1 then Exit;
+  { v1.11.18: hit-test }
+  if (MX >= X) and (MX < X + W) and (MY >= Y) and (MY < Y + H) then
+  begin
+    if Down then
+    begin
+      Pressed := True;
+      Result := True;
+    end
+    else
+    begin
+      { v1.11.18: release within bounds = click }
+      if Pressed then
+      begin
+        Inc(ClickCount);
+        Pressed := False;
+        Result := True;
+      end;
+    end;
+  end
+  else
+  begin
+    { v1.11.18: release outside = cancel }
+    if not Down then
+      Pressed := False;
+  end;
+end;
+
+function TGuiButton.HandleKey(const Key: string; Down: Boolean): Boolean;
+begin
+  Result := False;
+  if not Visible or not Enabled then Exit;
+  if not Down then Exit;
+  { v1.11.18: Enter/Space activate when focused }
+  if (Key = 'ENTER') or (Key = 'SPACE') then
+  begin
+    Inc(ClickCount);
+    Inc(KeyCount);
+    Result := True;
+  end;
 end;
 
 constructor TGuiSDLState.Create;
@@ -39559,6 +39679,66 @@ begin
   W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
   if not Assigned(W) then Exit;
   Result := TValue.CreateNum(W.KeyCount);
+end;
+
+{ v1.11.18: gui2.button(x, y, w, h, caption, [r], [g], [b]) -> widget id }
+function Native_Gui2_Button(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  W: TGuiSDLWindow;
+  Widget: TGuiButton;
+  X, Y, WW, HH, ID: Integer;
+  R, G, B: Integer;
+  Caption: string;
+begin
+  Result := TValue.CreateNum(0);
+  if (Args.Count < 5) or (Args.Count > 8) then Exit;
+  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Windows)) then Exit;
+  if TValue(Args[4]).DataType <> dtString then Exit;
+  X := Trunc(TValue(Args[0]).NumVal);
+  Y := Trunc(TValue(Args[1]).NumVal);
+  WW := Trunc(TValue(Args[2]).NumVal);
+  HH := Trunc(TValue(Args[3]).NumVal);
+  Caption := TValue(Args[4]).StrVal;
+  R := 80; G := 120; B := 200;
+  if (Args.Count >= 6) and (TValue(Args[5]).DataType = dtNumeric) then R := Trunc(TValue(Args[5]).NumVal);
+  if (Args.Count >= 7) and (TValue(Args[6]).DataType = dtNumeric) then G := Trunc(TValue(Args[6]).NumVal);
+  if (Args.Count >= 8) and (TValue(Args[7]).DataType = dtNumeric) then B := Trunc(TValue(Args[7]).NumVal);
+  W := GuiCurrentWindow;
+  if not Assigned(W) or not Assigned(W.Widgets) then Exit;
+  ID := GGuiSDL.NextWidgetID;
+  Inc(GGuiSDL.NextWidgetID);
+  Widget := TGuiButton.Create(ID, W,
+    X, Y, WW, HH, Caption, UInt8(R), UInt8(G), UInt8(B));
+  W.Widgets.Add(Widget);
+  Result := TValue.CreateNum(ID);
+end;
+
+{ v1.11.18: gui2.buttonSetCaption(id, str) -> bool }
+function Native_Gui2_ButtonSetCaption(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget;
+begin
+  Result := TValue.CreateBool(False);
+  if Args.Count <> 2 then Exit;
+  if (TValue(Args[0]).DataType <> dtNumeric) then Exit;
+  if (TValue(Args[1]).DataType <> dtString) then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  if not (W is TGuiButton) then Exit;
+  TGuiButton(W).Caption := TValue(Args[1]).StrVal;
+  Result := TValue.CreateBool(True);
+end;
+
+{ v1.11.18: gui2.buttonGetCaption(id) -> str or '' }
+function Native_Gui2_ButtonGetCaption(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget;
+begin
+  Result := TValue.CreateStr('');
+  if Args.Count <> 1 then Exit;
+  if (TValue(Args[0]).DataType <> dtNumeric) then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  if not (W is TGuiButton) then Exit;
+  Result := TValue.CreateStr(TGuiButton(W).Caption);
 end;
 
 function Native_Gui2_Poll(Args: TObjectList; CallEnv: TSymbolTable): TValue;
@@ -41722,6 +41902,10 @@ begin
   Gui2Inst.Members.DefineVar('widgetFocus', TValue.CreateNative(@Native_Gui2_WidgetFocus));
   Gui2Inst.Members.DefineVar('widgetGetFocused', TValue.CreateNative(@Native_Gui2_WidgetGetFocused));
   Gui2Inst.Members.DefineVar('widgetGetKeyCount', TValue.CreateNative(@Native_Gui2_WidgetGetKeyCount));
+  { v1.11.18: Button widget }
+  Gui2Inst.Members.DefineVar('button', TValue.CreateNative(@Native_Gui2_Button));
+  Gui2Inst.Members.DefineVar('buttonSetCaption', TValue.CreateNative(@Native_Gui2_ButtonSetCaption));
+  Gui2Inst.Members.DefineVar('buttonGetCaption', TValue.CreateNative(@Native_Gui2_ButtonGetCaption));
   Gui2Inst.Members.DefineVar('isOpen', TValue.CreateNative(@Native_Gui2_IsOpen));
   Gui2Inst.Members.DefineVar('clear', TValue.CreateNative(@Native_Gui2_Clear));
   Gui2Inst.Members.DefineVar('present', TValue.CreateNative(@Native_Gui2_Present));
