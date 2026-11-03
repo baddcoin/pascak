@@ -1,5 +1,48 @@
 # Changelog
 
+## [1.11.19] - 2026-11-03
+
+### Added (feature) -- GUI Widget Toolkit Phase 3b (Polish)
+- **Button caption rendering** -- TGuiButton.Draw renders Caption text
+  centered on button (was deferred in Phase 3)
+- **Hover state tracking** -- Hovered flag updated on mousemove for all
+  widgets (moved from TGuiButton-specific to TGuiWidget base)
+- **GuiDrawTextAt helper** -- extracted from Native_Gui2_Text for reuse
+  by widgets (TTF render + texture + present, self-contained)
+
+### Architecture
+- GuiDrawTextAt(St, X, Y, Text, R, G, B) -- reusable text render helper
+  - Creates texture from surface, renders at (X, Y), frees texture/surface
+  - Forward declared for use by TGuiButton.Draw (defined later in file)
+- GuiUpdateHover(MX, MY) -- iterate widgets in focused window, set
+  Hovered flag based on hit-test
+  - Called from SDL_MOUSEMOTION poll hook
+  - Skips invisible/disabled widgets (Hovered := False)
+- Hovered: Boolean moved to TGuiWidget base class (all widgets can react)
+- Button Draw state colors: normal / hover (lighter) / pressed (darker)
+
+### Refactor
+- Native_Gui2_Text simplified -- delegates to GuiDrawTextAt (removed ~30
+  lines of duplicate texture/surface logic)
+- TGuiButton no longer has Hovered field (inherited from base)
+
+### Verified
+- Build: 48700+ lines (~70 vs v1.11.18), EXIT 0
+- Smoke test (X11 ZINK):
+  - 2 buttons created, widgetsDraw() calls caption render (no crash)
+  - Captions intact: 'Submit', 'Cancel'
+  - Click counts still work
+- Regression: 17/17 lang tests PASS
+- Visual verification deferred to manual test (screenshot/visible window)
+
+### Deferred to Phase 3c
+- onClick callback (needs VM context design -- complex, separate session)
+
+### Next phase
+- Phase 3c: onClick callback (~1-2 sesi)
+- Phase 4: Edit widget (2 sesi)
+See docs/gui_widgets/phase_plan.md on feat/gui-widgets.
+
 ## [1.11.18] - 2026-11-03
 
 ### Added (feature) -- GUI Widget Toolkit Phase 3 (MVP MILESTONE)

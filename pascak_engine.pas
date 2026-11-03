@@ -38132,6 +38132,8 @@ type
     { v1.11.17: focus chain + key tracking }
     Focusable: Boolean;
     KeyCount: Integer;
+    { v1.11.19: hover state (base -- any widget can react) }
+    Hovered: Boolean;
     constructor Create(AID: Integer; AOwner: Pointer);
     procedure Draw(GuiState: Pointer); virtual; abstract;
     { v1.11.16: event handlers -- return True if event consumed }
@@ -38161,7 +38163,6 @@ type
   public
     Caption: string;
     R, G, B: UInt8;
-    Hovered: Boolean;
     Pressed: Boolean;
     constructor Create(AID: Integer; AOwner: Pointer;
       AX, AY, AW, AH: Integer; const ACaption: string;
@@ -38354,6 +38355,7 @@ begin
   ClickCount := 0;
   Focusable := True;
   KeyCount := 0;
+  Hovered := False;
 end;
 
 { v1.11.16: default event handlers -- not consumed }
@@ -38433,6 +38435,10 @@ begin
   Result := True;
 end;
 
+{ v1.11.19: forward declaration -- GuiDrawTextAt defined later }
+procedure GuiDrawTextAt(St: TGuiSDLState; X, Y: Integer;
+  const Text: string; R, G, B: UInt8); forward;
+
 { v1.11.18: Button widget implementation }
 constructor TGuiButton.Create(AID: Integer; AOwner: Pointer;
   AX, AY, AW, AH: Integer; const ACaption: string;
@@ -38442,7 +38448,6 @@ begin
   X := AX; Y := AY; W := AW; H := AH;
   Caption := ACaption;
   R := AR; G := AG; B := AB;
-  Hovered := False;
   Pressed := False;
 end;
 
@@ -38451,6 +38456,7 @@ var
   St: TGuiSDLState;
   RectArr: array[0..3] of Int32;
   CR, CG, CB: UInt8;
+  TW, TH: Int32;
 begin
   if not Visible then Exit;
   St := TGuiSDLState(GuiState);
@@ -38487,7 +38493,18 @@ begin
     RectArr[2] := W; RectArr[3] := H;
     St.pRenderDrawRect(St.Renderer, @RectArr[0]);
   end;
-  { v1.11.18b: label rendering deferred -- needs TTF helper extraction }
+  { v1.11.19: centered caption }
+  if Caption <> '' then
+  begin
+    if Assigned(St.pTTF_SizeText) and Assigned(St.Font) then
+    begin
+      TW := 0; TH := 0;
+      St.pTTF_SizeText(St.Font, PAnsiChar(AnsiString(Caption)), @TW, @TH);
+      if (TW > 0) and (TH > 0) then
+        GuiDrawTextAt(St, X + (W - TW) div 2, Y + (H - TH) div 2,
+          Caption, 255, 255, 255);
+    end;
+  end;
 end;
 
 function TGuiButton.HandleMouse(MX, MY, Btn: Integer; Down: Boolean): Boolean;
@@ -39570,6 +39587,31 @@ begin
   end;
 end;
 
+{ v1.11.19: update Hovered flag on all widgets (called from mousemove) }
+procedure GuiUpdateHover(MX, MY: Integer);
+var
+  Idx, I: Integer;
+  W: TGuiSDLWindow;
+  Widget: TGuiWidget;
+begin
+  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Windows)) then Exit;
+  Idx := GGuiSDL.Windows.IndexOf(GGuiSDL.FocusedWindowID);
+  if Idx < 0 then Exit;
+  W := GGuiSDL.Windows.Data[Idx];
+  if not Assigned(W) or not Assigned(W.Widgets) then Exit;
+  for I := 0 to W.Widgets.Count - 1 do
+  begin
+    Widget := TGuiWidget(W.Widgets[I]);
+    if not Widget.Visible or not Widget.Enabled then
+    begin
+      Widget.Hovered := False;
+      Continue;
+    end;
+    Widget.Hovered := (MX >= Widget.X) and (MX < Widget.X + Widget.W) and
+                      (MY >= Widget.Y) and (MY < Widget.Y + Widget.H);
+  end;
+end;
+
 { v1.11.16: dispatch mouse event to captured widget or hit-test }
 procedure GuiDispatchMouse(MX, MY, Btn: Integer; Down: Boolean);
 var
@@ -39820,6 +39862,8 @@ begin
         MY := PInt32(PByte(GGuiSDL.EventBuf) + 24)^;
         GGuiSDL.LastMouseX := MX;
         GGuiSDL.LastMouseY := MY;
+        { v1.11.19: update Hovered flag for all widgets in focused window }
+        GuiUpdateHover(MX, MY);
         { v1.11.16: dispatch to captured widget (drag) -- Down=true, no click }
         GuiDispatchMouse(MX, MY, 0, True);
         Exit(TValue.CreateStr('mousemove'));
@@ -40131,6 +40175,44 @@ begin
   Result := TValue.CreateBool(True);
 end;
 
+{ v1.11.19: helper -- draw text at position (reusable for widgets) }
+procedure GuiDrawTextAt(St: TGuiSDLState; X, Y: Integer;
+  const Text: string; R, G, B: UInt8);
+var
+  Surf, Tex: Pointer;
+  Color: TSDL_Color;
+  SrcRect, DstRect: TSDL_Rect;
+  TexW, TexH: Int32;
+begin
+  if not Assigned(St) or (Text = '') then Exit;
+  if not Assigned(St.Renderer) or not Assigned(St.Font) then Exit;
+  if not Assigned(St.pTTF_RenderText_Blended) then Exit;
+  Color.r := R; Color.g := G; Color.b := B; Color.a := 255;
+  Surf := St.pTTF_RenderText_Blended(St.Font,
+    PAnsiChar(AnsiString(Text)), Color);
+  if not Assigned(Surf) then Exit;
+  try
+    TexW := 0; TexH := 0;
+    if Assigned(St.pTTF_SizeText) then
+      St.pTTF_SizeText(St.Font, PAnsiChar(AnsiString(Text)), @TexW, @TexH);
+    if (TexW <= 0) or (TexH <= 0) then Exit;
+    if not Assigned(St.pCreateTextureFromSurface) then Exit;
+    Tex := St.pCreateTextureFromSurface(St.Renderer, Surf);
+    if Assigned(Tex) then
+    begin
+      try
+        SrcRect.x := 0; SrcRect.y := 0; SrcRect.w := TexW; SrcRect.h := TexH;
+        DstRect.x := X; DstRect.y := Y; DstRect.w := TexW; DstRect.h := TexH;
+        St.pRenderCopy(St.Renderer, Tex, @SrcRect, @DstRect);
+      finally
+        St.pDestroyTexture(Tex);
+      end;
+    end;
+  finally
+    St.pFreeSurface(Surf);
+  end;
+end;
+
 function Native_Gui2_Text(Args: TObjectList; CallEnv: TSymbolTable): TValue;
 var
   X, Y, R, G, B: Integer;
@@ -40152,30 +40234,9 @@ begin
   G := Trunc(TValue(Args[4]).NumVal);
   B := Trunc(TValue(Args[5]).NumVal);
   if TextStr = '' then Exit(TValue.CreateBool(True));
-  Color.r := UInt8(R); Color.g := UInt8(G); Color.b := UInt8(B); Color.a := 255;
-  Surf := GGuiSDL.pTTF_RenderText_Blended(GGuiSDL.Font,
-    PAnsiChar(AnsiString(TextStr)), Color);
-  if not Assigned(Surf) then Exit;
-  try
-    TexW := 0; TexH := 0;
-    if Assigned(GGuiSDL.pTTF_SizeText) then
-      GGuiSDL.pTTF_SizeText(GGuiSDL.Font, PAnsiChar(AnsiString(TextStr)), @TexW, @TexH);
-    if (TexW <= 0) or (TexH <= 0) then Exit;
-    Tex := GGuiSDL.pCreateTextureFromSurface(GGuiSDL.Renderer, Surf);
-    if Assigned(Tex) then
-    begin
-      try
-        SrcRect.x := 0; SrcRect.y := 0; SrcRect.w := TexW; SrcRect.h := TexH;
-        DstRect.x := X; DstRect.y := Y; DstRect.w := TexW; DstRect.h := TexH;
-        GGuiSDL.pRenderCopy(GGuiSDL.Renderer, Tex, @SrcRect, @DstRect);
-        Result := TValue.CreateBool(True);
-      finally
-        GGuiSDL.pDestroyTexture(Tex);
-      end;
-    end;
-  finally
-    GGuiSDL.pFreeSurface(Surf);
-  end;
+  { v1.11.19: delegate to helper }
+  GuiDrawTextAt(GGuiSDL, X, Y, TextStr, UInt8(R), UInt8(G), UInt8(B));
+  Result := TValue.CreateBool(True);
 end;
 
 function Native_Gui2_MeasureText(Args: TObjectList; CallEnv: TSymbolTable): TValue;
