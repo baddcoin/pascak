@@ -1,5 +1,53 @@
 # Changelog
 
+## [1.11.20] - 2026-11-04
+
+### Added (feature) -- GUI Widget Toolkit Phase 3c (onClick Callback)
+- **Button onClick callback** -- user Pascal function fires on click or
+  Enter/Space activation. Optional per button.
+- **gui2.buttonOnClick(id, fn)** -> bool -- attach callback
+- **gui2.buttonClearOnClick(id)** -> bool -- detach callback
+
+### Architecture (mini-VM invoke pattern)
+- GuiInvokeCallback(Cb, CallEnv) -- extracted from InvokeSignalCallbacks
+  pattern:
+  - Create mini-VM with Cb.ClosureEnv or CallEnv.GetGlobal
+  - Build 3-instruction chunk: opcConstant(Cb), opcCall(0), opcReturn
+  - Run mini-VM, free result
+  - Exceptions swallowed (GUI loop must not crash on callback error)
+- GGuiPollCallEnv: TSymbolTable -- global set by poll(), read by
+  HandleMouse/HandleKey for callback invocation
+- TGuiButton.OnClick: TValue -- stored via Clone, freed in destructor
+- Callback fires from: HandleMouse (on click), HandleKey (Enter/Space)
+
+### Safety
+- Callback errors caught + swallowed (no GUI crash)
+- Mini-VM created fresh per invocation (no state leak)
+- TValue.Clone on store (survives source frame lifetime)
+- Cleared + freed in destructor + buttonClearOnClick
+
+### Deferred
+- onClick with arguments (currently 0-arg callback)
+- onClick return value handling
+
+### Verified
+- Build: 48851 lines (+151 vs v1.11.19), EXIT 0
+- API smoke test (X11 ZINK):
+  - 2 buttons created
+  - buttonOnClick returns true for both (callback stored)
+  - buttonClearOnClick returns true (callback cleared)
+  - All natives exist
+  - No crash
+- Regression: 17/17 lang tests PASS
+- Full click test (actual mouse trigger) deferred to manual X11 verification
+
+### Next phase
+- Manual visual verification (caption rendering + actual click callback)
+- Phase 4: Edit widget (2 sesi)
+- Phase 5: Memo widget
+
+See docs/gui_widgets/phase_plan.md on feat/gui-widgets.
+
 ## [1.11.19] - 2026-11-03
 
 ### Added (feature) -- GUI Widget Toolkit Phase 3b (Polish)

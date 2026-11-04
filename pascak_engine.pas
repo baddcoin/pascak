@@ -38164,9 +38164,12 @@ type
     Caption: string;
     R, G, B: UInt8;
     Pressed: Boolean;
+    { v1.11.20: optional onClick callback (invoked via mini-VM) }
+    OnClick: TValue;
     constructor Create(AID: Integer; AOwner: Pointer;
       AX, AY, AW, AH: Integer; const ACaption: string;
       AR, AG, AB: UInt8);
+    destructor Destroy; override;
     procedure Draw(GuiState: Pointer); override;
     function HandleMouse(MX, MY, Btn: Integer; Down: Boolean): Boolean; override;
     function HandleKey(const Key: string; Down: Boolean): Boolean; override;
@@ -38288,6 +38291,8 @@ type
 
 var
   GGuiSDL: TGuiSDLState = nil;
+  { v1.11.20: call env set by poll() for widget onClick callback invocation }
+  GGuiPollCallEnv: TSymbolTable = nil;
 
 const
   SDL_INIT_VIDEO            = $20;
@@ -38439,6 +38444,9 @@ end;
 procedure GuiDrawTextAt(St: TGuiSDLState; X, Y: Integer;
   const Text: string; R, G, B: UInt8); forward;
 
+{ v1.11.20: forward declaration -- GuiInvokeCallback defined later }
+procedure GuiInvokeCallback(Cb: TValue; CallEnv: TSymbolTable); forward;
+
 { v1.11.18: Button widget implementation }
 constructor TGuiButton.Create(AID: Integer; AOwner: Pointer;
   AX, AY, AW, AH: Integer; const ACaption: string;
@@ -38449,6 +38457,17 @@ begin
   Caption := ACaption;
   R := AR; G := AG; B := AB;
   Pressed := False;
+  OnClick := nil;
+end;
+
+destructor TGuiButton.Destroy;
+begin
+  if Assigned(OnClick) then
+  begin
+    OnClick.Free;
+    OnClick := nil;
+  end;
+  inherited;
 end;
 
 procedure TGuiButton.Draw(GuiState: Pointer);
@@ -38528,6 +38547,9 @@ begin
         Inc(ClickCount);
         Pressed := False;
         Result := True;
+        { v1.11.20: invoke onClick callback if set }
+        if Assigned(OnClick) then
+          GuiInvokeCallback(OnClick, GGuiPollCallEnv);
       end;
     end;
   end
@@ -38550,6 +38572,9 @@ begin
     Inc(ClickCount);
     Inc(KeyCount);
     Result := True;
+    { v1.11.20: invoke onClick callback if set }
+    if Assigned(OnClick) then
+      GuiInvokeCallback(OnClick, GGuiPollCallEnv);
   end;
 end;
 
@@ -39783,6 +39808,73 @@ begin
   Result := TValue.CreateStr(TGuiButton(W).Caption);
 end;
 
+{ v1.11.20: invoke user callback via mini-VM (0 args, exceptions swallowed) }
+procedure GuiInvokeCallback(Cb: TValue; CallEnv: TSymbolTable);
+var
+  MiniVM: TVM;
+  TmpChunk: TChunk;
+  Res: TValue;
+begin
+  if (not Assigned(Cb)) or (Cb.DataType <> dtFunction) then Exit;
+  MiniVM := nil;
+  TmpChunk := nil;
+  try
+    try
+      if Assigned(Cb.ClosureEnv) then
+        MiniVM := TVM.Create(Cb.ClosureEnv)
+      else if Assigned(CallEnv) then
+        MiniVM := TVM.Create(CallEnv.GetGlobal)
+      else
+        MiniVM := TVM.Create(nil);
+      TmpChunk := TChunk.Create;
+      TmpChunk.AddInstruction(opcConstant, TmpChunk.AddConstant(Cb.Clone));
+      TmpChunk.AddInstruction(opcCall, 0);
+      TmpChunk.AddInstruction(opcReturn);
+      Res := MiniVM.Run(TmpChunk);
+      if Assigned(Res) then Res.Free;
+    except
+      { v1.11.20: swallow callback errors -- must not crash GUI loop }
+    end;
+  finally
+    if Assigned(TmpChunk) then TmpChunk.Free;
+    if Assigned(MiniVM) then MiniVM.Free;
+  end;
+end;
+
+{ v1.11.20: gui2.buttonOnClick(id, fn) -> bool }
+function Native_Gui2_ButtonOnClick(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget;
+begin
+  Result := TValue.CreateBool(False);
+  if Args.Count <> 2 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  if TValue(Args[1]).DataType <> dtFunction then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  if not (W is TGuiButton) then Exit;
+  if Assigned(TGuiButton(W).OnClick) then TGuiButton(W).OnClick.Free;
+  TGuiButton(W).OnClick := TValue(Args[1]).Clone;
+  Result := TValue.CreateBool(True);
+end;
+
+{ v1.11.20: gui2.buttonClearOnClick(id) -> bool }
+function Native_Gui2_ButtonClearOnClick(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget;
+begin
+  Result := TValue.CreateBool(False);
+  if Args.Count <> 1 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  if not (W is TGuiButton) then Exit;
+  if Assigned(TGuiButton(W).OnClick) then
+  begin
+    TGuiButton(W).OnClick.Free;
+    TGuiButton(W).OnClick := nil;
+  end;
+  Result := TValue.CreateBool(True);
+end;
+
 function Native_Gui2_Poll(Args: TObjectList; CallEnv: TSymbolTable): TValue;
 var
   HasEvent: Int32;
@@ -39796,6 +39888,8 @@ var
   TextStr, KeyName: string;
   KIdx: Integer;
 begin
+  { v1.11.20: cache CallEnv for widget callback invocation }
+  GGuiPollCallEnv := CallEnv;
   Result := TValue.CreateStr('none');
   if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.EventBuf)) then Exit;
   if GGuiSDL.IsClosed then Exit(TValue.CreateStr('quit'));
@@ -41967,6 +42061,9 @@ begin
   Gui2Inst.Members.DefineVar('button', TValue.CreateNative(@Native_Gui2_Button));
   Gui2Inst.Members.DefineVar('buttonSetCaption', TValue.CreateNative(@Native_Gui2_ButtonSetCaption));
   Gui2Inst.Members.DefineVar('buttonGetCaption', TValue.CreateNative(@Native_Gui2_ButtonGetCaption));
+  { v1.11.20: onClick callback }
+  Gui2Inst.Members.DefineVar('buttonOnClick', TValue.CreateNative(@Native_Gui2_ButtonOnClick));
+  Gui2Inst.Members.DefineVar('buttonClearOnClick', TValue.CreateNative(@Native_Gui2_ButtonClearOnClick));
   Gui2Inst.Members.DefineVar('isOpen', TValue.CreateNative(@Native_Gui2_IsOpen));
   Gui2Inst.Members.DefineVar('clear', TValue.CreateNative(@Native_Gui2_Clear));
   Gui2Inst.Members.DefineVar('present', TValue.CreateNative(@Native_Gui2_Present));
