@@ -1,5 +1,37 @@
 # Changelog
 
+## [1.11.22] - 2026-11-04
+
+### Docs (tutorial)
+- **Bab 34 -- GUI Widgets** added (351 lines):
+  - 34.1 Konsep: Primitives vs Widgets
+  - 34.2 Button Widget (click counter example, onClick callback)
+  - 34.3 Edit Widget (UTF-8 text input, focus, get/set)
+  - 34.4 Event Loop Pattern (poll -> dispatch -> draw -> present)
+  - 34.5 Focus Navigation (Tab/Shift+Tab cycling)
+  - 34.6 Limitations v1 + Todo GUI full example
+
+Covers all shipped widget APIs (v1.11.14 -> v1.11.21):
+- gui2.button / buttonSetCaption / buttonGetCaption / buttonOnClick
+  / buttonClearOnClick
+- gui2.edit / editGetText / editSetText
+- gui2.widgetsDraw / widgetCount / widgetFocus / widgetGetFocused
+  / widgetFocusNext / widgetDestroy / widgetSetPos / widgetSetSize
+  / widgetSetVisible / widgetSetEnabled / widgetGetBounds
+  / widgetGetClicks / widgetGetKeyCount
+- gui2.textInputEnabled / keyDown
+
+Full example: Todo GUI (button + edit + list rendering via primitives).
+
+Tutorial now 5,692 lines (was 5,338) with Bab 1-34 complete.
+
+### Next phases
+- Phase 4b: Edit selection + clipboard + navigation
+- Phase 5: Memo (multi-line)
+- Phase 6+: ComboBox, ListBox, Checkbox, Radio, Scrollbar, Layout
+
+See docs/gui_widgets/phase_plan.md on feat/gui-widgets.
+
 ## [1.11.21] - 2026-11-04
 
 ### Added (feature) -- GUI Widget Toolkit Phase 4a (Edit Basic)

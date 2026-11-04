@@ -5325,6 +5325,360 @@ Untuk detail lengkap: lihat pascak_api.md, bagian http.get2.
 
 ---
 
+## Bab 34 — GUI Widgets
+
+Bab 28 bahas native GUI primitives (rect, line, text, event polling).
+Bab 34 ini bahas **widget high-level** yang dibangun di atas primitives:
+Button, Edit, dll. Widget punya state, event handling, callback.
+
+**Available (v1.11.21):**
+- **Button** -- clickable, dengan caption + onClick callback
+- **Edit** -- single-line text input, UTF-8 aware
+- **Placeholder** -- colored rect (testing/dev)
+
+**Coming (Phase 4b+)**: selection, clipboard, Memo (multi-line),
+ComboBox, ListBox, Checkbox, Radio.
+
+### 34.1 — Konsep: Primitives vs Widgets
+
+**Primitives** (Bab 28): Anda handle sendiri.
+- `gui2.rect(x, y, w, h, r, g, b)` -- gambar rectangle
+- `gui2.poll()` -- cek event
+- Manual: hit-test, state, redraw
+
+**Widgets** (Bab 34): library handle.
+- `gui2.button(x, y, w, h, "OK")` -- buat button sekali
+- Library: state (idle/hover/pressed), hit-test, redraw, callback
+- `gui2.widgetsDraw()` -- render semua widget
+
+**Kapan pakai widget:**
+- Form-based UI (login, settings, todo list)
+- Ada banyak interactive elements
+- Butuh focus navigation (Tab)
+- Butuh onClick callback pattern
+
+**Kapan pakai primitives:**
+- Custom drawing (game, chart, canvas)
+- Full control atas setiap pixel
+- Performance-critical rendering
+
+### 34.2 — Button Widget
+
+Paling basic interactive widget. Button punya caption, hover color,
+pressed state, dan onClick callback.
+
+Signature:
+
+    gui2.button(x, y, w, h, caption, [r], [g], [b]) -> widget id
+
+Contoh minimal — click counter:
+
+    var clicks = 0;
+    function onClick() begin
+      clicks = clicks + 1;
+      println("Clicked " + str(clicks) + " times");
+    end;
+
+    begin
+      gui2.init();
+      gui2.window("Counter", 400, 200);
+      var btn = gui2.button(50, 50, 200, 50, "Click Me", 80, 120, 200);
+      gui2.buttonOnClick(btn, onClick);
+      while true do begin
+        var ev = gui2.poll();
+        if ev == "quit" then break;
+        gui2.clear(30, 30, 30, 255);
+        gui2.widgetsDraw();
+        gui2.present();
+        gui2.delay(16);
+      end;
+      gui2.quit();
+    end.
+
+Button states (auto-managed):
+
+- Normal -- default color
+- Hover -- lighter shade (mouse over)
+- Pressed -- darker shade (mousedown)
+- Focused -- Tab navigation target (Phase 2c)
+
+API Button:
+
+    gui2.button(x, y, w, h, caption, [r], [g], [b]) -> id
+    gui2.buttonSetCaption(id, str) -> bool
+    gui2.buttonGetCaption(id) -> str
+    gui2.buttonOnClick(id, fn) -> bool
+    gui2.buttonClearOnClick(id) -> bool
+
+onClick invocation:
+
+- Fire saat click (mousedown + mouseup within bounds)
+- Fire saat Enter/Space (jika focused via Tab)
+- Callback 0-arg (Phase 3c)
+- Errors swallowed (callback crash tidak kill GUI loop)
+
+### 34.3 — Edit Widget
+
+Single-line text input. UTF-8 aware — unicode (é, 中, ñ) berfungsi
+seperti ASCII. Cursor posisi, backspace, arrow navigation.
+
+Signature:
+
+    gui2.edit(x, y, w, [initial], [r], [g], [b]) -> widget id
+
+Contoh minimal — text input:
+
+    begin
+      gui2.init();
+      gui2.window("Input", 400, 200);
+      var inp = gui2.edit(50, 50, 300, "");
+      var btn = gui2.button(50, 100, 100, 40, "Submit");
+
+      while true do begin
+        var ev = gui2.poll();
+        if ev == "quit" then break;
+        if ev == "click" or ev == "key:ENTER" then
+          println("Input: '" + gui2.editGetText(inp) + "'");
+        gui2.clear(30, 30, 30, 255);
+        gui2.widgetsDraw();
+        gui2.present();
+        gui2.delay(16);
+      end;
+      gui2.quit();
+    end.
+
+Catatan: event "click" bukan string dari poll(). Untuk click detection,
+gunakan `gui2.buttonOnClick(btn, callback)` seperti Bab 34.2.
+
+Contoh lengkap (dengan callback):
+
+    var inp = 0;
+
+    function onSubmit() begin
+      println("Input: '" + gui2.editGetText(inp) + "'");
+    end;
+
+    begin
+      gui2.init();
+      gui2.window("Input", 400, 200);
+      inp = gui2.edit(50, 50, 300, "");
+      var btn = gui2.button(50, 100, 100, 40, "Submit");
+      gui2.buttonOnClick(btn, onSubmit);
+      // ... event loop seperti 34.2
+    end.
+
+UTF-8 aware:
+
+Edit widget handle UTF-8 codepoint, bukan byte:
+
+- Type "é" (2 byte UTF-8) -> cursor maju 2 byte (1 codepoint)
+- BACKSPACE hapus "é" seluruhnya (2 byte) -> cursor mundur ke start
+- LEFT/RIGHT arrow -> move per codepoint, bukan per byte
+- Verified: "héllo 中文" round-trip works
+
+API Edit:
+
+    gui2.edit(x, y, w, [initial], [r], [g], [b]) -> id
+    gui2.editGetText(id) -> str
+    gui2.editSetText(id, str) -> bool
+
+Focus + input flow:
+
+- Edit harus focus untuk terima typing (Tab untuk pindah focus)
+- `gui2.widgetFocus(edit_id)` -> programmatic focus
+- `gui2.widgetGetFocused()` -> current focused widget id
+- textinput event dari poll() auto-dispatch ke focused widget
+
+Deferred (Phase 4b+):
+
+- Selection (SHIFT+arrow, click-drag)
+- Clipboard (Ctrl+C/V/X)
+- Mouse click untuk position cursor
+- Horizontal scroll (text panjang)
+- Cursor blink, focus indicator visual
+- DELETE, HOME, END
+
+### 34.4 — Event Loop Pattern
+
+Semua widget butuh event loop. Pattern standar:
+
+    while true do begin
+      var ev = gui2.poll();           // 1. ambil event
+      if ev == "quit" then break;
+      // (opsional: handle custom events)
+      gui2.clear(30, 30, 30, 255);    // 2. clear background
+      gui2.widgetsDraw();             // 3. render semua widget
+      gui2.present();                 // 4. flip back buffer
+      gui2.delay(16);                 // 5. ~60fps
+    end;
+
+Urutan penting:
+
+1. **poll()** — ambil 1 event (non-blocking). Widget auto-dispatch:
+   - mousedown/mouseup -> hit-test -> widget HandleMouse
+   - key/keyup -> focused widget HandleKey
+   - textinput -> focused widget HandleText
+   - mousemove -> update Hovered + drag capture
+
+2. **clear()** — background color (fresh canvas)
+
+3. **widgetsDraw()** — iterate semua widget, panggil Draw()
+
+4. **present()** — flip buffer (actual visual update)
+
+5. **delay(16)** — yield CPU, target 60fps (1000/60 = ~16ms)
+
+Frame rate tip:
+
+- delay(16) -> 60fps smooth
+- delay(33) -> 30fps (hemat CPU)
+- delay(0) -> max speed (bisa 100% CPU)
+- No delay -> CPU pegged, thermal throttling
+
+Poll all events per frame (batching):
+
+    var events_handled = 0;
+    while true do begin
+      var ev = gui2.poll();
+      if ev == "none" then break;
+      if ev == "quit" then ... break outer;
+      events_handled = events_handled + 1;
+      if events_handled > 100 then break;   // safety
+    end;
+    // render
+
+Handling "none": poll() returns "none" kalau tidak ada event. Loop
+selama "none" tidak muncul, artinya proses semua event yang pending.
+
+### 34.5 — Focus Navigation
+
+Focus = widget yang terima keyboard input. Hanya 1 widget focused
+pada satu waktu per window.
+
+Tab navigation (built-in):
+
+- **Tab** -- focus ke widget focusable berikutnya
+- **Shift+Tab** -- focus ke widget focusable sebelumnya
+- Wraparound: last -> first, first -> last
+- Skip widget yang `not Visible` atau `not Enabled`
+
+Semua widget punya `Focusable: Boolean = True` default. Edit selalu
+focusable. Button focusable (Enter/Space activate). Placeholder
+focusable (untuk testing).
+
+API:
+
+    gui2.widgetFocus(id) -> bool         // set focus programmatic
+    gui2.widgetGetFocused() -> id        // current focused id (0 = none)
+    gui2.widgetFocusNext([reverse]) -> bool
+      // reverse=false: Tab, true: Shift+Tab
+
+Focus indicator:
+
+- Edit: cursor bar visible (always Phase 4a, focus-only Phase 4b)
+- Button: Phase 4b akan tambah dashed border / highlight
+
+Contoh: form dengan Tab navigation:
+
+    begin
+      gui2.init();
+      gui2.window("Form", 400, 300);
+
+      var nameEdit = gui2.edit(50, 50, 300, "");
+      var emailEdit = gui2.edit(50, 100, 300, "");
+      var submitBtn = gui2.button(50, 150, 100, 40, "Submit");
+
+      // Tab order: nameEdit -> emailEdit -> submitBtn -> wrap
+      // Default focusable semua, jadi otomatis work
+
+      // ... event loop
+    end.
+
+User Tab: nameEdit -> emailEdit -> submitBtn -> nameEdit (cycle).
+Typing otomatis masuk ke Edit yang focused.
+
+### 34.6 — Limitations v1 (v1.11.21)
+
+Widget types shipped:
+
+- Button (Phase 3, 3b, 3c) -- complete
+- Edit (Phase 4a) -- basic, UTF-8 aware
+- Placeholder -- testing/dev only
+
+Deferred to Phase 4b+ (Edit polish):
+
+- Selection (SHIFT+arrow, mouse drag)
+- Clipboard (Ctrl+C/V/X)
+- Mouse click to position cursor
+- Horizontal scroll for long text
+- Cursor blink animation
+- Focus indicator visual (cursor always visible for now)
+
+Deferred to Phase 5+:
+
+- Memo (multi-line editor with scroll)
+- ComboBox (dropdown selection)
+- ListBox (scrollable list)
+- Checkbox / Radio
+- Scrollbar (reusable component)
+- Layout API (flow, grid)
+- Theming
+
+Known limitations:
+
+- Widgets are per-window (each window has own widget list)
+- No z-order control (draw order = widget list order)
+- No clipping (widgets can overflow window bounds)
+- No tab order customization (sequential creation order)
+- Callback fire synchronously (mini-VM, blocks GUI loop)
+- No drag-drop between widgets
+
+Full example -- Todo GUI (button + edit + list):
+
+    var taskEdit = 0;
+    var addBtn = 0;
+    var tasks = [];
+
+    function onAdd() begin
+      var text = gui2.editGetText(taskEdit);
+      if text != "" then begin
+        tasks = tasks + [text];
+        println("Added: " + text + " | Total: " + str(len(tasks)));
+        gui2.editSetText(taskEdit, "");
+      end;
+    end;
+
+    begin
+      gui2.init();
+      gui2.window("Todo", 500, 400);
+      taskEdit = gui2.edit(50, 50, 300, "");
+      addBtn = gui2.button(360, 50, 100, 30, "Add");
+      gui2.buttonOnClick(addBtn, onAdd);
+
+      while true do begin
+        var ev = gui2.poll();
+        if ev == "quit" then break;
+        gui2.clear(20, 20, 30, 255);
+
+        // Render task list manual (primitives)
+        var y = 100;
+        for t in tasks do begin
+          gui2.text("- " + t, 50, y, 200, 200, 200, 255);
+          y = y + 25;
+        end;
+
+        gui2.widgetsDraw();
+        gui2.present();
+        gui2.delay(16);
+      end;
+      gui2.quit();
+    end.
+
+Untuk detail lengkap: lihat pascak_api.md, bagian gui2.button,
+gui2.edit, widget APIs.
+
+---
+
 ## Latihan Lanjutan
 
 Setelah tutorial ini, coba bangun:
