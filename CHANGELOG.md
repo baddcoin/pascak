@@ -1,5 +1,59 @@
 # Changelog
 
+## [1.11.21] - 2026-11-04
+
+### Added (feature) -- GUI Widget Toolkit Phase 4a (Edit Basic)
+- **TGuiEdit** widget -- single-line text input
+- UTF-8 aware text buffer (EditText: string)
+- Cursor position (CursorPos: byte index)
+- Typing via HandleText (SDL_TEXTINPUT dispatched to focused Edit)
+- BACKSPACE deletes previous UTF-8 codepoint
+- LEFT/RIGHT arrow moves cursor by UTF-8 codepoint
+- Visual: background rect + border + text render + cursor line
+
+### Natives (3)
+- **gui2.edit(x, y, w, [initial], [r], [g], [b])** -> widget id
+- **gui2.editGetText(id)** -> str
+- **gui2.editSetText(id, str)** -> bool (cursor at end)
+
+### UTF-8 Helpers
+- Utf8PrevChar(S, Pos) -- byte position of previous codepoint
+- Utf8NextChar(S, Pos) -- byte position of next codepoint
+- Multibyte safe: backspace/arrow respect UTF-8 boundaries
+- Verified with "héllo 中文" (mixed ASCII + accented + CJK)
+
+### Cursor rendering
+- Phase 4a: always visible (2px white vertical bar)
+- Uses pRenderFillRect (avoid missing pRenderDrawLine binding)
+- Position: after rendered prefix text width (TTF_SizeText measure)
+- Focus-based visibility deferred to Phase 4b
+
+### Deferred to Phase 4b+
+- DELETE key (delete at cursor)
+- HOME/END (cursor to start/end)
+- Mouse click to position cursor
+- Text selection (SHIFT+arrow)
+- Clipboard (Ctrl+C/V/X)
+- Horizontal scroll (long text)
+- Cursor blink animation
+- Focus-based cursor visibility
+
+### Verified
+- Build: 48995 lines (+144 vs v1.11.20), EXIT 0
+- Smoke test (X11 ZINK):
+  - 2 Edit widgets created
+  - Text storage: initial + editSetText work
+  - Unicode preserved: "héllo 中文" round-trip
+  - widgetsDraw() renders background + text + cursor (no crash)
+  - All natives exist
+- Regression: 17/17 lang tests PASS
+
+### Next phase
+- Phase 4b: navigation (DELETE, HOME/END, mouse position, selection)
+- Phase 5: Memo (multi-line)
+
+See docs/gui_widgets/phase_plan.md on feat/gui-widgets.
+
 ## [1.11.20] - 2026-11-04
 
 ### Added (feature) -- GUI Widget Toolkit Phase 3c (onClick Callback)

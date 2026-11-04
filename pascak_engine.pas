@@ -38175,6 +38175,22 @@ type
     function HandleKey(const Key: string; Down: Boolean): Boolean; override;
   end;
 
+  { v1.11.21: Edit widget (Phase 4a) -- single-line text input.
+    Phase 4a: basic typing + backspace + cursor movement.
+    Phase 4b+: selection, clipboard, HOME/END, scroll. }
+  TGuiEdit = class(TGuiWidget)
+  public
+    EditText: string;        // UTF-8 buffer
+    CursorPos: Integer;      // byte index (0..Length)
+    BgR, BgG, BgB: UInt8;    // background color
+    constructor Create(AID: Integer; AOwner: Pointer;
+      AX, AY, AW: Integer; const AInitial: string;
+      ABgR, ABgG, ABgB: UInt8);
+    procedure Draw(GuiState: Pointer); override;
+    function HandleKey(const Key: string; Down: Boolean): Boolean; override;
+    function HandleText(const UTF8: string): Boolean; override;
+  end;
+
   TGuiSDLWindow = class
   public
     Window: Pointer;
@@ -38440,6 +38456,26 @@ begin
   Result := True;
 end;
 
+{ v1.11.21: UTF-8 aware cursor helpers -- byte position of prev/next codepoint }
+function Utf8PrevChar(S: string; Pos: Integer): Integer;
+begin
+  if Pos <= 0 then Exit(0);
+  Dec(Pos);
+  { skip UTF-8 continuation bytes (10xxxxxx) -- go back until start byte }
+  while (Pos > 0) and ((Ord(S[Pos + 1]) and $C0) = $80) do
+    Dec(Pos);
+  Result := Pos;
+end;
+
+function Utf8NextChar(S: string; Pos: Integer): Integer;
+begin
+  if Pos >= Length(S) then Exit(Length(S));
+  Inc(Pos);
+  while (Pos < Length(S)) and ((Ord(S[Pos + 1]) and $C0) = $80) do
+    Inc(Pos);
+  Result := Pos;
+end;
+
 { v1.11.19: forward declaration -- GuiDrawTextAt defined later }
 procedure GuiDrawTextAt(St: TGuiSDLState; X, Y: Integer;
   const Text: string; R, G, B: UInt8); forward;
@@ -38575,6 +38611,114 @@ begin
     { v1.11.20: invoke onClick callback if set }
     if Assigned(OnClick) then
       GuiInvokeCallback(OnClick, GGuiPollCallEnv);
+  end;
+end;
+
+{ v1.11.21: Edit widget implementation (Phase 4a) }
+constructor TGuiEdit.Create(AID: Integer; AOwner: Pointer;
+  AX, AY, AW: Integer; const AInitial: string;
+  ABgR, ABgG, ABgB: UInt8);
+begin
+  inherited Create(AID, AOwner);
+  X := AX; Y := AY; W := AW; H := 30;
+  EditText := AInitial;
+  CursorPos := Length(AInitial);
+  BgR := ABgR; BgG := ABgG; BgB := ABgB;
+  Focusable := True;
+end;
+
+procedure TGuiEdit.Draw(GuiState: Pointer);
+var
+  St: TGuiSDLState;
+  RectArr: array[0..3] of Int32;
+  PrefixW, PrefixH: Int32;
+begin
+  if not Visible then Exit;
+  St := TGuiSDLState(GuiState);
+  if not Assigned(St) then Exit;
+  if not Assigned(St.Renderer) then Exit;
+  { v1.11.21: background }
+  if Assigned(St.pSetRenderDrawColor) and Assigned(St.pRenderFillRect) then
+  begin
+    St.pSetRenderDrawColor(St.Renderer, BgR, BgG, BgB, 255);
+    RectArr[0] := X; RectArr[1] := Y;
+    RectArr[2] := W; RectArr[3] := H;
+    St.pRenderFillRect(St.Renderer, @RectArr[0]);
+  end;
+  { v1.11.21: border }
+  if Assigned(St.pRenderDrawRect) then
+  begin
+    St.pSetRenderDrawColor(St.Renderer, 100, 100, 100, 255);
+    RectArr[0] := X; RectArr[1] := Y;
+    RectArr[2] := W; RectArr[3] := H;
+    St.pRenderDrawRect(St.Renderer, @RectArr[0]);
+  end;
+  { v1.11.21: text }
+  if EditText <> '' then
+    GuiDrawTextAt(St, X + 4, Y + 6, EditText, 255, 255, 255);
+  { v1.11.21: cursor line (Phase 4a: always visible, focus indicator Phase 4b) }
+  if Assigned(St.pRenderFillRect) and Assigned(St.pTTF_SizeText)
+     and Assigned(St.Font) then
+  begin
+    PrefixW := 0; PrefixH := 0;
+    if CursorPos > 0 then
+      St.pTTF_SizeText(St.Font,
+        PAnsiChar(AnsiString(Copy(EditText, 1, CursorPos))),
+        @PrefixW, @PrefixH);
+    St.pSetRenderDrawColor(St.Renderer, 255, 255, 255, 255);
+    RectArr[0] := X + 4 + PrefixW; RectArr[1] := Y + 4;
+    RectArr[2] := 2; RectArr[3] := H - 8;
+    St.pRenderFillRect(St.Renderer, @RectArr[0]);
+  end;
+end;
+
+function TGuiEdit.HandleText(const UTF8: string): Boolean;
+begin
+  Result := False;
+  if not Visible or not Enabled then Exit;
+  if UTF8 = '' then Exit;
+  { v1.11.21: insert at cursor, advance by UTF-8 length }
+  EditText := Copy(EditText, 1, CursorPos) + UTF8 +
+              Copy(EditText, CursorPos + 1, Length(EditText) - CursorPos);
+  Inc(CursorPos, Length(UTF8));
+  Inc(KeyCount);
+  Result := True;
+end;
+
+function TGuiEdit.HandleKey(const Key: string; Down: Boolean): Boolean;
+var
+  PrevPos: Integer;
+begin
+  Result := False;
+  if not Visible or not Enabled then Exit;
+  if not Down then Exit;
+  { v1.11.21: BACKSPACE -- delete previous UTF-8 char }
+  if Key = 'BACKSPACE' then
+  begin
+    if CursorPos > 0 then
+    begin
+      PrevPos := Utf8PrevChar(EditText, CursorPos);
+      EditText := Copy(EditText, 1, PrevPos) +
+                  Copy(EditText, CursorPos + 1, Length(EditText) - CursorPos);
+      CursorPos := PrevPos;
+      Inc(KeyCount);
+      Result := True;
+    end;
+    Exit;
+  end;
+  { v1.11.21: LEFT -- move cursor back one UTF-8 char }
+  if Key = 'LEFT' then
+  begin
+    CursorPos := Utf8PrevChar(EditText, CursorPos);
+    Result := True;
+    Exit;
+  end;
+  { v1.11.21: RIGHT -- move cursor forward one UTF-8 char }
+  if Key = 'RIGHT' then
+  begin
+    CursorPos := Utf8NextChar(EditText, CursorPos);
+    Result := True;
+    Exit;
   end;
 end;
 
@@ -39872,6 +40016,66 @@ begin
     TGuiButton(W).OnClick.Free;
     TGuiButton(W).OnClick := nil;
   end;
+  Result := TValue.CreateBool(True);
+end;
+
+{ v1.11.21: gui2.edit(x, y, w, [initial], [r], [g], [b]) -> widget id }
+function Native_Gui2_Edit(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  W: TGuiSDLWindow;
+  Widget: TGuiEdit;
+  X, Y, WW, ID: Integer;
+  R, G, B: Integer;
+  Initial: string;
+begin
+  Result := TValue.CreateNum(0);
+  if (Args.Count < 3) or (Args.Count > 7) then Exit;
+  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Windows)) then Exit;
+  X := Trunc(TValue(Args[0]).NumVal);
+  Y := Trunc(TValue(Args[1]).NumVal);
+  WW := Trunc(TValue(Args[2]).NumVal);
+  Initial := '';
+  if (Args.Count >= 4) and (TValue(Args[3]).DataType = dtString) then
+    Initial := TValue(Args[3]).StrVal;
+  R := 40; G := 40; B := 40;
+  if (Args.Count >= 5) and (TValue(Args[4]).DataType = dtNumeric) then R := Trunc(TValue(Args[4]).NumVal);
+  if (Args.Count >= 6) and (TValue(Args[5]).DataType = dtNumeric) then G := Trunc(TValue(Args[5]).NumVal);
+  if (Args.Count >= 7) and (TValue(Args[6]).DataType = dtNumeric) then B := Trunc(TValue(Args[6]).NumVal);
+  W := GuiCurrentWindow;
+  if not Assigned(W) or not Assigned(W.Widgets) then Exit;
+  ID := GGuiSDL.NextWidgetID;
+  Inc(GGuiSDL.NextWidgetID);
+  Widget := TGuiEdit.Create(ID, W, X, Y, WW, Initial, UInt8(R), UInt8(G), UInt8(B));
+  W.Widgets.Add(Widget);
+  Result := TValue.CreateNum(ID);
+end;
+
+{ v1.11.21: gui2.editGetText(id) -> str }
+function Native_Gui2_EditGetText(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget;
+begin
+  Result := TValue.CreateStr('');
+  if Args.Count <> 1 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  if not (W is TGuiEdit) then Exit;
+  Result := TValue.CreateStr(TGuiEdit(W).EditText);
+end;
+
+{ v1.11.21: gui2.editSetText(id, str) -> bool -- cursor at end }
+function Native_Gui2_EditSetText(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget;
+begin
+  Result := TValue.CreateBool(False);
+  if Args.Count <> 2 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  if TValue(Args[1]).DataType <> dtString then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  if not (W is TGuiEdit) then Exit;
+  TGuiEdit(W).EditText := TValue(Args[1]).StrVal;
+  TGuiEdit(W).CursorPos := Length(TGuiEdit(W).EditText);
   Result := TValue.CreateBool(True);
 end;
 
@@ -42064,6 +42268,10 @@ begin
   { v1.11.20: onClick callback }
   Gui2Inst.Members.DefineVar('buttonOnClick', TValue.CreateNative(@Native_Gui2_ButtonOnClick));
   Gui2Inst.Members.DefineVar('buttonClearOnClick', TValue.CreateNative(@Native_Gui2_ButtonClearOnClick));
+  { v1.11.21: Edit widget }
+  Gui2Inst.Members.DefineVar('edit', TValue.CreateNative(@Native_Gui2_Edit));
+  Gui2Inst.Members.DefineVar('editGetText', TValue.CreateNative(@Native_Gui2_EditGetText));
+  Gui2Inst.Members.DefineVar('editSetText', TValue.CreateNative(@Native_Gui2_EditSetText));
   Gui2Inst.Members.DefineVar('isOpen', TValue.CreateNative(@Native_Gui2_IsOpen));
   Gui2Inst.Members.DefineVar('clear', TValue.CreateNative(@Native_Gui2_Clear));
   Gui2Inst.Members.DefineVar('present', TValue.CreateNative(@Native_Gui2_Present));
