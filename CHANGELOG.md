@@ -1,5 +1,53 @@
 # Changelog
 
+## [1.11.25] - 2026-11-06
+
+### Added (feature) -- GUI Widget Toolkit Phase 4c (Selection)
+- **Text selection** -- SHIFT+LEFT/RIGHT extends selection
+- **Selection visual** -- blue highlight behind selected text
+- **Delete range** -- BACKSPACE/DELETE deletes whole selection if exists
+- **Replace selection** -- typing replaces selected range
+- **Selection API** -- gui2.editGetSelection(id) -> {start, finish} or
+  {start: -1, finish: -1} when no selection
+- **SelAnchor field** -- TGuiEdit.SelAnchor: Integer (-1 = no selection)
+
+### Keyboard behavior
+- Plain LEFT/RIGHT: clear selection, move cursor
+- SHIFT+LEFT/RIGHT: extend selection from anchor
+- HOME/END: clear selection, jump to start/end
+- SHIFT+HOME/END: extend selection to start/end
+- BACKSPACE: delete selection if exists, else delete previous char
+- DELETE: delete selection if exists, else delete next char
+- Text input: replace selection if exists, else insert at cursor
+
+### Implementation
+- TGuiEdit.SelAnchor field (init -1)
+- GuiEditSelStart / GuiEditSelEnd / GuiEditHasSelection / GuiEditDeleteSelection
+- TGuiEdit.HandleKey: ShiftHeld := (ModState and KMOD_SHIFT) <> 0
+- TGuiEdit.HandleText: GuiEditDeleteSelection before insert
+- TGuiEdit.Draw: blue highlight (50, 100, 180) before text render
+
+### Naming note
+- Field named "finish" not "end" in dict return -- "end" is Pascal reserved
+  keyword, cannot be used in sel.end expression.
+
+### Deferred to Phase 4c-2
+- Clipboard (Ctrl+C/V/X) -- needs SDL_GetClipboardText /
+  SDL_SetClipboardText bindings + Ctrl modifier handling
+- Mouse drag selection
+- Multi-line selection (Phase 5 Memo)
+
+### Verified
+- Build: ~49,300 lines (+~70 vs v1.11.24), EXIT 0
+- Smoke test (X11 ZINK):
+  - Edit created with initial text
+  - editGetSelection returns {-1, -1} initially (no selection)
+  - widgetsDraw() no crash (highlight code path inactive when no selection)
+  - API exists
+- Regression: 17/17 lang tests PASS
+- Interactive selection test (SHIFT+arrow, delete range, replace) deferred to
+  next X11 keyboard session
+
 ## [1.11.24] - 2026-11-05
 
 ### Added (feature) -- GUI Widget Toolkit Phase 4b (Edit Polish)

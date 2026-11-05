@@ -38184,6 +38184,7 @@ type
   public
     EditText: string;        // UTF-8 buffer
     CursorPos: Integer;      // byte index (0..Length)
+    SelAnchor: Integer;      // v1.11.25: selection anchor (-1 = none)
     BgR, BgG, BgB: UInt8;    // background color
     constructor Create(AID: Integer; AOwner: Pointer;
       AX, AY, AW: Integer; const AInitial: string;
@@ -38658,6 +38659,39 @@ begin
   end;
 end;
 
+{ v1.11.25: selection helpers }
+function GuiEditSelStart(E: TGuiEdit): Integer;
+begin
+  if E.SelAnchor < 0 then Exit(-1);
+  if E.SelAnchor <= E.CursorPos then Result := E.SelAnchor
+  else Result := E.CursorPos;
+end;
+
+function GuiEditSelEnd(E: TGuiEdit): Integer;
+begin
+  if E.SelAnchor < 0 then Exit(-1);
+  if E.SelAnchor <= E.CursorPos then Result := E.CursorPos
+  else Result := E.SelAnchor;
+end;
+
+function GuiEditHasSelection(E: TGuiEdit): Boolean;
+begin
+  Result := (E.SelAnchor >= 0) and (E.SelAnchor <> E.CursorPos);
+end;
+
+procedure GuiEditDeleteSelection(E: TGuiEdit);
+var
+  S, En: Integer;
+begin
+  if not GuiEditHasSelection(E) then Exit;
+  S := GuiEditSelStart(E);
+  En := GuiEditSelEnd(E);
+  E.EditText := Copy(E.EditText, 1, S) +
+                Copy(E.EditText, En + 1, Length(E.EditText) - En);
+  E.CursorPos := S;
+  E.SelAnchor := -1;
+end;
+
 { v1.11.21: Edit widget implementation (Phase 4a) }
 constructor TGuiEdit.Create(AID: Integer; AOwner: Pointer;
   AX, AY, AW: Integer; const AInitial: string;
@@ -38667,6 +38701,7 @@ begin
   X := AX; Y := AY; W := AW; H := 30;
   EditText := AInitial;
   CursorPos := Length(AInitial);
+  SelAnchor := -1;
   BgR := ABgR; BgG := ABgG; BgB := ABgB;
   Focusable := True;
 end;
@@ -38676,6 +38711,8 @@ var
   St: TGuiSDLState;
   RectArr: array[0..3] of Int32;
   PrefixW, PrefixH: Int32;
+  SelS, SelE, WStart, WEnd: Integer;
+  WW, HH: Int32;
 begin
   if not Visible then Exit;
   St := TGuiSDLState(GuiState);
@@ -38696,6 +38733,26 @@ begin
     RectArr[0] := X; RectArr[1] := Y;
     RectArr[2] := W; RectArr[3] := H;
     St.pRenderDrawRect(St.Renderer, @RectArr[0]);
+  end;
+  { v1.11.25: selection highlight (before text, so text draws on top) }
+  if GuiEditHasSelection(Self) and Assigned(St.pTTF_SizeText)
+     and Assigned(St.Font) and Assigned(St.pRenderFillRect) then
+  begin
+    SelS := GuiEditSelStart(Self);
+    SelE := GuiEditSelEnd(Self);
+    WStart := 0; WEnd := 0;
+    WW := 0; HH := 0;
+    if SelS > 0 then
+      St.pTTF_SizeText(St.Font,
+        PAnsiChar(AnsiString(Copy(EditText, 1, SelS))), @WStart, @HH);
+    if SelE > 0 then
+      St.pTTF_SizeText(St.Font,
+        PAnsiChar(AnsiString(Copy(EditText, 1, SelE))), @WEnd, @HH);
+    St.pSetRenderDrawColor(St.Renderer, 50, 100, 180, 255);
+    RectArr[0] := X + 4 + WStart; RectArr[1] := Y + 4;
+    RectArr[2] := WEnd - WStart; RectArr[3] := H - 8;
+    if RectArr[2] > 0 then
+      St.pRenderFillRect(St.Renderer, @RectArr[0]);
   end;
   { v1.11.21: text }
   if EditText <> '' then
@@ -38721,6 +38778,9 @@ begin
   Result := False;
   if not Visible or not Enabled then Exit;
   if UTF8 = '' then Exit;
+  { v1.11.25: if selection exists, delete it first }
+  if GuiEditHasSelection(Self) then
+    GuiEditDeleteSelection(Self);
   { v1.11.21: insert at cursor, advance by UTF-8 length }
   EditText := Copy(EditText, 1, CursorPos) + UTF8 +
               Copy(EditText, CursorPos + 1, Length(EditText) - CursorPos);
@@ -38733,14 +38793,25 @@ function TGuiEdit.HandleKey(const Key: string; Down: Boolean): Boolean;
 var
   PrevPos: Integer;
   NextPos: Integer;
+  ShiftHeld: Boolean;
 begin
   Result := False;
   if not Visible or not Enabled then Exit;
   if not Down then Exit;
-  { v1.11.21: BACKSPACE -- delete previous UTF-8 char }
+  { v1.11.25: shift modifier check }
+  ShiftHeld := False;
+  if Assigned(GGuiSDL) then
+    ShiftHeld := (GGuiSDL.ModState and KMOD_SHIFT) <> 0;
+  { v1.11.21: BACKSPACE -- delete previous UTF-8 char or selection }
   if Key = 'BACKSPACE' then
   begin
-    if CursorPos > 0 then
+    if GuiEditHasSelection(Self) then
+    begin
+      GuiEditDeleteSelection(Self);
+      Inc(KeyCount);
+      Result := True;
+    end
+    else if CursorPos > 0 then
     begin
       PrevPos := Utf8PrevChar(EditText, CursorPos);
       EditText := Copy(EditText, 1, PrevPos) +
@@ -38751,24 +38822,38 @@ begin
     end;
     Exit;
   end;
-  { v1.11.21: LEFT -- move cursor back one UTF-8 char }
+  { v1.11.21: LEFT -- move cursor back or extend selection }
   if Key = 'LEFT' then
   begin
+    if ShiftHeld and (SelAnchor < 0) then
+      SelAnchor := CursorPos;
+    if not ShiftHeld then
+      SelAnchor := -1;
     CursorPos := Utf8PrevChar(EditText, CursorPos);
     Result := True;
     Exit;
   end;
-  { v1.11.21: RIGHT -- move cursor forward one UTF-8 char }
+  { v1.11.21: RIGHT -- move cursor forward or extend selection }
   if Key = 'RIGHT' then
   begin
+    if ShiftHeld and (SelAnchor < 0) then
+      SelAnchor := CursorPos;
+    if not ShiftHeld then
+      SelAnchor := -1;
     CursorPos := Utf8NextChar(EditText, CursorPos);
     Result := True;
     Exit;
   end;
-  { v1.11.24: DELETE -- delete codepoint AFTER cursor }
+  { v1.11.24: DELETE -- delete codepoint AFTER cursor or selection }
   if Key = 'DELETE' then
   begin
-    if CursorPos < Length(EditText) then
+    if GuiEditHasSelection(Self) then
+    begin
+      GuiEditDeleteSelection(Self);
+      Inc(KeyCount);
+      Result := True;
+    end
+    else if CursorPos < Length(EditText) then
     begin
       NextPos := Utf8NextChar(EditText, CursorPos);
       EditText := Copy(EditText, 1, CursorPos) +
@@ -38778,16 +38863,24 @@ begin
     end;
     Exit;
   end;
-  { v1.11.24: HOME -- cursor to start }
+  { v1.11.24: HOME -- cursor to start or extend to start }
   if Key = 'HOME' then
   begin
+    if ShiftHeld and (SelAnchor < 0) then
+      SelAnchor := CursorPos;
+    if not ShiftHeld then
+      SelAnchor := -1;
     CursorPos := 0;
     Result := True;
     Exit;
   end;
-  { v1.11.24: END -- cursor to end }
+  { v1.11.24: END -- cursor to end or extend to end }
   if Key = 'END' then
   begin
+    if ShiftHeld and (SelAnchor < 0) then
+      SelAnchor := CursorPos;
+    if not ShiftHeld then
+      SelAnchor := -1;
     CursorPos := Length(EditText);
     Result := True;
     Exit;
@@ -40182,6 +40275,35 @@ begin
   TGuiEdit(W).EditText := TValue(Args[1]).StrVal;
   TGuiEdit(W).CursorPos := Length(TGuiEdit(W).EditText);
   Result := TValue.CreateBool(True);
+end;
+
+{ v1.11.25: gui2.editGetSelection(id) -> {start, end} or {start: -1} }
+function Native_Gui2_EditGetSelection(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget; D: TDictValue;
+begin
+  Result := TValue.CreateNull;
+  if Args.Count <> 1 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  if not (W is TGuiEdit) then Exit;
+  D := TDictValue.Create;
+  try
+    if GuiEditHasSelection(TGuiEdit(W)) then
+    begin
+      D.SetValue('start', TValue.CreateNum(GuiEditSelStart(TGuiEdit(W))));
+      D.SetValue('finish', TValue.CreateNum(GuiEditSelEnd(TGuiEdit(W))));
+    end
+    else
+    begin
+      D.SetValue('start', TValue.CreateNum(-1));
+      D.SetValue('finish', TValue.CreateNum(-1));
+    end;
+    Result := TValue.CreateDict(D);
+  except
+    D.Free;
+    raise;
+  end;
 end;
 
 function Native_Gui2_Poll(Args: TObjectList; CallEnv: TSymbolTable): TValue;
@@ -42377,6 +42499,8 @@ begin
   Gui2Inst.Members.DefineVar('edit', TValue.CreateNative(@Native_Gui2_Edit));
   Gui2Inst.Members.DefineVar('editGetText', TValue.CreateNative(@Native_Gui2_EditGetText));
   Gui2Inst.Members.DefineVar('editSetText', TValue.CreateNative(@Native_Gui2_EditSetText));
+  { v1.11.25: selection }
+  Gui2Inst.Members.DefineVar('editGetSelection', TValue.CreateNative(@Native_Gui2_EditGetSelection));
   Gui2Inst.Members.DefineVar('isOpen', TValue.CreateNative(@Native_Gui2_IsOpen));
   Gui2Inst.Members.DefineVar('clear', TValue.CreateNative(@Native_Gui2_Clear));
   Gui2Inst.Members.DefineVar('present', TValue.CreateNative(@Native_Gui2_Present));
