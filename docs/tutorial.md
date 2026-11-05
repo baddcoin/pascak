@@ -5362,6 +5362,23 @@ ComboBox, ListBox, Checkbox, Radio.
 - Full control atas setiap pixel
 - Performance-critical rendering
 
+**Wajib: setup font sebelum render apapun**
+
+Semua text rendering -- button caption, edit text, `gui2.text()` primitive
+-- butuh font TTF loaded. Tanpa `gui2.setFont()`, semua text akan
+**invisible** (silently fail, no error). Font juga wajib untuk measureText
+dan cursor positioning.
+
+    gui2.init();
+    gui2.setFont("/data/data/com.termux/files/usr/share/fonts/TTF/DejaVuSans.ttf", 16);
+    gui2.window("App", 800, 600);
+    // ... widget creation
+
+Path font Termux: `/data/data/com.termux/files/usr/share/fonts/TTF/DejaVuSans.ttf`
+Install: `pkg install ttf-dejavu`
+
+**Urutan wajib:** `init` -> `setFont` -> `window` -> widget creation.
+
 ### 34.2 — Button Widget
 
 Paling basic interactive widget. Button punya caption, hover color,
@@ -5381,6 +5398,7 @@ Contoh minimal — click counter:
 
     begin
       gui2.init();
+      gui2.setFont("/data/data/com.termux/files/usr/share/fonts/TTF/DejaVuSans.ttf", 16);
       gui2.window("Counter", 400, 200);
       var btn = gui2.button(50, 50, 200, 50, "Click Me", 80, 120, 200);
       gui2.buttonOnClick(btn, onClick);
@@ -5430,6 +5448,7 @@ Contoh minimal — text input:
 
     begin
       gui2.init();
+      gui2.setFont("/data/data/com.termux/files/usr/share/fonts/TTF/DejaVuSans.ttf", 16);
       gui2.window("Input", 400, 200);
       var inp = gui2.edit(50, 50, 300, "");
       var btn = gui2.button(50, 100, 100, 40, "Submit");
@@ -5460,6 +5479,7 @@ Contoh lengkap (dengan callback):
 
     begin
       gui2.init();
+      gui2.setFont("/data/data/com.termux/files/usr/share/fonts/TTF/DejaVuSans.ttf", 16);
       gui2.window("Input", 400, 200);
       inp = gui2.edit(50, 50, 300, "");
       var btn = gui2.button(50, 100, 100, 40, "Submit");
@@ -5582,6 +5602,7 @@ Contoh: form dengan Tab navigation:
 
     begin
       gui2.init();
+      gui2.setFont("/data/data/com.termux/files/usr/share/fonts/TTF/DejaVuSans.ttf", 16);
       gui2.window("Form", 400, 300);
 
       var nameEdit = gui2.edit(50, 50, 300, "");
@@ -5650,6 +5671,7 @@ Full example -- Todo GUI (button + edit + list):
 
     begin
       gui2.init();
+      gui2.setFont("/data/data/com.termux/files/usr/share/fonts/TTF/DejaVuSans.ttf", 16);
       gui2.window("Todo", 500, 400);
       taskEdit = gui2.edit(50, 50, 300, "");
       addBtn = gui2.button(360, 50, 100, 30, "Add");
@@ -5663,7 +5685,7 @@ Full example -- Todo GUI (button + edit + list):
         // Render task list manual (primitives)
         var y = 100;
         for t in tasks do begin
-          gui2.text("- " + t, 50, y, 200, 200, 200, 255);
+          gui2.text(50, y, "- " + t, 200, 200, 200);
           y = y + 25;
         end;
 

@@ -1,5 +1,38 @@
 # Changelog
 
+## [1.11.23] - 2026-11-05
+
+### Fixed (docs)
+- **Bab 34 font requirement missing** -- manual visual test revealed that
+  all text rendering (button caption, edit text, `gui2.text()`) is
+  invisible without `gui2.setFont()`. Docs did not mention this.
+- Fixed `gui2.text()` arg order in 34.6 Todo example (was
+  `text("- " + t, 50, y, ...)` -- string as first arg instead of x,y).
+- Added warning section after 34.1 -- "Wajib: setup font sebelum render
+  apapun" with required order: `init` -> `setFont` -> `window`.
+- Added `gui2.setFont(...)` to all code examples in Bab 34:
+  - 34.2 Button click counter
+  - 34.3 Edit minimal example (var inp = ...)
+  - 34.3 Edit callback example (inp = ...)
+  - 34.5 Focus form
+  - 34.6 Todo full example
+
+### Verified
+- Manual visual test with X11 (Termux:X11) confirmed:
+  - Window renders (500x400 dark background)
+  - Edit field visible with cursor bar (after setFont)
+  - Button visible with caption centered
+  - Typing into edit works (text visible + cursor advance)
+  - Click Add button -> callback fires -> edit clears -> task appears
+  - "hello hello dog" full round-trip: typed -> captured -> added -> cleared
+- Grep verify: 6 setFont instances in Bab 34 (1 warning + 5 examples)
+
+### Backlog
+- Production fix idea (Phase 4b): `gui2.init` should warn/error if
+  setFont not called before widget creation, OR auto-load default font.
+- Edit click-to-focus bug confirmed (requires widgetFocus workaround) --
+  Phase 4b will add TGuiEdit.HandleMouse override for click positioning.
+
 ## [1.11.22] - 2026-11-04
 
 ### Docs (tutorial)
