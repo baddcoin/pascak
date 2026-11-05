@@ -1,5 +1,46 @@
 # Changelog
 
+## [1.11.24] - 2026-11-05
+
+### Added (feature) -- GUI Widget Toolkit Phase 4b (Edit Polish)
+- **Click-to-focus + cursor positioning** -- click anywhere in Edit widget,
+  cursor jumps to nearest codepoint (UTF-8 aware)
+- **Per-widget Focused field** -- TGuiWidget.Focused: Boolean, synced from
+  Window.FocusedWidgetID via GuiSyncFocused helper
+- **Focus indicator** -- Button shows brighter yellow border when focused
+  (visual feedback for Tab navigation)
+- **Cursor gated by focus** -- Edit cursor bar only visible when focused
+  (was always visible Phase 4a workaround)
+- **DELETE key** -- delete codepoint AFTER cursor
+- **HOME key** -- cursor to start of text
+- **END key** -- cursor to end of text
+
+### Implementation
+- GuiSyncFocused(W) -- iterate widgets, set Focused := (ID = W.FocusedWidgetID)
+  - Called from GuiFocusNext, Native_Gui2_WidgetFocus, GuiDispatchMouse
+- GuiEditCursorFromX(St, Edit, MX) -- measure prefix widths, pick closest
+  codepoint boundary from click X
+- TGuiEdit.HandleMouse override -- mousedown sets cursor from MX, auto-focus
+  via existing GuiDispatchMouse path
+- GuiKeyName: HOME (1073741898), END (1073741901) added
+- TGuiEdit.HandleKey: DELETE, HOME, END handlers (UTF-8 aware)
+
+### Verified
+- Build: 49126 lines, EXIT 0
+- Smoke test (X11 ZINK):
+  - 2 edits + 1 button created
+  - Focus chain: 0 -> 1 -> 2 -> 3 -> 1 (wrap)
+  - widgetsDraw() no crash (focus gate, focus indicator)
+- Regression: 17/17 lang tests PASS
+- Interactive visual test (click cursor position, DELETE, HOME/END) deferred
+  to next session with X11
+
+### Known limitations (Phase 4c)
+- No text selection (SHIFT+arrow)
+- No clipboard (Ctrl+C/V/X)
+- No horizontal scroll (long text)
+- No cursor blink animation
+
 ## [1.11.23] - 2026-11-05
 
 ### Fixed (docs)

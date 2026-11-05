@@ -38134,6 +38134,8 @@ type
     KeyCount: Integer;
     { v1.11.19: hover state (base -- any widget can react) }
     Hovered: Boolean;
+    { v1.11.24: focus state (synced from W.FocusedWidgetID) }
+    Focused: Boolean;
     constructor Create(AID: Integer; AOwner: Pointer);
     procedure Draw(GuiState: Pointer); virtual; abstract;
     { v1.11.16: event handlers -- return True if event consumed }
@@ -38189,6 +38191,8 @@ type
     procedure Draw(GuiState: Pointer); override;
     function HandleKey(const Key: string; Down: Boolean): Boolean; override;
     function HandleText(const UTF8: string): Boolean; override;
+    { v1.11.24: click-to-focus + cursor position }
+    function HandleMouse(MX, MY, Btn: Integer; Down: Boolean): Boolean; override;
   end;
 
   TGuiSDLWindow = class
@@ -38377,6 +38381,7 @@ begin
   Focusable := True;
   KeyCount := 0;
   Hovered := False;
+  Focused := False;
 end;
 
 { v1.11.16: default event handlers -- not consumed }
@@ -38548,6 +38553,14 @@ begin
     RectArr[2] := W; RectArr[3] := H;
     St.pRenderDrawRect(St.Renderer, @RectArr[0]);
   end;
+  { v1.11.24: focus indicator (brighter border when focused) }
+  if Focused and Assigned(St.pRenderDrawRect) then
+  begin
+    St.pSetRenderDrawColor(St.Renderer, 255, 200, 50, 255);
+    RectArr[0] := X - 1; RectArr[1] := Y - 1;
+    RectArr[2] := W + 2; RectArr[3] := H + 2;
+    St.pRenderDrawRect(St.Renderer, @RectArr[0]);
+  end;
   { v1.11.19: centered caption }
   if Caption <> '' then
   begin
@@ -38614,6 +38627,37 @@ begin
   end;
 end;
 
+{ v1.11.24: cursor byte position from click X coordinate (scan prefix widths) }
+function GuiEditCursorFromX(St: TGuiSDLState; Edit: TGuiEdit;
+  MX: Integer): Integer;
+var
+  TargetX, PrefixW, PrefixH, BestDist, Dist, Pos: Integer;
+begin
+  Result := 0;
+  if not Assigned(St) or not Assigned(Edit) then Exit;
+  if not Assigned(St.pTTF_SizeText) or not Assigned(St.Font) then Exit;
+  TargetX := MX - Edit.X - 4;
+  if TargetX <= 0 then Exit(0);
+  BestDist := TargetX;
+  Pos := 0;
+  while Pos < Length(Edit.EditText) do
+  begin
+    Pos := Utf8NextChar(Edit.EditText, Pos);
+    PrefixW := 0; PrefixH := 0;
+    St.pTTF_SizeText(St.Font,
+      PAnsiChar(AnsiString(Copy(Edit.EditText, 1, Pos))),
+      @PrefixW, @PrefixH);
+    Dist := Abs(PrefixW - TargetX);
+    if Dist < BestDist then
+    begin
+      BestDist := Dist;
+      Result := Pos;
+    end
+    else
+      Break;
+  end;
+end;
+
 { v1.11.21: Edit widget implementation (Phase 4a) }
 constructor TGuiEdit.Create(AID: Integer; AOwner: Pointer;
   AX, AY, AW: Integer; const AInitial: string;
@@ -38656,8 +38700,8 @@ begin
   { v1.11.21: text }
   if EditText <> '' then
     GuiDrawTextAt(St, X + 4, Y + 6, EditText, 255, 255, 255);
-  { v1.11.21: cursor line (Phase 4a: always visible, focus indicator Phase 4b) }
-  if Assigned(St.pRenderFillRect) and Assigned(St.pTTF_SizeText)
+  { v1.11.24: cursor visible only when focused }
+  if Focused and Assigned(St.pRenderFillRect) and Assigned(St.pTTF_SizeText)
      and Assigned(St.Font) then
   begin
     PrefixW := 0; PrefixH := 0;
@@ -38688,6 +38732,7 @@ end;
 function TGuiEdit.HandleKey(const Key: string; Down: Boolean): Boolean;
 var
   PrevPos: Integer;
+  NextPos: Integer;
 begin
   Result := False;
   if not Visible or not Enabled then Exit;
@@ -38720,6 +38765,50 @@ begin
     Result := True;
     Exit;
   end;
+  { v1.11.24: DELETE -- delete codepoint AFTER cursor }
+  if Key = 'DELETE' then
+  begin
+    if CursorPos < Length(EditText) then
+    begin
+      NextPos := Utf8NextChar(EditText, CursorPos);
+      EditText := Copy(EditText, 1, CursorPos) +
+                  Copy(EditText, NextPos + 1, Length(EditText) - NextPos);
+      Inc(KeyCount);
+      Result := True;
+    end;
+    Exit;
+  end;
+  { v1.11.24: HOME -- cursor to start }
+  if Key = 'HOME' then
+  begin
+    CursorPos := 0;
+    Result := True;
+    Exit;
+  end;
+  { v1.11.24: END -- cursor to end }
+  if Key = 'END' then
+  begin
+    CursorPos := Length(EditText);
+    Result := True;
+    Exit;
+  end;
+end;
+
+function TGuiEdit.HandleMouse(MX, MY, Btn: Integer; Down: Boolean): Boolean;
+begin
+  Result := False;
+  if not Visible or not Enabled then Exit;
+  if Btn <> 1 then Exit;
+  if (MX < X) or (MX >= X + W) or (MY < Y) or (MY >= Y + H) then Exit;
+  { v1.11.24: mousedown -> set cursor from click X, auto-focus via dispatch }
+  if Down then
+  begin
+    if Assigned(GGuiSDL) then
+      CursorPos := GuiEditCursorFromX(GGuiSDL, Self, MX);
+    Result := True;
+  end
+  else
+    Result := True;
 end;
 
 constructor TGuiSDLState.Create;
@@ -39406,6 +39495,8 @@ begin
     1073741905: Result := 'DOWN';
     1073741904: Result := 'LEFT';
     1073741903: Result := 'RIGHT';
+    1073741898: Result := 'HOME';
+    1073741901: Result := 'END';
     1073741882: Result := 'F1';
     1073741883: Result := 'F2';
     1073741884: Result := 'F3';
@@ -39653,6 +39744,17 @@ begin
   Result := TValue.CreateBool(True);
 end;
 
+{ v1.11.24: sync per-widget Focused from W.FocusedWidgetID }
+procedure GuiSyncFocused(W: TGuiSDLWindow);
+var
+  I: Integer;
+begin
+  if not Assigned(W) or not Assigned(W.Widgets) then Exit;
+  for I := 0 to W.Widgets.Count - 1 do
+    TGuiWidget(W.Widgets[I]).Focused :=
+      (TGuiWidget(W.Widgets[I]).ID = W.FocusedWidgetID);
+end;
+
 { v1.11.17: focus next/prev widget (Tab navigation) }
 procedure GuiFocusNext(Reverse: Boolean);
 var
@@ -39688,6 +39790,7 @@ begin
          TGuiWidget(W.Widgets[StartIdx]).Enabled then
       begin
         W.FocusedWidgetID := TGuiWidget(W.Widgets[StartIdx]).ID;
+        GuiSyncFocused(W);
         Exit;
       end;
   end;
@@ -39816,6 +39919,7 @@ begin
       if Down then
         W.MouseCaptureID := Target.ID;
       W.FocusedWidgetID := Target.ID;
+      GuiSyncFocused(W);
     end;
   end;
 end;
@@ -39862,6 +39966,7 @@ begin
   Target := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
   if not Assigned(Target) or not Target.Focusable then Exit;
   W.FocusedWidgetID := Target.ID;
+  GuiSyncFocused(W);
   Result := TValue.CreateBool(True);
 end;
 
