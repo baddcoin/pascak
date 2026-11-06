@@ -38258,6 +38258,10 @@ type
     { v1.11.14: text input }
     pStartTextInput: procedure(); cdecl;
     pStopTextInput: procedure(); cdecl;
+    { v1.11.26: clipboard }
+    pGetClipboardText: function(): PAnsiChar; cdecl;
+    pSetClipboardText: function(text: PAnsiChar): Int32; cdecl;
+    pSDLFree: procedure(mem: Pointer); cdecl;
     pSetWindowTitle: procedure(win: Pointer; title: PAnsiChar); cdecl;
     pGetTicks: function(): UInt32; cdecl;
     pDelay: procedure(ms: UInt32); cdecl;
@@ -38692,6 +38696,46 @@ begin
   E.SelAnchor := -1;
 end;
 
+{ v1.11.26: clipboard helpers }
+function GuiClipboardGet(St: TGuiSDLState): string;
+var
+  P: PAnsiChar;
+  S: string;
+  I: Integer;
+begin
+  Result := '';
+  if not Assigned(St) then Exit;
+  if not Assigned(St.pGetClipboardText) then Exit;
+  P := St.pGetClipboardText();
+  if not Assigned(P) then Exit;
+  try
+    S := '';
+    I := 0;
+    while P[I] <> #0 do
+    begin
+      S := S + P[I];
+      Inc(I);
+      if I > 1048576 then Break;
+    end;
+    Result := S;
+  finally
+    if Assigned(St.pSDLFree) then St.pSDLFree(P);
+  end;
+end;
+
+function GuiClipboardSet(St: TGuiSDLState; const S: string): Boolean;
+begin
+  Result := False;
+  if not Assigned(St) then Exit;
+  if not Assigned(St.pSetClipboardText) then Exit;
+  try
+    St.pSetClipboardText(PAnsiChar(AnsiString(S)));
+    Result := True;
+  except
+    Result := False;
+  end;
+end;
+
 { v1.11.21: Edit widget implementation (Phase 4a) }
 constructor TGuiEdit.Create(AID: Integer; AOwner: Pointer;
   AX, AY, AW: Integer; const AInitial: string;
@@ -38778,6 +38822,9 @@ begin
   Result := False;
   if not Visible or not Enabled then Exit;
   if UTF8 = '' then Exit;
+  { v1.11.26: skip text input when Ctrl held (Ctrl+C/V/X/A handled in HandleKey) }
+  if Assigned(GGuiSDL) then
+    if (GGuiSDL.ModState and KMOD_CTRL) <> 0 then Exit;
   { v1.11.25: if selection exists, delete it first }
   if GuiEditHasSelection(Self) then
     GuiEditDeleteSelection(Self);
@@ -38794,14 +38841,73 @@ var
   PrevPos: Integer;
   NextPos: Integer;
   ShiftHeld: Boolean;
+  CtrlHeld: Boolean;
+  SelS, SelE: Integer;
+  ClipStr: string;
 begin
   Result := False;
   if not Visible or not Enabled then Exit;
   if not Down then Exit;
   { v1.11.25: shift modifier check }
   ShiftHeld := False;
+  CtrlHeld := False;
   if Assigned(GGuiSDL) then
+  begin
     ShiftHeld := (GGuiSDL.ModState and KMOD_SHIFT) <> 0;
+    CtrlHeld := (GGuiSDL.ModState and KMOD_CTRL) <> 0;
+  end;
+  { v1.11.26: Ctrl+A/C/X/V clipboard shortcuts }
+  if CtrlHeld then
+  begin
+    if Key = 'A' then
+    begin
+      SelAnchor := 0;
+      CursorPos := Length(EditText);
+      Result := True;
+      Exit;
+    end;
+    if Key = 'C' then
+    begin
+      if GuiEditHasSelection(Self) then
+      begin
+        SelS := GuiEditSelStart(Self);
+        SelE := GuiEditSelEnd(Self);
+        ClipStr := Copy(EditText, SelS + 1, SelE - SelS);
+        GuiClipboardSet(GGuiSDL, ClipStr);
+      end;
+      Result := True;
+      Exit;
+    end;
+    if Key = 'X' then
+    begin
+      if GuiEditHasSelection(Self) then
+      begin
+        SelS := GuiEditSelStart(Self);
+        SelE := GuiEditSelEnd(Self);
+        ClipStr := Copy(EditText, SelS + 1, SelE - SelS);
+        GuiClipboardSet(GGuiSDL, ClipStr);
+        GuiEditDeleteSelection(Self);
+        Inc(KeyCount);
+      end;
+      Result := True;
+      Exit;
+    end;
+    if Key = 'V' then
+    begin
+      ClipStr := GuiClipboardGet(GGuiSDL);
+      if ClipStr <> '' then
+      begin
+        if GuiEditHasSelection(Self) then
+          GuiEditDeleteSelection(Self);
+        EditText := Copy(EditText, 1, CursorPos) + ClipStr +
+                    Copy(EditText, CursorPos + 1, Length(EditText) - CursorPos);
+        Inc(CursorPos, Length(ClipStr));
+        Inc(KeyCount);
+      end;
+      Result := True;
+      Exit;
+    end;
+  end;
   { v1.11.21: BACKSPACE -- delete previous UTF-8 char or selection }
   if Key = 'BACKSPACE' then
   begin
@@ -39074,6 +39180,10 @@ begin
   { v1.11.14: text input }
   Pointer(State.pStartTextInput)     := GetProcAddress(State.LibHandle, 'SDL_StartTextInput');
   Pointer(State.pStopTextInput)      := GetProcAddress(State.LibHandle, 'SDL_StopTextInput');
+  { v1.11.26: clipboard }
+  Pointer(State.pGetClipboardText)   := GetProcAddress(State.LibHandle, 'SDL_GetClipboardText');
+  Pointer(State.pSetClipboardText)   := GetProcAddress(State.LibHandle, 'SDL_SetClipboardText');
+  Pointer(State.pSDLFree)            := GetProcAddress(State.LibHandle, 'SDL_free');
   Pointer(State.pSetWindowTitle)     := GetProcAddress(State.LibHandle, 'SDL_SetWindowTitle');
   Pointer(State.pGetTicks)           := GetProcAddress(State.LibHandle, 'SDL_GetTicks');
   Pointer(State.pDelay)              := GetProcAddress(State.LibHandle, 'SDL_Delay');

@@ -1,5 +1,49 @@
 # Changelog
 
+## [1.11.26] - 2026-11-06
+
+### Added (feature) -- GUI Widget Toolkit Phase 4c-2 (Clipboard)
+- **Ctrl+C / Ctrl+V / Ctrl+X** -- copy, paste, cut in Edit widget
+- **Ctrl+A** -- select all
+- **SDL clipboard bindings** -- SDL_GetClipboardText, SDL_SetClipboardText,
+  SDL_free (loaded in GuiSDLLoadLib)
+
+### Behavior
+- Ctrl+A: select entire text (SelAnchor=0, CursorPos=Length)
+- Ctrl+C: copy selection to system clipboard (no-op if no selection)
+- Ctrl+X: copy selection + delete it (no-op if no selection)
+- Ctrl+V: paste clipboard at cursor (replaces selection if exists)
+- Ctrl+letter skips HandleText path (prevents "c" being typed when Ctrl+C pressed)
+
+### Implementation
+- TGuiSDLState fields: pGetClipboardText, pSetClipboardText, pSDLFree
+- GuiClipboardGet(St): read + free (SDL_free after) + 1MB safety cap
+- GuiClipboardSet(St, S): write to system clipboard
+- TGuiEdit.HandleKey: CtrlHeld check + Ctrl+A/C/X/V handlers
+- TGuiEdit.HandleText: skip when Ctrl held (avoid double-typing)
+
+### Safety
+- GuiClipboardGet: 1MB cap (prevent runaway), SDL_free in finally
+- Empty clipboard: no-op (no cursor advance)
+- No selection on C/X: no-op (return true, no action)
+- Exception safety: try/except in Set (false on error)
+
+### Deferred to Phase 4c-3 / 5
+- Mouse drag selection
+- Multi-line clipboard (Phase 5 Memo)
+- Undo/redo history
+- Cut visual feedback
+
+### Verified
+- Build: 49398 lines (+98 vs v1.11.25), EXIT 0
+- Smoke test (X11 ZINK):
+  - Edit widget created, text get/set works
+  - Selection API returns {-1, -1} initial
+  - widgetsDraw() no crash
+  - Native clipboard functions compiled (bindings loaded)
+- Regression: 17/17 lang tests PASS
+- Interactive Ctrl+C/V/X test deferred to X11 keyboard session
+
 ## [1.11.25] - 2026-11-06
 
 ### Added (feature) -- GUI Widget Toolkit Phase 4c (Selection)
