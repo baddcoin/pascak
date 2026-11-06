@@ -38207,6 +38207,9 @@ type
     ScrollTop: Integer;     // first visible line index
     BgR, BgG, BgB: UInt8;
     LineHeight: Integer;    // pixels per line (measured from font)
+    { v1.11.28: selection anchor (line, col) -- -1 = no selection }
+    SelAnchorLine: Integer;
+    SelAnchorCol: Integer;
     constructor Create(AID: Integer; AOwner: Pointer;
       AX, AY, AW, AH: Integer; const AInitial: string;
       ABgR, ABgG, ABgB: UInt8);
@@ -39035,6 +39038,81 @@ begin
     Result := True;
 end;
 
+{ v1.11.28: Memo selection helpers }
+function MemoPosLess(L1, C1, L2, C2: Integer): Boolean;
+begin
+  if L1 < L2 then Exit(True);
+  if L1 > L2 then Exit(False);
+  Result := C1 < C2;
+end;
+
+function MemoHasSelection(M: TGuiMemo): Boolean;
+begin
+  Result := (M.SelAnchorLine >= 0) and
+            ((M.SelAnchorLine <> M.CursorLine) or (M.SelAnchorCol <> M.CursorCol));
+end;
+
+procedure MemoSelRange(M: TGuiMemo; out SLine, SCol, ELine, ECol: Integer);
+begin
+  if MemoPosLess(M.SelAnchorLine, M.SelAnchorCol, M.CursorLine, M.CursorCol) then
+  begin
+    SLine := M.SelAnchorLine; SCol := M.SelAnchorCol;
+    ELine := M.CursorLine; ECol := M.CursorCol;
+  end else
+  begin
+    SLine := M.CursorLine; SCol := M.CursorCol;
+    ELine := M.SelAnchorLine; ECol := M.SelAnchorCol;
+  end;
+end;
+
+procedure MemoClearSelection(M: TGuiMemo);
+begin
+  M.SelAnchorLine := -1;
+  M.SelAnchorCol := -1;
+end;
+
+function MemoGetSelectionText(M: TGuiMemo): string;
+var
+  SLine, SCol, ELine, ECol, I: Integer;
+  LineStr: string;
+begin
+  Result := '';
+  if not MemoHasSelection(M) then Exit;
+  MemoSelRange(M, SLine, SCol, ELine, ECol);
+  if SLine = ELine then
+  begin
+    Result := Copy(M.Lines[SLine], SCol + 1, ECol - SCol);
+    Exit;
+  end;
+  Result := Copy(M.Lines[SLine], SCol + 1, Length(M.Lines[SLine]) - SCol);
+  for I := SLine + 1 to ELine - 1 do
+    Result := Result + #10 + M.Lines[I];
+  Result := Result + #10 + Copy(M.Lines[ELine], 1, ECol);
+end;
+
+procedure MemoDeleteSelection(M: TGuiMemo);
+var
+  SLine, SCol, ELine, ECol, I: Integer;
+  NewLine: string;
+begin
+  if not MemoHasSelection(M) then Exit;
+  MemoSelRange(M, SLine, SCol, ELine, ECol);
+  NewLine := Copy(M.Lines[SLine], 1, SCol) + Copy(M.Lines[ELine], ECol + 1, Length(M.Lines[ELine]) - ECol);
+  M.Lines[SLine] := NewLine;
+  if ELine > SLine then
+  begin
+    I := ELine;
+    while I > SLine do
+    begin
+      M.Lines.Delete(I);
+      Dec(I);
+    end;
+  end;
+  M.CursorLine := SLine;
+  M.CursorCol := SCol;
+  MemoClearSelection(M);
+end;
+
 { v1.11.27: Memo widget implementation (Phase 5a) }
 constructor TGuiMemo.Create(AID: Integer; AOwner: Pointer;
   AX, AY, AW, AH: Integer; const AInitial: string;
@@ -39051,6 +39129,8 @@ begin
   BgR := ABgR; BgG := ABgG; BgB := ABgB;
   LineHeight := 20;
   Focusable := True;
+  SelAnchorLine := -1;
+  SelAnchorCol := -1;
 end;
 
 destructor TGuiMemo.Destroy;
@@ -39124,6 +39204,9 @@ begin
   { v1.11.27: Ctrl guard (matches Edit) }
   if Assigned(GGuiSDL) then
     if (GGuiSDL.ModState and KMOD_CTRL) <> 0 then Exit;
+  { v1.11.28: if selection, delete it before insert }
+  if MemoHasSelection(Self) then
+    MemoDeleteSelection(Self);
   if (CursorLine < 0) or (CursorLine >= Lines.Count) then Exit;
   L := Lines[CursorLine];
   S := Copy(L, 1, CursorCol) + UTF8 +
@@ -39136,13 +39219,90 @@ end;
 
 function TGuiMemo.HandleKey(const Key: string; Down: Boolean): Boolean;
 var
-  L, NextL: string;
-  PrevCol, NextCol: Integer;
+  L, NextL, ClipStr, PasteLine: string;
+  PrevCol, NextCol, PasteStart: Integer;
+  ShiftHeld, CtrlHeld: Boolean;
+  I: Integer;
 begin
   Result := False;
   if not Visible or not Enabled then Exit;
   if not Down then Exit;
   if (CursorLine < 0) or (CursorLine >= Lines.Count) then Exit;
+  ShiftHeld := False;
+  CtrlHeld := False;
+  if Assigned(GGuiSDL) then
+  begin
+    ShiftHeld := (GGuiSDL.ModState and KMOD_SHIFT) <> 0;
+    CtrlHeld := (GGuiSDL.ModState and KMOD_CTRL) <> 0;
+  end;
+  { v1.11.28: Ctrl+A/C/X/V shortcuts }
+  if CtrlHeld then
+  begin
+    if Key = 'A' then
+    begin
+      SelAnchorLine := 0;
+      SelAnchorCol := 0;
+      CursorLine := Lines.Count - 1;
+      CursorCol := Length(Lines[CursorLine]);
+      EnsureCursorVisible;
+      Result := True;
+      Exit;
+    end;
+    if Key = 'C' then
+    begin
+      if MemoHasSelection(Self) then
+        GuiClipboardSet(GGuiSDL, MemoGetSelectionText(Self));
+      Result := True;
+      Exit;
+    end;
+    if Key = 'X' then
+    begin
+      if MemoHasSelection(Self) then
+      begin
+        GuiClipboardSet(GGuiSDL, MemoGetSelectionText(Self));
+        MemoDeleteSelection(Self);
+        EnsureCursorVisible;
+        Inc(KeyCount);
+      end;
+      Result := True;
+      Exit;
+    end;
+    if Key = 'V' then
+    begin
+      ClipStr := GuiClipboardGet(GGuiSDL);
+      if ClipStr <> '' then
+      begin
+        if MemoHasSelection(Self) then
+          MemoDeleteSelection(Self);
+        L := Lines[CursorLine];
+        NextL := Copy(L, CursorCol + 1, Length(L) - CursorCol);
+        Lines[CursorLine] := Copy(L, 1, CursorCol);
+        PasteStart := 1;
+        for I := 1 to Length(ClipStr) do
+        begin
+          if ClipStr[I] = #10 then
+          begin
+            PasteLine := Copy(ClipStr, PasteStart, I - PasteStart);
+            Lines.Insert(CursorLine + 1, PasteLine);
+            Inc(CursorLine);
+            CursorCol := Length(PasteLine);
+            PasteStart := I + 1;
+          end;
+        end;
+        PasteLine := Copy(ClipStr, PasteStart, Length(ClipStr) - PasteStart + 1);
+        if PasteLine <> '' then
+        begin
+          Lines[CursorLine] := Lines[CursorLine] + PasteLine;
+          Inc(CursorCol, Length(PasteLine));
+        end;
+        Lines[CursorLine] := Lines[CursorLine] + NextL;
+        EnsureCursorVisible;
+        Inc(KeyCount);
+      end;
+      Result := True;
+      Exit;
+    end;
+  end;
   { v1.11.27: ENTER -- split line at cursor }
   if Key = 'ENTER' then
   begin
@@ -39157,9 +39317,17 @@ begin
     Result := True;
     Exit;
   end;
-  { v1.11.27: BACKSPACE -- delete prev char or merge with previous line }
+  { v1.11.27: BACKSPACE (v1.11.28: deletes selection if exists) }
   if Key = 'BACKSPACE' then
   begin
+    if MemoHasSelection(Self) then
+    begin
+      MemoDeleteSelection(Self);
+      EnsureCursorVisible;
+      Inc(KeyCount);
+      Result := True;
+      Exit;
+    end;
     if CursorCol > 0 then
     begin
       L := Lines[CursorLine];
@@ -39182,9 +39350,17 @@ begin
     end;
     Exit;
   end;
-  { v1.11.27: DELETE -- delete next char or merge with next line }
+  { v1.11.27: DELETE (v1.11.28: deletes selection if exists) }
   if Key = 'DELETE' then
   begin
+    if MemoHasSelection(Self) then
+    begin
+      MemoDeleteSelection(Self);
+      EnsureCursorVisible;
+      Inc(KeyCount);
+      Result := True;
+      Exit;
+    end;
     L := Lines[CursorLine];
     if CursorCol < Length(L) then
     begin
@@ -39202,9 +39378,16 @@ begin
     end;
     Exit;
   end;
-  { v1.11.27: LEFT -- prev char or wrap to prev line end }
+  { v1.11.27: LEFT -- prev char or wrap (v1.11.28: SHIFT extends) }
   if Key = 'LEFT' then
   begin
+    if not ShiftHeld then
+      MemoClearSelection(Self)
+    else if not MemoHasSelection(Self) then
+    begin
+      SelAnchorLine := CursorLine;
+      SelAnchorCol := CursorCol;
+    end;
     if CursorCol > 0 then
       CursorCol := Utf8PrevChar(Lines[CursorLine], CursorCol)
     else if CursorLine > 0 then
@@ -39216,9 +39399,16 @@ begin
     Result := True;
     Exit;
   end;
-  { v1.11.27: RIGHT -- next char or wrap to next line start }
+  { v1.11.27: RIGHT -- next char or wrap (v1.11.28: SHIFT extends) }
   if Key = 'RIGHT' then
   begin
+    if not ShiftHeld then
+      MemoClearSelection(Self)
+    else if not MemoHasSelection(Self) then
+    begin
+      SelAnchorLine := CursorLine;
+      SelAnchorCol := CursorCol;
+    end;
     if CursorCol < Length(Lines[CursorLine]) then
       CursorCol := Utf8NextChar(Lines[CursorLine], CursorCol)
     else if CursorLine < Lines.Count - 1 then
@@ -39230,9 +39420,16 @@ begin
     Result := True;
     Exit;
   end;
-  { v1.11.27: UP -- prev line, clamp col }
+  { v1.11.27: UP -- prev line (v1.11.28: SHIFT extends) }
   if Key = 'UP' then
   begin
+    if not ShiftHeld then
+      MemoClearSelection(Self)
+    else if not MemoHasSelection(Self) then
+    begin
+      SelAnchorLine := CursorLine;
+      SelAnchorCol := CursorCol;
+    end;
     if CursorLine > 0 then
     begin
       Dec(CursorLine);
@@ -39243,9 +39440,16 @@ begin
     Result := True;
     Exit;
   end;
-  { v1.11.27: DOWN -- next line, clamp col }
+  { v1.11.27: DOWN -- next line (v1.11.28: SHIFT extends) }
   if Key = 'DOWN' then
   begin
+    if not ShiftHeld then
+      MemoClearSelection(Self)
+    else if not MemoHasSelection(Self) then
+    begin
+      SelAnchorLine := CursorLine;
+      SelAnchorCol := CursorCol;
+    end;
     if CursorLine < Lines.Count - 1 then
     begin
       Inc(CursorLine);
@@ -39256,16 +39460,30 @@ begin
     Result := True;
     Exit;
   end;
-  { v1.11.27: HOME -- col to 0 }
+  { v1.11.27: HOME (v1.11.28: SHIFT extends) }
   if Key = 'HOME' then
   begin
+    if not ShiftHeld then
+      MemoClearSelection(Self)
+    else if not MemoHasSelection(Self) then
+    begin
+      SelAnchorLine := CursorLine;
+      SelAnchorCol := CursorCol;
+    end;
     CursorCol := 0;
     Result := True;
     Exit;
   end;
-  { v1.11.27: END -- col to line length }
+  { v1.11.27: END (v1.11.28: SHIFT extends) }
   if Key = 'END' then
   begin
+    if not ShiftHeld then
+      MemoClearSelection(Self)
+    else if not MemoHasSelection(Self) then
+    begin
+      SelAnchorLine := CursorLine;
+      SelAnchorCol := CursorCol;
+    end;
     CursorCol := Length(Lines[CursorLine]);
     Result := True;
     Exit;
@@ -39310,6 +39528,9 @@ var
   VC, I, LineIdx, DrawY: Integer;
   LineStr: string;
   PrefixW, PrefixH: Int32;
+  SelS, SelE, SelSC, SelEC, StartCol, EndCol: Integer;
+  PW1, PW2: Int32;
+  PH1, PH2: Int32;
 begin
   if not Visible then Exit;
   St := TGuiSDLState(GuiState);
@@ -39331,8 +39552,42 @@ begin
     RectArr[2] := W; RectArr[3] := H;
     St.pRenderDrawRect(St.Renderer, @RectArr[0]);
   end;
-  { v1.11.27: render visible lines }
+  { v1.11.28: compute VC once, before highlight and text render }
   VC := VisibleLineCount;
+  { v1.11.28: selection highlight BEFORE text }
+  if MemoHasSelection(Self) and Assigned(St.pTTF_SizeText)
+     and Assigned(St.Font) and Assigned(St.pRenderFillRect) then
+  begin
+    MemoSelRange(Self, SelS, SelSC, SelE, SelEC);
+    St.pSetRenderDrawColor(St.Renderer, 50, 100, 180, 255);
+    for I := 0 to VC - 1 do
+    begin
+      LineIdx := ScrollTop + I;
+      if (LineIdx < 0) or (LineIdx >= Lines.Count) then Continue;
+      if (LineIdx < SelS) or (LineIdx > SelE) then Continue;
+      LineStr := Lines[LineIdx];
+      DrawY := Y + 4 + I * LineHeight;
+      StartCol := 0;
+      EndCol := Length(LineStr);
+      if LineIdx = SelS then StartCol := SelSC;
+      if LineIdx = SelE then EndCol := SelEC;
+      PW1 := 0; PH1 := 0;
+      PW2 := 0; PH2 := 0;
+      if StartCol > 0 then
+        St.pTTF_SizeText(St.Font,
+          PAnsiChar(AnsiString(Copy(LineStr, 1, StartCol))), @PW1, @PH1);
+      if EndCol > 0 then
+        St.pTTF_SizeText(St.Font,
+          PAnsiChar(AnsiString(Copy(LineStr, 1, EndCol))), @PW2, @PH2);
+      RectArr[0] := X + 4 + PW1;
+      RectArr[1] := DrawY;
+      RectArr[2] := PW2 - PW1;
+      RectArr[3] := LineHeight - 4;
+      if RectArr[2] > 0 then
+        St.pRenderFillRect(St.Renderer, @RectArr[0]);
+    end;
+  end;
+  { v1.11.27: render visible lines (VC already computed) }
   for I := 0 to VC - 1 do
   begin
     LineIdx := ScrollTop + I;
@@ -40878,6 +41133,40 @@ begin
   try
     D.SetValue('line', TValue.CreateNum(TGuiMemo(W).CursorLine));
     D.SetValue('col', TValue.CreateNum(TGuiMemo(W).CursorCol));
+    Result := TValue.CreateDict(D);
+  except
+    D.Free;
+    raise;
+  end;
+end;
+
+{ v1.11.28: gui2.memoGetSelection(id) -> {start_line, start_col, end_line, end_col} or {-1}* }
+function Native_Gui2_MemoGetSelection(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget; D: TDictValue; SLine, SCol, ELine, ECol: Integer;
+begin
+  Result := TValue.CreateNull;
+  if Args.Count <> 1 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  if not (W is TGuiMemo) then Exit;
+  D := TDictValue.Create;
+  try
+    if MemoHasSelection(TGuiMemo(W)) then
+    begin
+      MemoSelRange(TGuiMemo(W), SLine, SCol, ELine, ECol);
+      D.SetValue('start_line', TValue.CreateNum(SLine));
+      D.SetValue('start_col', TValue.CreateNum(SCol));
+      D.SetValue('end_line', TValue.CreateNum(ELine));
+      D.SetValue('end_col', TValue.CreateNum(ECol));
+    end
+    else
+    begin
+      D.SetValue('start_line', TValue.CreateNum(-1));
+      D.SetValue('start_col', TValue.CreateNum(-1));
+      D.SetValue('end_line', TValue.CreateNum(-1));
+      D.SetValue('end_col', TValue.CreateNum(-1));
+    end;
     Result := TValue.CreateDict(D);
   except
     D.Free;
@@ -43085,6 +43374,8 @@ begin
   Gui2Inst.Members.DefineVar('memoGetText', TValue.CreateNative(@Native_Gui2_MemoGetText));
   Gui2Inst.Members.DefineVar('memoSetText', TValue.CreateNative(@Native_Gui2_MemoSetText));
   Gui2Inst.Members.DefineVar('memoGetCursor', TValue.CreateNative(@Native_Gui2_MemoGetCursor));
+  { v1.11.28: memo selection }
+  Gui2Inst.Members.DefineVar('memoGetSelection', TValue.CreateNative(@Native_Gui2_MemoGetSelection));
   Gui2Inst.Members.DefineVar('isOpen', TValue.CreateNative(@Native_Gui2_IsOpen));
   Gui2Inst.Members.DefineVar('clear', TValue.CreateNative(@Native_Gui2_Clear));
   Gui2Inst.Members.DefineVar('present', TValue.CreateNative(@Native_Gui2_Present));

@@ -1,5 +1,56 @@
 # Changelog
 
+## [1.11.28] - 2026-11-06
+
+### Added (feature) -- GUI Widget Toolkit Phase 5b (Memo selection)
+- **Cross-line text selection** -- SHIFT+arrows extend, plain arrows clear
+- **Selection visual** -- blue highlight across line boundaries
+- **Ctrl+A/C/X/V** -- select all, copy, cut, paste (multi-line)
+- **Delete range** -- BACKSPACE/DELETE deletes selection if exists
+- **Replace selection** -- typing replaces selected range
+- **Selection API** -- gui2.memoGetSelection(id) -> {start_line, start_col,
+  end_line, end_col} or {-1}* when no selection
+
+### Keyboard behavior
+- SHIFT+LEFT/RIGHT/UP/DOWN: extend selection from anchor
+- SHIFT+HOME/END: extend to line start/end
+- Plain arrows/HOME/END: clear selection, move cursor
+- Ctrl+A: anchor (0,0) -> cursor (last_line, length)
+- Ctrl+C: copy selection (includes \n for multi-line) to clipboard
+- Ctrl+X: copy + delete selection
+- Ctrl+V: paste clipboard (splits by \n, inserts as new lines)
+- BACKSPACE/DELETE: delete selection if exists, else single char / merge
+- Text input: replace selection if exists, else insert at cursor
+
+### Implementation
+- TGuiMemo.SelAnchorLine / SelAnchorCol fields (-1 = no selection)
+- MemoPosLess: (line, col) comparison
+- MemoHasSelection / MemoSelRange / MemoClearSelection
+- MemoGetSelectionText: joins lines with \n between
+- MemoDeleteSelection: replaces range with joined first/last lines
+- Draw: per-line highlight (clip to start_col on first line, end_col on last)
+- Fixed VC assignment order (was after highlight loop, skipped first frame)
+
+### UTF-8 awareness
+- Col positions respect codepoint boundaries (inherited from Phase 5a)
+
+### Deferred to Phase 5c
+- Word wrap (long lines)
+- Line numbers
+- Horizontal scroll
+- Reusable scrollbar visual
+- Mouse drag selection
+
+### Verified
+- Build: 50163 lines (+291 vs v1.11.27), EXIT 0
+- Smoke test:
+  - 4-line memo created, text round-trip correct
+  - memoGetSelection returns {-1,-1,-1,-1} initially
+  - Cursor {line:3, col:6} accurate
+  - widgetsDraw() no crash (VC order fix)
+- Regression: 17/17 lang tests PASS
+- Interactive multi-line selection test deferred to X11 keyboard session
+
 ## [1.11.27] - 2026-11-06
 
 ### Added (feature) -- GUI Widget Toolkit Phase 5a (Memo basic)
