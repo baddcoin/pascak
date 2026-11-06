@@ -1,5 +1,49 @@
 # Changelog
 
+## [1.11.27] - 2026-11-06
+
+### Added (feature) -- GUI Widget Toolkit Phase 5a (Memo basic)
+- **TGuiMemo** widget -- multi-line text editor
+- Multi-line buffer via TStringList (one entry per line)
+- Cursor (Line, Col) tracking with auto-scroll
+- ENTER: split line at cursor
+- BACKSPACE: delete prev char OR merge with previous line
+- DELETE: delete next char OR merge with next line
+- LEFT/RIGHT: wrap across line boundaries
+- UP/DOWN: change line, clamp col to line length
+- HOME/END: col to 0 / line length
+- Click: line from MY, col from MX (UTF-8 aware)
+- Vertical scroll (ScrollTop) with auto-visible cursor
+
+### Natives (4)
+- **gui2.memo(x, y, w, h, [initial], [r], [g], [b])** -> widget id
+- **gui2.memoGetText(id)** -> str (lines joined by \n)
+- **gui2.memoSetText(id, str)** -> bool (split by \n, cursor to end)
+- **gui2.memoGetCursor(id)** -> {line, col}
+
+### Implementation
+- TGuiMemo class (Lines, CursorLine, CursorCol, ScrollTop, LineHeight)
+- SplitFromText / JoinToText helpers
+- EnsureCursorVisible / VisibleLineCount helpers
+- GuiMemoCursorColFromX helper (measure prefix widths per line)
+- Draw: viewport culling (only visible lines), cursor only when focused
+
+### UTF-8 awareness
+- Col position uses codepoint boundaries
+- Verified: multi-line unicode round-trip (accented + CJK)
+
+### Deferred to Phase 5b/5c
+- Selection across lines
+- Clipboard for multi-line
+- Word wrap, line numbers, scrollbar visual
+
+### Verified
+- Build: 49872 lines (+474 vs v1.11.26), EXIT 0
+- Smoke test: 2 memos, multi-line round-trip, cursor accuracy,
+  unicode preserved, all 4 natives exist
+- Regression: 17/17 lang tests PASS
+- Interactive multi-line editing test deferred to X11 keyboard session
+
 ## [1.11.26] - 2026-11-06
 
 ### Added (feature) -- GUI Widget Toolkit Phase 4c-2 (Clipboard)

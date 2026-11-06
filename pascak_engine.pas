@@ -38196,6 +38196,31 @@ type
     function HandleMouse(MX, MY, Btn: Integer; Down: Boolean): Boolean; override;
   end;
 
+  { v1.11.27: Memo widget (Phase 5a) -- multi-line text editor.
+    Selection + clipboard across lines deferred to Phase 5b.
+    Line numbers + wrap + scrollbar deferred to Phase 5c. }
+  TGuiMemo = class(TGuiWidget)
+  public
+    Lines: TStringList;
+    CursorLine: Integer;    // 0..Lines.Count-1
+    CursorCol: Integer;     // byte offset within Lines[CursorLine]
+    ScrollTop: Integer;     // first visible line index
+    BgR, BgG, BgB: UInt8;
+    LineHeight: Integer;    // pixels per line (measured from font)
+    constructor Create(AID: Integer; AOwner: Pointer;
+      AX, AY, AW, AH: Integer; const AInitial: string;
+      ABgR, ABgG, ABgB: UInt8);
+    destructor Destroy; override;
+    procedure Draw(GuiState: Pointer); override;
+    function HandleKey(const Key: string; Down: Boolean): Boolean; override;
+    function HandleText(const UTF8: string): Boolean; override;
+    function HandleMouse(MX, MY, Btn: Integer; Down: Boolean): Boolean; override;
+    procedure SplitFromText(const S: string);
+    function JoinToText: string;
+    procedure EnsureCursorVisible;
+    function VisibleLineCount: Integer;
+  end;
+
   TGuiSDLWindow = class
   public
     Window: Pointer;
@@ -39004,6 +39029,365 @@ begin
   begin
     if Assigned(GGuiSDL) then
       CursorPos := GuiEditCursorFromX(GGuiSDL, Self, MX);
+    Result := True;
+  end
+  else
+    Result := True;
+end;
+
+{ v1.11.27: Memo widget implementation (Phase 5a) }
+constructor TGuiMemo.Create(AID: Integer; AOwner: Pointer;
+  AX, AY, AW, AH: Integer; const AInitial: string;
+  ABgR, ABgG, ABgB: UInt8);
+begin
+  inherited Create(AID, AOwner);
+  X := AX; Y := AY; W := AW; H := AH;
+  Lines := TStringList.Create;
+  Lines.SkipLastLineBreak := True;
+  SplitFromText(AInitial);
+  CursorLine := Lines.Count - 1;
+  CursorCol := Length(Lines[CursorLine]);
+  ScrollTop := 0;
+  BgR := ABgR; BgG := ABgG; BgB := ABgB;
+  LineHeight := 20;
+  Focusable := True;
+end;
+
+destructor TGuiMemo.Destroy;
+begin
+  if Assigned(Lines) then Lines.Free;
+  inherited;
+end;
+
+procedure TGuiMemo.SplitFromText(const S: string);
+var
+  I, Start: Integer;
+begin
+  Lines.Clear;
+  if S = '' then
+  begin
+    Lines.Add('');
+    Exit;
+  end;
+  Start := 1;
+  for I := 1 to Length(S) do
+  begin
+    if S[I] = #10 then
+    begin
+      Lines.Add(Copy(S, Start, I - Start));
+      Start := I + 1;
+    end;
+  end;
+  if Start <= Length(S) then
+    Lines.Add(Copy(S, Start, Length(S) - Start + 1))
+  else
+    Lines.Add('');
+end;
+
+function TGuiMemo.JoinToText: string;
+var
+  I: Integer;
+begin
+  Result := '';
+  if Lines.Count = 0 then Exit;
+  Result := Lines[0];
+  for I := 1 to Lines.Count - 1 do
+    Result := Result + #10 + Lines[I];
+end;
+
+function TGuiMemo.VisibleLineCount: Integer;
+begin
+  if LineHeight <= 0 then Exit(1);
+  Result := (H - 8) div LineHeight;
+  if Result < 1 then Result := 1;
+end;
+
+procedure TGuiMemo.EnsureCursorVisible;
+var
+  VC: Integer;
+begin
+  VC := VisibleLineCount;
+  if CursorLine < ScrollTop then
+    ScrollTop := CursorLine
+  else if CursorLine >= ScrollTop + VC then
+    ScrollTop := CursorLine - VC + 1;
+  if ScrollTop < 0 then ScrollTop := 0;
+end;
+
+function TGuiMemo.HandleText(const UTF8: string): Boolean;
+var
+  L, S: string;
+begin
+  Result := False;
+  if not Visible or not Enabled then Exit;
+  if UTF8 = '' then Exit;
+  { v1.11.27: Ctrl guard (matches Edit) }
+  if Assigned(GGuiSDL) then
+    if (GGuiSDL.ModState and KMOD_CTRL) <> 0 then Exit;
+  if (CursorLine < 0) or (CursorLine >= Lines.Count) then Exit;
+  L := Lines[CursorLine];
+  S := Copy(L, 1, CursorCol) + UTF8 +
+       Copy(L, CursorCol + 1, Length(L) - CursorCol);
+  Lines[CursorLine] := S;
+  Inc(CursorCol, Length(UTF8));
+  Inc(KeyCount);
+  Result := True;
+end;
+
+function TGuiMemo.HandleKey(const Key: string; Down: Boolean): Boolean;
+var
+  L, NextL: string;
+  PrevCol, NextCol: Integer;
+begin
+  Result := False;
+  if not Visible or not Enabled then Exit;
+  if not Down then Exit;
+  if (CursorLine < 0) or (CursorLine >= Lines.Count) then Exit;
+  { v1.11.27: ENTER -- split line at cursor }
+  if Key = 'ENTER' then
+  begin
+    L := Lines[CursorLine];
+    NextL := Copy(L, CursorCol + 1, Length(L) - CursorCol);
+    Lines[CursorLine] := Copy(L, 1, CursorCol);
+    Lines.Insert(CursorLine + 1, NextL);
+    Inc(CursorLine);
+    CursorCol := 0;
+    EnsureCursorVisible;
+    Inc(KeyCount);
+    Result := True;
+    Exit;
+  end;
+  { v1.11.27: BACKSPACE -- delete prev char or merge with previous line }
+  if Key = 'BACKSPACE' then
+  begin
+    if CursorCol > 0 then
+    begin
+      L := Lines[CursorLine];
+      PrevCol := Utf8PrevChar(L, CursorCol);
+      Lines[CursorLine] := Copy(L, 1, PrevCol) + Copy(L, CursorCol + 1, Length(L) - CursorCol);
+      CursorCol := PrevCol;
+      Inc(KeyCount);
+      Result := True;
+    end
+    else if CursorLine > 0 then
+    begin
+      L := Lines[CursorLine];
+      Dec(CursorLine);
+      CursorCol := Length(Lines[CursorLine]);
+      Lines[CursorLine] := Lines[CursorLine] + L;
+      Lines.Delete(CursorLine + 1);
+      EnsureCursorVisible;
+      Inc(KeyCount);
+      Result := True;
+    end;
+    Exit;
+  end;
+  { v1.11.27: DELETE -- delete next char or merge with next line }
+  if Key = 'DELETE' then
+  begin
+    L := Lines[CursorLine];
+    if CursorCol < Length(L) then
+    begin
+      NextCol := Utf8NextChar(L, CursorCol);
+      Lines[CursorLine] := Copy(L, 1, CursorCol) + Copy(L, NextCol + 1, Length(L) - NextCol);
+      Inc(KeyCount);
+      Result := True;
+    end
+    else if CursorLine < Lines.Count - 1 then
+    begin
+      Lines[CursorLine] := L + Lines[CursorLine + 1];
+      Lines.Delete(CursorLine + 1);
+      Inc(KeyCount);
+      Result := True;
+    end;
+    Exit;
+  end;
+  { v1.11.27: LEFT -- prev char or wrap to prev line end }
+  if Key = 'LEFT' then
+  begin
+    if CursorCol > 0 then
+      CursorCol := Utf8PrevChar(Lines[CursorLine], CursorCol)
+    else if CursorLine > 0 then
+    begin
+      Dec(CursorLine);
+      CursorCol := Length(Lines[CursorLine]);
+      EnsureCursorVisible;
+    end;
+    Result := True;
+    Exit;
+  end;
+  { v1.11.27: RIGHT -- next char or wrap to next line start }
+  if Key = 'RIGHT' then
+  begin
+    if CursorCol < Length(Lines[CursorLine]) then
+      CursorCol := Utf8NextChar(Lines[CursorLine], CursorCol)
+    else if CursorLine < Lines.Count - 1 then
+    begin
+      Inc(CursorLine);
+      CursorCol := 0;
+      EnsureCursorVisible;
+    end;
+    Result := True;
+    Exit;
+  end;
+  { v1.11.27: UP -- prev line, clamp col }
+  if Key = 'UP' then
+  begin
+    if CursorLine > 0 then
+    begin
+      Dec(CursorLine);
+      if CursorCol > Length(Lines[CursorLine]) then
+        CursorCol := Length(Lines[CursorLine]);
+      EnsureCursorVisible;
+    end;
+    Result := True;
+    Exit;
+  end;
+  { v1.11.27: DOWN -- next line, clamp col }
+  if Key = 'DOWN' then
+  begin
+    if CursorLine < Lines.Count - 1 then
+    begin
+      Inc(CursorLine);
+      if CursorCol > Length(Lines[CursorLine]) then
+        CursorCol := Length(Lines[CursorLine]);
+      EnsureCursorVisible;
+    end;
+    Result := True;
+    Exit;
+  end;
+  { v1.11.27: HOME -- col to 0 }
+  if Key = 'HOME' then
+  begin
+    CursorCol := 0;
+    Result := True;
+    Exit;
+  end;
+  { v1.11.27: END -- col to line length }
+  if Key = 'END' then
+  begin
+    CursorCol := Length(Lines[CursorLine]);
+    Result := True;
+    Exit;
+  end;
+end;
+
+{ v1.11.27: helper -- cursor col from click X in a single line string }
+function GuiMemoCursorColFromX(St: TGuiSDLState;
+  const LineStr: string; BaseX, MX: Integer): Integer;
+var
+  TargetX, PrefixW, PrefixH, BestDist, Dist, Pos: Integer;
+begin
+  Result := 0;
+  if not Assigned(St) then Exit;
+  if not Assigned(St.pTTF_SizeText) or not Assigned(St.Font) then Exit;
+  TargetX := MX - BaseX;
+  if TargetX <= 0 then Exit(0);
+  BestDist := TargetX;
+  Pos := 0;
+  while Pos < Length(LineStr) do
+  begin
+    Pos := Utf8NextChar(LineStr, Pos);
+    PrefixW := 0; PrefixH := 0;
+    St.pTTF_SizeText(St.Font,
+      PAnsiChar(AnsiString(Copy(LineStr, 1, Pos))),
+      @PrefixW, @PrefixH);
+    Dist := Abs(PrefixW - TargetX);
+    if Dist < BestDist then
+    begin
+      BestDist := Dist;
+      Result := Pos;
+    end
+    else
+      Break;
+  end;
+end;
+
+procedure TGuiMemo.Draw(GuiState: Pointer);
+var
+  St: TGuiSDLState;
+  RectArr: array[0..3] of Int32;
+  VC, I, LineIdx, DrawY: Integer;
+  LineStr: string;
+  PrefixW, PrefixH: Int32;
+begin
+  if not Visible then Exit;
+  St := TGuiSDLState(GuiState);
+  if not Assigned(St) then Exit;
+  if not Assigned(St.Renderer) then Exit;
+  { v1.11.27: background }
+  if Assigned(St.pSetRenderDrawColor) and Assigned(St.pRenderFillRect) then
+  begin
+    St.pSetRenderDrawColor(St.Renderer, BgR, BgG, BgB, 255);
+    RectArr[0] := X; RectArr[1] := Y;
+    RectArr[2] := W; RectArr[3] := H;
+    St.pRenderFillRect(St.Renderer, @RectArr[0]);
+  end;
+  { v1.11.27: border }
+  if Assigned(St.pRenderDrawRect) then
+  begin
+    St.pSetRenderDrawColor(St.Renderer, 100, 100, 100, 255);
+    RectArr[0] := X; RectArr[1] := Y;
+    RectArr[2] := W; RectArr[3] := H;
+    St.pRenderDrawRect(St.Renderer, @RectArr[0]);
+  end;
+  { v1.11.27: render visible lines }
+  VC := VisibleLineCount;
+  for I := 0 to VC - 1 do
+  begin
+    LineIdx := ScrollTop + I;
+    if (LineIdx < 0) or (LineIdx >= Lines.Count) then Continue;
+    LineStr := Lines[LineIdx];
+    if LineStr <> '' then
+    begin
+      DrawY := Y + 4 + I * LineHeight;
+      GuiDrawTextAt(St, X + 4, DrawY, LineStr, 255, 255, 255);
+    end;
+  end;
+  { v1.11.27: cursor at current line + col (only when focused) }
+  if Focused and Assigned(St.pRenderFillRect) and Assigned(St.pTTF_SizeText)
+     and Assigned(St.Font) then
+  begin
+    LineStr := '';
+    if (CursorLine >= 0) and (CursorLine < Lines.Count) then
+      LineStr := Lines[CursorLine];
+    PrefixW := 0; PrefixH := 0;
+    if CursorCol > 0 then
+      St.pTTF_SizeText(St.Font,
+        PAnsiChar(AnsiString(Copy(LineStr, 1, CursorCol))),
+        @PrefixW, @PrefixH);
+    DrawY := Y + 4 + (CursorLine - ScrollTop) * LineHeight;
+    if (DrawY >= Y + 4) and (DrawY < Y + H - 4) then
+    begin
+      St.pSetRenderDrawColor(St.Renderer, 255, 255, 255, 255);
+      RectArr[0] := X + 4 + PrefixW; RectArr[1] := DrawY;
+      RectArr[2] := 2; RectArr[3] := LineHeight - 4;
+      St.pRenderFillRect(St.Renderer, @RectArr[0]);
+    end;
+  end;
+end;
+
+function TGuiMemo.HandleMouse(MX, MY, Btn: Integer; Down: Boolean): Boolean;
+var
+  LineIdx, ColIdx: Integer;
+begin
+  Result := False;
+  if not Visible or not Enabled then Exit;
+  if Btn <> 1 then Exit;
+  if (MX < X) or (MX >= X + W) or (MY < Y) or (MY >= Y + H) then Exit;
+  if Down then
+  begin
+    if LineHeight <= 0 then LineHeight := 20;
+    LineIdx := ScrollTop + (MY - Y - 4) div LineHeight;
+    if LineIdx < 0 then LineIdx := 0;
+    if LineIdx >= Lines.Count then LineIdx := Lines.Count - 1;
+    CursorLine := LineIdx;
+    if Assigned(GGuiSDL) then
+      ColIdx := GuiMemoCursorColFromX(GGuiSDL, Lines[CursorLine], X + 4, MX)
+    else
+      ColIdx := 0;
+    CursorCol := ColIdx;
+    EnsureCursorVisible;
     Result := True;
   end
   else
@@ -40409,6 +40793,91 @@ begin
       D.SetValue('start', TValue.CreateNum(-1));
       D.SetValue('finish', TValue.CreateNum(-1));
     end;
+    Result := TValue.CreateDict(D);
+  except
+    D.Free;
+    raise;
+  end;
+end;
+
+{ v1.11.27: gui2.memo(x, y, w, h, [initial], [r], [g], [b]) -> widget id }
+function Native_Gui2_Memo(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  W: TGuiSDLWindow;
+  Widget: TGuiMemo;
+  X, Y, WW, HH, ID: Integer;
+  R, G, B: Integer;
+  Initial: string;
+begin
+  Result := TValue.CreateNum(0);
+  if (Args.Count < 4) or (Args.Count > 8) then Exit;
+  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Windows)) then Exit;
+  X := Trunc(TValue(Args[0]).NumVal);
+  Y := Trunc(TValue(Args[1]).NumVal);
+  WW := Trunc(TValue(Args[2]).NumVal);
+  HH := Trunc(TValue(Args[3]).NumVal);
+  Initial := '';
+  if (Args.Count >= 5) and (TValue(Args[4]).DataType = dtString) then
+    Initial := TValue(Args[4]).StrVal;
+  R := 40; G := 40; B := 40;
+  if (Args.Count >= 6) and (TValue(Args[5]).DataType = dtNumeric) then R := Trunc(TValue(Args[5]).NumVal);
+  if (Args.Count >= 7) and (TValue(Args[6]).DataType = dtNumeric) then G := Trunc(TValue(Args[6]).NumVal);
+  if (Args.Count >= 8) and (TValue(Args[7]).DataType = dtNumeric) then B := Trunc(TValue(Args[7]).NumVal);
+  W := GuiCurrentWindow;
+  if not Assigned(W) or not Assigned(W.Widgets) then Exit;
+  ID := GGuiSDL.NextWidgetID;
+  Inc(GGuiSDL.NextWidgetID);
+  Widget := TGuiMemo.Create(ID, W, X, Y, WW, HH, Initial, UInt8(R), UInt8(G), UInt8(B));
+  W.Widgets.Add(Widget);
+  Result := TValue.CreateNum(ID);
+end;
+
+{ v1.11.27: gui2.memoGetText(id) -> str (lines joined by \n) }
+function Native_Gui2_MemoGetText(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget;
+begin
+  Result := TValue.CreateStr('');
+  if Args.Count <> 1 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  if not (W is TGuiMemo) then Exit;
+  Result := TValue.CreateStr(TGuiMemo(W).JoinToText);
+end;
+
+{ v1.11.27: gui2.memoSetText(id, str) -> bool -- cursor to end }
+function Native_Gui2_MemoSetText(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget;
+begin
+  Result := TValue.CreateBool(False);
+  if Args.Count <> 2 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  if TValue(Args[1]).DataType <> dtString then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  if not (W is TGuiMemo) then Exit;
+  TGuiMemo(W).SplitFromText(TValue(Args[1]).StrVal);
+  TGuiMemo(W).CursorLine := TGuiMemo(W).Lines.Count - 1;
+  TGuiMemo(W).CursorCol := Length(TGuiMemo(W).Lines[TGuiMemo(W).CursorLine]);
+  TGuiMemo(W).ScrollTop := 0;
+  TGuiMemo(W).EnsureCursorVisible;
+  Result := TValue.CreateBool(True);
+end;
+
+{ v1.11.27: gui2.memoGetCursor(id) -> {line, col} }
+function Native_Gui2_MemoGetCursor(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget; D: TDictValue;
+begin
+  Result := TValue.CreateNull;
+  if Args.Count <> 1 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  if not (W is TGuiMemo) then Exit;
+  D := TDictValue.Create;
+  try
+    D.SetValue('line', TValue.CreateNum(TGuiMemo(W).CursorLine));
+    D.SetValue('col', TValue.CreateNum(TGuiMemo(W).CursorCol));
     Result := TValue.CreateDict(D);
   except
     D.Free;
@@ -42611,6 +43080,11 @@ begin
   Gui2Inst.Members.DefineVar('editSetText', TValue.CreateNative(@Native_Gui2_EditSetText));
   { v1.11.25: selection }
   Gui2Inst.Members.DefineVar('editGetSelection', TValue.CreateNative(@Native_Gui2_EditGetSelection));
+  { v1.11.27: Memo widget }
+  Gui2Inst.Members.DefineVar('memo', TValue.CreateNative(@Native_Gui2_Memo));
+  Gui2Inst.Members.DefineVar('memoGetText', TValue.CreateNative(@Native_Gui2_MemoGetText));
+  Gui2Inst.Members.DefineVar('memoSetText', TValue.CreateNative(@Native_Gui2_MemoSetText));
+  Gui2Inst.Members.DefineVar('memoGetCursor', TValue.CreateNative(@Native_Gui2_MemoGetCursor));
   Gui2Inst.Members.DefineVar('isOpen', TValue.CreateNative(@Native_Gui2_IsOpen));
   Gui2Inst.Members.DefineVar('clear', TValue.CreateNative(@Native_Gui2_Clear));
   Gui2Inst.Members.DefineVar('present', TValue.CreateNative(@Native_Gui2_Present));
