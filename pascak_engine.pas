@@ -38210,6 +38210,11 @@ type
     { v1.11.28: selection anchor (line, col) -- -1 = no selection }
     SelAnchorLine: Integer;
     SelAnchorCol: Integer;
+    { v1.11.29: scrollbar }
+    ScrollBarWidth: Integer;
+    DraggingScroll: Boolean;
+    DragStartY: Integer;
+    DragStartTop: Integer;
     constructor Create(AID: Integer; AOwner: Pointer;
       AX, AY, AW, AH: Integer; const AInitial: string;
       ABgR, ABgG, ABgB: UInt8);
@@ -39131,6 +39136,10 @@ begin
   Focusable := True;
   SelAnchorLine := -1;
   SelAnchorCol := -1;
+  ScrollBarWidth := 12;
+  DraggingScroll := False;
+  DragStartY := 0;
+  DragStartTop := 0;
 end;
 
 destructor TGuiMemo.Destroy;
@@ -39531,6 +39540,7 @@ var
   SelS, SelE, SelSC, SelEC, StartCol, EndCol: Integer;
   PW1, PW2: Int32;
   PH1, PH2: Int32;
+  ThumbH, ThumbY: Integer;
 begin
   if not Visible then Exit;
   St := TGuiSDLState(GuiState);
@@ -39620,16 +39630,84 @@ begin
       St.pRenderFillRect(St.Renderer, @RectArr[0]);
     end;
   end;
+  { v1.11.29: scrollbar (only if content overflows) }
+  if (Lines.Count > VisibleLineCount) and Assigned(St.pRenderFillRect)
+     and Assigned(St.pSetRenderDrawColor) then
+  begin
+    { background track }
+    St.pSetRenderDrawColor(St.Renderer, 60, 60, 60, 255);
+    RectArr[0] := X + W - ScrollBarWidth; RectArr[1] := Y;
+    RectArr[2] := ScrollBarWidth; RectArr[3] := H;
+    St.pRenderFillRect(St.Renderer, @RectArr[0]);
+    { thumb (proportional) }
+    ThumbH := (H * VisibleLineCount) div Lines.Count;
+    if ThumbH < 20 then ThumbH := 20;
+    if ThumbH > H then ThumbH := H;
+    ThumbY := (H - ThumbH) * ScrollTop div (Lines.Count - VisibleLineCount);
+    St.pSetRenderDrawColor(St.Renderer, 150, 150, 150, 255);
+    RectArr[0] := X + W - ScrollBarWidth + 2; RectArr[1] := Y + ThumbY;
+    RectArr[2] := ScrollBarWidth - 4; RectArr[3] := ThumbH;
+    St.pRenderFillRect(St.Renderer, @RectArr[0]);
+  end;
 end;
 
 function TGuiMemo.HandleMouse(MX, MY, Btn: Integer; Down: Boolean): Boolean;
 var
-  LineIdx, ColIdx: Integer;
+  LineIdx, ColIdx, NewTop, TotalLines, DeltaY: Integer;
 begin
   Result := False;
   if not Visible or not Enabled then Exit;
+  { v1.11.29: scrollbar drag continues on mousemove (Btn=0) }
+  if DraggingScroll then
+  begin
+    if not Down then
+    begin
+      DraggingScroll := False;
+      Result := True;
+      Exit;
+    end;
+    if Btn = 0 then
+    begin
+      DeltaY := MY - DragStartY;
+      TotalLines := Lines.Count;
+      if TotalLines > 0 then
+      begin
+        NewTop := DragStartTop + (DeltaY * TotalLines) div H;
+        if NewTop < 0 then NewTop := 0;
+        if NewTop > TotalLines - VisibleLineCount then
+          NewTop := TotalLines - VisibleLineCount;
+        if NewTop < 0 then NewTop := 0;
+        ScrollTop := NewTop;
+      end;
+      Result := True;
+      Exit;
+    end;
+  end;
   if Btn <> 1 then Exit;
   if (MX < X) or (MX >= X + W) or (MY < Y) or (MY >= Y + H) then Exit;
+  { v1.11.29: scrollbar click area }
+  if MX >= X + W - ScrollBarWidth then
+  begin
+    if Down then
+    begin
+      TotalLines := Lines.Count;
+      if TotalLines > 0 then
+      begin
+        NewTop := ((MY - Y) * TotalLines) div H;
+        if NewTop < 0 then NewTop := 0;
+        if NewTop > TotalLines - VisibleLineCount then
+          NewTop := TotalLines - VisibleLineCount;
+        if NewTop < 0 then NewTop := 0;
+        ScrollTop := NewTop;
+        DragStartY := MY;
+        DragStartTop := ScrollTop;
+        DraggingScroll := True;
+      end;
+    end;
+    Result := True;
+    Exit;
+  end;
+  { regular text area click }
   if Down then
   begin
     if LineHeight <= 0 then LineHeight := 20;
@@ -41172,6 +41250,39 @@ begin
     D.Free;
     raise;
   end;
+end;
+
+{ v1.11.29: gui2.memoSetScrollTop(id, n) -> bool }
+function Native_Gui2_MemoSetScrollTop(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget; N: Integer;
+begin
+  Result := TValue.CreateBool(False);
+  if Args.Count <> 2 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  if TValue(Args[1]).DataType <> dtNumeric then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  if not (W is TGuiMemo) then Exit;
+  N := Trunc(TValue(Args[1]).NumVal);
+  if N < 0 then N := 0;
+  if N >= TGuiMemo(W).Lines.Count then
+    N := TGuiMemo(W).Lines.Count - TGuiMemo(W).VisibleLineCount;
+  if N < 0 then N := 0;
+  TGuiMemo(W).ScrollTop := N;
+  Result := TValue.CreateBool(True);
+end;
+
+{ v1.11.29: gui2.memoGetScrollTop(id) -> num }
+function Native_Gui2_MemoGetScrollTop(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget;
+begin
+  Result := TValue.CreateNum(0);
+  if Args.Count <> 1 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  if not (W is TGuiMemo) then Exit;
+  Result := TValue.CreateNum(TGuiMemo(W).ScrollTop);
 end;
 
 function Native_Gui2_Poll(Args: TObjectList; CallEnv: TSymbolTable): TValue;
@@ -43376,6 +43487,9 @@ begin
   Gui2Inst.Members.DefineVar('memoGetCursor', TValue.CreateNative(@Native_Gui2_MemoGetCursor));
   { v1.11.28: memo selection }
   Gui2Inst.Members.DefineVar('memoGetSelection', TValue.CreateNative(@Native_Gui2_MemoGetSelection));
+  { v1.11.29: memo scrollbar }
+  Gui2Inst.Members.DefineVar('memoSetScrollTop', TValue.CreateNative(@Native_Gui2_MemoSetScrollTop));
+  Gui2Inst.Members.DefineVar('memoGetScrollTop', TValue.CreateNative(@Native_Gui2_MemoGetScrollTop));
   Gui2Inst.Members.DefineVar('isOpen', TValue.CreateNative(@Native_Gui2_IsOpen));
   Gui2Inst.Members.DefineVar('clear', TValue.CreateNative(@Native_Gui2_Clear));
   Gui2Inst.Members.DefineVar('present', TValue.CreateNative(@Native_Gui2_Present));

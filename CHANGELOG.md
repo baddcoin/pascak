@@ -1,5 +1,51 @@
 # Changelog
 
+## [1.11.29] - 2026-11-06
+
+### Added (feature) -- GUI Widget Toolkit Phase 5c-1 (Scrollbar)
+- **Memo scrollbar** -- visual vertical scrollbar on right edge
+  (only when content overflows visible area)
+- **Scrollbar drag** -- click thumb/track to scroll, drag to navigate
+- **Proportional thumb** -- height reflects visible/total ratio
+- **ScrollTop API** -- gui2.memoSetScrollTop(id, n) / memoGetScrollTop(id)
+
+### Behavior
+- Track: dark gray (60, 60, 60), full height at right edge (12px wide)
+- Thumb: light gray (150, 150, 150), proportional height, min 20px
+- Click track position -> jump scroll to that position + start drag
+- Drag (mousedown + mousemove) -> continuous scroll
+- Release (mouseup) -> end drag
+- Only renders when Lines.Count > VisibleLineCount
+
+### Implementation
+- TGuiMemo fields: ScrollBarWidth (12), DraggingScroll, DragStartY, DragStartTop
+- HandleMouse: scrollbar click area detection (MX >= X + W - ScrollBarWidth)
+- Drag state machine: DraggingScroll flag, DragStartY/DragStartTop for delta
+- Delta calculation: NewTop := DragStartTop + (DeltaY * TotalLines) div H
+- Draw: track + proportional thumb (ThumbH based on VisibleCount/Lines.Count)
+- Natives: memoSetScrollTop, memoGetScrollTop (with clamping)
+
+### Safety
+- Clamp: NewTop in [0, Lines.Count - VisibleLineCount]
+- Division guard: only divide if Lines.Count > VisibleLineCount
+- Min thumb height 20px (prevents unreachable tiny thumb)
+
+### Deferred to Phase 5c-2 / 5c-3
+- Line numbers (gutter + offset)
+- Word wrap (hard: affects cursor/selection/scroll)
+- Horizontal scroll
+
+### Verified
+- Build: 50277 lines (+114 vs v1.11.28), EXIT 0
+- Smoke test:
+  - 20-line memo, height 120 (5 visible lines)
+  - setScrollTop/getScrollTop work
+  - Clamping: setScrollTop(100) -> 15 (max = 20-5)
+  - widgetsDraw() no crash (scrollbar rendered)
+  - Both natives exist
+- Regression: 17/17 lang tests PASS
+- Interactive drag test deferred to X11 session
+
 ## [1.11.28] - 2026-11-06
 
 ### Added (feature) -- GUI Widget Toolkit Phase 5b (Memo selection)
