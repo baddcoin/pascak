@@ -1,5 +1,57 @@
 # Changelog
 
+## [1.11.31] - 2026-11-07
+
+### Added (feature) -- GUI Widget Toolkit Phase 5c-3a (Word Wrap Infrastructure)
+- **Word wrap toggle** -- gui2.memoSetWrap(id, enabled) / memoGetWrap(id)
+- **Wrap calculation** -- long lines split at word boundaries based on
+  available width (W - PadLeft - ScrollBarWidth - 8)
+- **Visual lines cache** -- VisualLines: TStringList + VisualToLogical +
+  VisualStartCol (parallel arrays)
+- **RebuildVisualLines** -- called at Draw start, cheap when wrap OFF (1:1)
+- **gui2.memoGetVisualLineCount(id)** -- debug count of wrapped lines
+- **TGuiMemo.VisualLineCount** -- method returning cache count
+- Draw renders VisualLines instead of Lines (wrap-aware rendering)
+
+### Behavior (Phase 5c-3a scope)
+- Wrap OFF (default): 1:1 logical-to-visual mapping, zero behavior change
+- Wrap ON: long logical lines split into visual lines by word boundary
+- Word-break at last space before overflow, char-break as fallback
+- Toggle is per-widget, no global state
+
+### Known limitations (deferred to Phase 5c-3b/c)
+- Cursor navigation (UP/DOWN/LEFT/RIGHT) still uses LOGICAL lines
+  - Wrapped text with cursor may look "off" visually
+  - Default OFF protects existing behavior
+- Click position (MY -> line) uses logical line
+- Selection highlight uses logical lines (could span wrong visual rows)
+- Scrollbar uses logical line count (Lines.Count), not visual
+- EnsureCursorVisible uses logical line
+- These need logical<->visual mapping helpers (Phase 5c-3b)
+
+### Implementation
+- TGuiMemo fields: WrapEnabled, VisualLines, VisualToLogical, VisualStartCol
+- RebuildVisualLines method (wrap algorithm with TTF_SizeText measure)
+- VisualLineCount method
+- Draw: calls RebuildVisualLines, renders VisualLines loop
+- Natives: memoSetWrap, memoGetWrap, memoGetVisualLineCount
+
+### Verified
+- Build: 50550 lines (+140 vs v1.11.30), EXIT 0
+- Smoke test:
+  - Single long string (no \n), memoSetText -> 1 logical line
+  - wrap=false -> 1 visual line (initial)
+  - wrap=true + draw -> 4 visual lines (word-boundary split)
+  - wrap=false + draw -> 1 visual line (back to 1:1)
+  - All 3 natives exist
+- Regression: 17/17 lang tests PASS
+- Visual confirmation deferred (user can test in X11)
+
+### Next phase
+- Phase 5c-3b: Cursor + selection remap (logical<->visual)
+- Phase 5c-3c: Click + scrollbar + EnsureCursorVisible remap
+- Phase 5c-2: Line numbers (simpler, can be before or after 5c-3)
+
 ## [1.11.30] - 2026-11-07
 
 ### Fixed (critical)

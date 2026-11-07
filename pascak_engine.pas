@@ -38222,6 +38222,11 @@ type
     DraggingScroll: Boolean;
     DragStartY: Integer;
     DragStartTop: Integer;
+    { v1.11.31: word wrap (Phase 5c-3a -- rendering only, cursor remap in 5c-3b) }
+    WrapEnabled: Boolean;
+    VisualLines: TStringList;
+    VisualToLogical: TList;      // visual index -> logical line index
+    VisualStartCol: TList;       // visual index -> start byte col in logical
     constructor Create(AID: Integer; AOwner: Pointer;
       AX, AY, AW, AH: Integer; const AInitial: string;
       ABgR, ABgG, ABgB: UInt8);
@@ -38232,8 +38237,10 @@ type
     function HandleMouse(MX, MY, Btn: Integer; Down: Boolean): Boolean; override;
     procedure SplitFromText(const S: string);
     function JoinToText: string;
+    procedure RebuildVisualLines;
     procedure EnsureCursorVisible;
     function VisibleLineCount: Integer;
+    function VisualLineCount: Integer;
   end;
 
   TGuiSDLWindow = class
@@ -39181,6 +39188,11 @@ begin
   Focusable := True;
   SelAnchorLine := -1;
   SelAnchorCol := -1;
+  WrapEnabled := False;
+  VisualLines := TStringList.Create;
+  VisualLines.SkipLastLineBreak := True;
+  VisualToLogical := TList.Create;
+  VisualStartCol := TList.Create;
   ScrollBarWidth := 12;
   DraggingScroll := False;
   DragStartY := 0;
@@ -39190,6 +39202,9 @@ end;
 destructor TGuiMemo.Destroy;
 begin
   if Assigned(Lines) then Lines.Free;
+  if Assigned(VisualLines) then VisualLines.Free;
+  if Assigned(VisualToLogical) then VisualToLogical.Free;
+  if Assigned(VisualStartCol) then VisualStartCol.Free;
   inherited;
 end;
 
@@ -39235,6 +39250,15 @@ begin
   { v1.11.30: use PadTop + PadBottom instead of hardcoded 8 }
   Result := (H - PadTop - PadBottom) div LineHeight;
   if Result < 1 then Result := 1;
+end;
+
+{ v1.11.31: total visual line count (used by scrollbar in 5c-3b) }
+function TGuiMemo.VisualLineCount: Integer;
+begin
+  if Assigned(VisualLines) then
+    Result := VisualLines.Count
+  else
+    Result := Lines.Count;
 end;
 
 procedure TGuiMemo.EnsureCursorVisible;
@@ -39576,6 +39600,75 @@ begin
   end;
 end;
 
+{ v1.11.31: rebuild VisualLines from Lines based on wrap settings }
+procedure TGuiMemo.RebuildVisualLines;
+var
+  I, WAvail, ChunkStart, ChunkEnd, LastSpace, j: Integer;
+  LineStr, LinePart: string;
+  TW, TH: Int32;
+begin
+  VisualLines.Clear;
+  VisualToLogical.Clear;
+  VisualStartCol.Clear;
+  WAvail := W - PadLeft - ScrollBarWidth - 8;
+  if WAvail <= 0 then WAvail := 100;
+  { if wrap disabled or font missing -- 1:1 mapping }
+  if (not WrapEnabled) or (not Assigned(GGuiSDL))
+     or (not Assigned(GGuiSDL.pTTF_SizeText)) or (not Assigned(GGuiSDL.Font)) then
+  begin
+    for I := 0 to Lines.Count - 1 do
+    begin
+      VisualLines.Add(Lines[I]);
+      VisualToLogical.Add(Pointer(PtrInt(I)));
+      VisualStartCol.Add(Pointer(PtrInt(0)));
+    end;
+    Exit;
+  end;
+  { wrap enabled: split each logical line at word boundaries }
+  for I := 0 to Lines.Count - 1 do
+  begin
+    LineStr := Lines[I];
+    if LineStr = '' then
+    begin
+      VisualLines.Add('');
+      VisualToLogical.Add(Pointer(PtrInt(I)));
+      VisualStartCol.Add(Pointer(PtrInt(0)));
+      Continue;
+    end;
+    ChunkStart := 1;
+    while ChunkStart <= Length(LineStr) do
+    begin
+      { find max chunk that fits }
+      ChunkEnd := ChunkStart;
+      while ChunkEnd <= Length(LineStr) do
+      begin
+        LinePart := Copy(LineStr, ChunkStart, ChunkEnd - ChunkStart + 1);
+        TW := 0; TH := 0;
+        GGuiSDL.pTTF_SizeText(GGuiSDL.Font,
+          PAnsiChar(AnsiString(LinePart)), @TW, @TH);
+        if TW > WAvail then Break;
+        Inc(ChunkEnd);
+      end;
+      Dec(ChunkEnd);
+      if ChunkEnd < ChunkStart then ChunkEnd := ChunkStart;
+      { try break at last word boundary }
+      LastSpace := 0;
+      for j := ChunkStart to ChunkEnd do
+        if LineStr[j] = ' ' then LastSpace := j;
+      if (LastSpace > ChunkStart) and (ChunkEnd < Length(LineStr)) then
+        ChunkEnd := LastSpace - 1;
+      if ChunkEnd < ChunkStart then ChunkEnd := ChunkStart;
+      LinePart := Copy(LineStr, ChunkStart, ChunkEnd - ChunkStart + 1);
+      VisualLines.Add(LinePart);
+      VisualToLogical.Add(Pointer(PtrInt(I)));
+      VisualStartCol.Add(Pointer(PtrInt(ChunkStart - 1)));
+      ChunkStart := ChunkEnd + 1;
+      if (ChunkStart <= Length(LineStr)) and (LineStr[ChunkStart] = ' ') then
+        Inc(ChunkStart);
+    end;
+  end;
+end;
+
 procedure TGuiMemo.Draw(GuiState: Pointer);
 var
   St: TGuiSDLState;
@@ -39603,6 +39696,8 @@ begin
       LineHeight := FontHeight + LineSpacing;
     end;
   end;
+  { v1.11.31: rebuild visual lines cache (cheap if wrap disabled = 1:1) }
+  RebuildVisualLines;
   { v1.11.27: background }
   if Assigned(St.pSetRenderDrawColor) and Assigned(St.pRenderFillRect) then
   begin
@@ -39661,12 +39756,12 @@ begin
         St.pRenderFillRect(St.Renderer, @RectArr[0]);
     end;
   end;
-  { v1.11.27: render visible lines (VC already computed) }
+  { v1.11.31: render visible visual lines (wrap-aware) }
   for I := 0 to VC - 1 do
   begin
     LineIdx := ScrollTop + I;
-    if (LineIdx < 0) or (LineIdx >= Lines.Count) then Continue;
-    LineStr := Lines[LineIdx];
+    if (LineIdx < 0) or (LineIdx >= VisualLines.Count) then Continue;
+    LineStr := VisualLines[LineIdx];
     if LineStr <> '' then
     begin
       DrawY := Y + PadTop + I * LineHeight;
@@ -41413,6 +41508,47 @@ begin
     D.Free;
     raise;
   end;
+end;
+
+{ v1.11.31: gui2.memoSetWrap(id, enabled) -> bool }
+function Native_Gui2_MemoSetWrap(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget;
+begin
+  Result := TValue.CreateBool(False);
+  if Args.Count <> 2 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  if TValue(Args[1]).DataType <> dtBoolean then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  if not (W is TGuiMemo) then Exit;
+  TGuiMemo(W).WrapEnabled := TValue(Args[1]).BoolVal;
+  Result := TValue.CreateBool(True);
+end;
+
+{ v1.11.31: gui2.memoGetWrap(id) -> bool }
+function Native_Gui2_MemoGetWrap(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget;
+begin
+  Result := TValue.CreateBool(False);
+  if Args.Count <> 1 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  if not (W is TGuiMemo) then Exit;
+  Result := TValue.CreateBool(TGuiMemo(W).WrapEnabled);
+end;
+
+{ v1.11.31: gui2.memoGetVisualLineCount(id) -> num (debug) }
+function Native_Gui2_MemoGetVisualLineCount(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget;
+begin
+  Result := TValue.CreateNum(0);
+  if Args.Count <> 1 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  if not (W is TGuiMemo) then Exit;
+  Result := TValue.CreateNum(TGuiMemo(W).VisualLineCount);
 end;
 
 function Native_Gui2_Poll(Args: TObjectList; CallEnv: TSymbolTable): TValue;
@@ -43623,6 +43759,10 @@ begin
   { v1.11.30: memo spacing config }
   Gui2Inst.Members.DefineVar('memoSetSpacing', TValue.CreateNative(@Native_Gui2_MemoSetSpacing));
   Gui2Inst.Members.DefineVar('memoGetSpacing', TValue.CreateNative(@Native_Gui2_MemoGetSpacing));
+  { v1.11.31: memo word wrap }
+  Gui2Inst.Members.DefineVar('memoSetWrap', TValue.CreateNative(@Native_Gui2_MemoSetWrap));
+  Gui2Inst.Members.DefineVar('memoGetWrap', TValue.CreateNative(@Native_Gui2_MemoGetWrap));
+  Gui2Inst.Members.DefineVar('memoGetVisualLineCount', TValue.CreateNative(@Native_Gui2_MemoGetVisualLineCount));
   Gui2Inst.Members.DefineVar('isOpen', TValue.CreateNative(@Native_Gui2_IsOpen));
   Gui2Inst.Members.DefineVar('clear', TValue.CreateNative(@Native_Gui2_Clear));
   Gui2Inst.Members.DefineVar('present', TValue.CreateNative(@Native_Gui2_Present));
