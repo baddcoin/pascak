@@ -1,5 +1,51 @@
 # Changelog
 
+## [1.11.32] - 2026-11-07
+
+### Added (feature) -- GUI Widget Toolkit Phase 5c-2a (Line Numbers)
+- **Memo line numbers gutter** -- configurable via gui2.memoSetLineNumbers
+- **LineNumbersEnabled** flag (default False -- no behavior change)
+- **GutterWidth** field (default 50px)
+- Draw: dark gutter background + line numbers, text/cursor/selection
+  shifted right by GutterWidth
+- Click position adjusted (MX - (X + PadLeft + GutterWidth))
+- Wrap WAvail reduced by GutterWidth when line numbers ON
+
+### Behavior
+- Line numbers rendered only for FIRST visual line of each logical line
+  (wrap-aware -- when wrap ON, one number per logical block)
+- Numbers 1-indexed, color yellow-ish (180, 180, 100)
+- Gutter background dark (30, 30, 40)
+- Gutter auto-updates when lines added/removed (drawn each frame from current Lines.Count)
+- Click in text area positions cursor correctly (gutter excluded)
+
+### Implementation
+- TGuiMemo fields: LineNumbersEnabled, GutterWidth
+- Draw: gutter bg + number render + TextX offset for text/cursor/selection
+- RebuildVisualLines: WAvail -= GutterWidth when LineNumbersEnabled
+- HandleMouse: MX offset for text click when LineNumbersEnabled
+- Natives: gui2.memoSetLineNumbers(id, bool) / memoGetLineNumbers(id)
+
+### Verified (interactive X11 test)
+- Initial 5 lines: gutter 1-5 visible, text shifted right ~50px
+- After editing (3 new empty lines + text added):
+  - Gutter auto-updated to 1-9
+  - Numbers aligned with text rows
+  - Empty lines still get their number (4, 5, 8)
+  - Cursor in text area (not gutter)
+  - Click position accurate
+- Both natives exist, round-trip confirmed
+- Regression: 17/17 lang tests PASS
+
+### Deferred to Phase 5c-2b (optional)
+- Dynamic gutter width (based on digit count of last line)
+- Wrap-aware scrollbar count (currently uses logical count)
+
+### Next phase
+- Phase 5c-3b: cursor/selection remap in wrapped mode
+- Phase 6: ComboBox widget
+- Tutorial Bab 34: Memo section update
+
 ## [1.11.31] - 2026-11-07
 
 ### Added (feature) -- GUI Widget Toolkit Phase 5c-3a (Word Wrap Infrastructure)

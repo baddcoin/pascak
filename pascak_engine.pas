@@ -38227,6 +38227,9 @@ type
     VisualLines: TStringList;
     VisualToLogical: TList;      // visual index -> logical line index
     VisualStartCol: TList;       // visual index -> start byte col in logical
+    { v1.11.32: line numbers gutter }
+    LineNumbersEnabled: Boolean;
+    GutterWidth: Integer;
     constructor Create(AID: Integer; AOwner: Pointer;
       AX, AY, AW, AH: Integer; const AInitial: string;
       ABgR, ABgG, ABgB: UInt8);
@@ -39193,6 +39196,8 @@ begin
   VisualLines.SkipLastLineBreak := True;
   VisualToLogical := TList.Create;
   VisualStartCol := TList.Create;
+  LineNumbersEnabled := False;
+  GutterWidth := 50;
   ScrollBarWidth := 12;
   DraggingScroll := False;
   DragStartY := 0;
@@ -39610,7 +39615,10 @@ begin
   VisualLines.Clear;
   VisualToLogical.Clear;
   VisualStartCol.Clear;
+  { v1.11.32: subtract GutterWidth when line numbers ON }
   WAvail := W - PadLeft - ScrollBarWidth - 8;
+  if LineNumbersEnabled then
+    WAvail := WAvail - GutterWidth;
   if WAvail <= 0 then WAvail := 100;
   { if wrap disabled or font missing -- 1:1 mapping }
   if (not WrapEnabled) or (not Assigned(GGuiSDL))
@@ -39680,6 +39688,8 @@ var
   PW1, PW2: Int32;
   PH1, PH2: Int32;
   ThumbH, ThumbY: Integer;
+  TextX, LogIdx, PrevLogIdx: Integer;
+  NumStr: string;
 begin
   if not Visible then Exit;
   St := TGuiSDLState(GuiState);
@@ -39698,6 +39708,10 @@ begin
   end;
   { v1.11.31: rebuild visual lines cache (cheap if wrap disabled = 1:1) }
   RebuildVisualLines;
+  { v1.11.32: text X offset (shifts for gutter) }
+  TextX := X + PadLeft;
+  if LineNumbersEnabled then
+    TextX := TextX + GutterWidth;
   { v1.11.27: background }
   if Assigned(St.pSetRenderDrawColor) and Assigned(St.pRenderFillRect) then
   begin
@@ -39713,6 +39727,15 @@ begin
     RectArr[0] := X; RectArr[1] := Y;
     RectArr[2] := W; RectArr[3] := H;
     St.pRenderDrawRect(St.Renderer, @RectArr[0]);
+  end;
+  { v1.11.32: line numbers gutter background (rendered after border, before selection) }
+  if LineNumbersEnabled and Assigned(St.pSetRenderDrawColor)
+     and Assigned(St.pRenderFillRect) then
+  begin
+    St.pSetRenderDrawColor(St.Renderer, 30, 30, 40, 255);
+    RectArr[0] := X + 1; RectArr[1] := Y + 1;
+    RectArr[2] := GutterWidth; RectArr[3] := H - 2;
+    St.pRenderFillRect(St.Renderer, @RectArr[0]);
   end;
   { v1.11.28: compute VC once, before highlight and text render }
   VC := VisibleLineCount;
@@ -39741,7 +39764,7 @@ begin
       if EndCol > 0 then
         St.pTTF_SizeText(St.Font,
           PAnsiChar(AnsiString(Copy(LineStr, 1, EndCol))), @PW2, @PH2);
-      RectArr[0] := X + PadLeft + PW1;
+      RectArr[0] := TextX + PW1;
       { v1.11.30: highlight height = FontHeight, aligned with text }
       if FontHeight > 0 then
         RectArr[1] := DrawY + (LineHeight - FontHeight) div 2
@@ -39757,21 +39780,32 @@ begin
     end;
   end;
   { v1.11.31: render visible visual lines (wrap-aware) }
+  PrevLogIdx := -1;
   for I := 0 to VC - 1 do
   begin
     LineIdx := ScrollTop + I;
     if (LineIdx < 0) or (LineIdx >= VisualLines.Count) then Continue;
     LineStr := VisualLines[LineIdx];
-    if LineStr <> '' then
+    DrawY := Y + PadTop + I * LineHeight;
+    { v1.11.30: vertical center text in LineHeight band }
+    if FontHeight > 0 then
+      TextY := DrawY + (LineHeight - FontHeight) div 2
+    else
+      TextY := DrawY;
+    { v1.11.32: render line number (only for first visual line of each logical) }
+    if LineNumbersEnabled and Assigned(St.pTTF_SizeText)
+       and Assigned(St.Font) then
     begin
-      DrawY := Y + PadTop + I * LineHeight;
-      { v1.11.30: vertical center text in LineHeight band }
-      if FontHeight > 0 then
-        TextY := DrawY + (LineHeight - FontHeight) div 2
-      else
-        TextY := DrawY;
-      GuiDrawTextAt(St, X + PadLeft, TextY, LineStr, 255, 255, 255);
+      LogIdx := Integer(PtrInt(VisualToLogical[LineIdx]));
+      if LogIdx <> PrevLogIdx then
+      begin
+        NumStr := IntToStr(LogIdx + 1);
+        GuiDrawTextAt(St, X + 6, TextY, NumStr, 180, 180, 100);
+        PrevLogIdx := LogIdx;
+      end;
     end;
+    if LineStr <> '' then
+      GuiDrawTextAt(St, TextX, TextY, LineStr, 255, 255, 255);
   end;
   { v1.11.27: cursor at current line + col (only when focused) }
   if Focused and Assigned(St.pRenderFillRect) and Assigned(St.pTTF_SizeText)
@@ -39789,7 +39823,7 @@ begin
     if (DrawY >= Y + PadTop) and (DrawY < Y + H - PadBottom) then
     begin
       St.pSetRenderDrawColor(St.Renderer, 255, 255, 255, 255);
-      RectArr[0] := X + PadLeft + PrefixW;
+      RectArr[0] := TextX + PrefixW;
       { v1.11.30: cursor height = FontHeight, aligned to text center }
       if FontHeight > 0 then
       begin
@@ -39892,7 +39926,12 @@ begin
     if LineIdx >= Lines.Count then LineIdx := Lines.Count - 1;
     CursorLine := LineIdx;
     if Assigned(GGuiSDL) then
-      ColIdx := GuiMemoCursorColFromX(GGuiSDL, Lines[CursorLine], X + PadLeft, MX)
+    begin
+      if LineNumbersEnabled then
+        ColIdx := GuiMemoCursorColFromX(GGuiSDL, Lines[CursorLine], X + PadLeft + GutterWidth, MX)
+      else
+        ColIdx := GuiMemoCursorColFromX(GGuiSDL, Lines[CursorLine], X + PadLeft, MX);
+    end
     else
       ColIdx := 0;
     CursorCol := ColIdx;
@@ -41549,6 +41588,34 @@ begin
   if not Assigned(W) then Exit;
   if not (W is TGuiMemo) then Exit;
   Result := TValue.CreateNum(TGuiMemo(W).VisualLineCount);
+end;
+
+{ v1.11.32: gui2.memoSetLineNumbers(id, enabled) -> bool }
+function Native_Gui2_MemoSetLineNumbers(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget;
+begin
+  Result := TValue.CreateBool(False);
+  if Args.Count <> 2 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  if TValue(Args[1]).DataType <> dtBoolean then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  if not (W is TGuiMemo) then Exit;
+  TGuiMemo(W).LineNumbersEnabled := TValue(Args[1]).BoolVal;
+  Result := TValue.CreateBool(True);
+end;
+
+{ v1.11.32: gui2.memoGetLineNumbers(id) -> bool }
+function Native_Gui2_MemoGetLineNumbers(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget;
+begin
+  Result := TValue.CreateBool(False);
+  if Args.Count <> 1 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  if not (W is TGuiMemo) then Exit;
+  Result := TValue.CreateBool(TGuiMemo(W).LineNumbersEnabled);
 end;
 
 function Native_Gui2_Poll(Args: TObjectList; CallEnv: TSymbolTable): TValue;
@@ -43763,6 +43830,9 @@ begin
   Gui2Inst.Members.DefineVar('memoSetWrap', TValue.CreateNative(@Native_Gui2_MemoSetWrap));
   Gui2Inst.Members.DefineVar('memoGetWrap', TValue.CreateNative(@Native_Gui2_MemoGetWrap));
   Gui2Inst.Members.DefineVar('memoGetVisualLineCount', TValue.CreateNative(@Native_Gui2_MemoGetVisualLineCount));
+  { v1.11.32: memo line numbers }
+  Gui2Inst.Members.DefineVar('memoSetLineNumbers', TValue.CreateNative(@Native_Gui2_MemoSetLineNumbers));
+  Gui2Inst.Members.DefineVar('memoGetLineNumbers', TValue.CreateNative(@Native_Gui2_MemoGetLineNumbers));
   Gui2Inst.Members.DefineVar('isOpen', TValue.CreateNative(@Native_Gui2_IsOpen));
   Gui2Inst.Members.DefineVar('clear', TValue.CreateNative(@Native_Gui2_Clear));
   Gui2Inst.Members.DefineVar('present', TValue.CreateNative(@Native_Gui2_Present));
