@@ -38270,6 +38270,32 @@ type
     function SelectedText: string;
   end;
 
+  { v1.11.34: ListBox widget -- scrollable list with selection.
+    No popup layer (always visible). Uses scrollbar pattern from Memo. }
+  TGuiListBox = class(TGuiWidget)
+  public
+    Items: TStringList;
+    SelectedIdx: Integer;      // -1 = no selection
+    ScrollTop: Integer;        // first visible item index
+    HoveredItemIdx: Integer;
+    BgR, BgG, BgB: UInt8;
+    ItemHeight: Integer;
+    ScrollBarWidth: Integer;
+    DraggingScroll: Boolean;
+    DragStartY: Integer;
+    DragStartTop: Integer;
+    constructor Create(AID: Integer; AOwner: Pointer;
+      AX, AY, AW, AH: Integer; const AInitial: string;
+      ABgR, ABgG, ABgB: UInt8);
+    destructor Destroy; override;
+    procedure Draw(GuiState: Pointer); override;
+    function HandleMouse(MX, MY, Btn: Integer; Down: Boolean): Boolean; override;
+    function HandleKey(const Key: string; Down: Boolean): Boolean; override;
+    function VisibleItemCount: Integer;
+    procedure EnsureSelectedVisible;
+    function SelectedText: string;
+  end;
+
   TGuiSDLWindow = class
   public
     Window: Pointer;
@@ -40275,6 +40301,326 @@ begin
             (MY >= PopY) and (MY < PopY + PopH);
 end;
 
+{ v1.11.34: ListBox widget implementation }
+constructor TGuiListBox.Create(AID: Integer; AOwner: Pointer;
+  AX, AY, AW, AH: Integer; const AInitial: string;
+  ABgR, ABgG, ABgB: UInt8);
+begin
+  inherited Create(AID, AOwner);
+  X := AX; Y := AY; W := AW; H := AH;
+  Items := TStringList.Create;
+  Items.SkipLastLineBreak := True;
+  SelectedIdx := -1;
+  ScrollTop := 0;
+  HoveredItemIdx := -1;
+  BgR := ABgR; BgG := ABgG; BgB := ABgB;
+  ItemHeight := 28;
+  ScrollBarWidth := 12;
+  DraggingScroll := False;
+  DragStartY := 0;
+  DragStartTop := 0;
+  Focusable := True;
+  if AInitial <> '' then
+  begin
+    Items.Add(AInitial);
+    SelectedIdx := 0;
+  end;
+end;
+
+destructor TGuiListBox.Destroy;
+begin
+  if Assigned(Items) then Items.Free;
+  inherited;
+end;
+
+function TGuiListBox.SelectedText: string;
+begin
+  if (SelectedIdx >= 0) and (SelectedIdx < Items.Count) then
+    Result := Items[SelectedIdx]
+  else
+    Result := '';
+end;
+
+function TGuiListBox.VisibleItemCount: Integer;
+begin
+  Result := (H - 8) div ItemHeight;
+  if Result < 1 then Result := 1;
+end;
+
+procedure TGuiListBox.EnsureSelectedVisible;
+var
+  VC: Integer;
+begin
+  if SelectedIdx < 0 then Exit;
+  VC := VisibleItemCount;
+  if SelectedIdx < ScrollTop then
+    ScrollTop := SelectedIdx
+  else if SelectedIdx >= ScrollTop + VC then
+    ScrollTop := SelectedIdx - VC + 1;
+  if ScrollTop < 0 then ScrollTop := 0;
+  if ScrollTop > Items.Count - VC then
+    ScrollTop := Items.Count - VC;
+  if ScrollTop < 0 then ScrollTop := 0;
+end;
+
+procedure TGuiListBox.Draw(GuiState: Pointer);
+var
+  St: TGuiSDLState;
+  RectArr: array[0..3] of Int32;
+  VC, I, ItemIdx, ItemY, ThumbH, ThumbY: Integer;
+  ItemStr: string;
+  CR, CG, CB: UInt8;
+begin
+  if not Visible then Exit;
+  St := TGuiSDLState(GuiState);
+  if not Assigned(St) then Exit;
+  if not Assigned(St.Renderer) then Exit;
+  { background }
+  if Assigned(St.pSetRenderDrawColor) and Assigned(St.pRenderFillRect) then
+  begin
+    St.pSetRenderDrawColor(St.Renderer, BgR, BgG, BgB, 255);
+    RectArr[0] := X; RectArr[1] := Y;
+    RectArr[2] := W; RectArr[3] := H;
+    St.pRenderFillRect(St.Renderer, @RectArr[0]);
+  end;
+  { border (yellow when focused) }
+  if Assigned(St.pRenderDrawRect) then
+  begin
+    if Focused then
+      St.pSetRenderDrawColor(St.Renderer, 255, 200, 50, 255)
+    else
+      St.pSetRenderDrawColor(St.Renderer, 100, 100, 100, 255);
+    RectArr[0] := X; RectArr[1] := Y;
+    RectArr[2] := W; RectArr[3] := H;
+    St.pRenderDrawRect(St.Renderer, @RectArr[0]);
+  end;
+  { items }
+  VC := VisibleItemCount;
+  for I := 0 to VC - 1 do
+  begin
+    ItemIdx := ScrollTop + I;
+    if (ItemIdx < 0) or (ItemIdx >= Items.Count) then Continue;
+    ItemY := Y + 4 + I * ItemHeight;
+    { selected highlight }
+    if ItemIdx = SelectedIdx then
+    begin
+      if Assigned(St.pSetRenderDrawColor) and Assigned(St.pRenderFillRect) then
+      begin
+        St.pSetRenderDrawColor(St.Renderer, 70, 110, 180, 255);
+        RectArr[0] := X + 1; RectArr[1] := ItemY;
+        RectArr[2] := W - ScrollBarWidth - 2; RectArr[3] := ItemHeight;
+        St.pRenderFillRect(St.Renderer, @RectArr[0]);
+      end;
+      CR := 255; CG := 255; CB := 100;
+    end
+    { hover highlight }
+    else if ItemIdx = HoveredItemIdx then
+    begin
+      if Assigned(St.pSetRenderDrawColor) and Assigned(St.pRenderFillRect) then
+      begin
+        St.pSetRenderDrawColor(St.Renderer, 60, 60, 90, 255);
+        RectArr[0] := X + 1; RectArr[1] := ItemY;
+        RectArr[2] := W - ScrollBarWidth - 2; RectArr[3] := ItemHeight;
+        St.pRenderFillRect(St.Renderer, @RectArr[0]);
+      end;
+      CR := 230; CG := 230; CB := 230;
+    end
+    else
+    begin
+      CR := 220; CG := 220; CB := 220;
+    end;
+    ItemStr := Items[ItemIdx];
+    GuiDrawTextAt(St, X + 8, ItemY + (ItemHeight - 16) div 2,
+      ItemStr, CR, CG, CB);
+  end;
+  { scrollbar (only if overflow) }
+  if (Items.Count > VC) and Assigned(St.pRenderFillRect)
+     and Assigned(St.pSetRenderDrawColor) then
+  begin
+    St.pSetRenderDrawColor(St.Renderer, 60, 60, 60, 255);
+    RectArr[0] := X + W - ScrollBarWidth; RectArr[1] := Y;
+    RectArr[2] := ScrollBarWidth; RectArr[3] := H;
+    St.pRenderFillRect(St.Renderer, @RectArr[0]);
+    ThumbH := (H * VC) div Items.Count;
+    if ThumbH < 20 then ThumbH := 20;
+    if ThumbH > H then ThumbH := H;
+    if Items.Count > VC then
+      ThumbY := (H - ThumbH) * ScrollTop div (Items.Count - VC)
+    else
+      ThumbY := 0;
+    St.pSetRenderDrawColor(St.Renderer, 150, 150, 150, 255);
+    RectArr[0] := X + W - ScrollBarWidth + 2; RectArr[1] := Y + ThumbY;
+    RectArr[2] := ScrollBarWidth - 4; RectArr[3] := ThumbH;
+    St.pRenderFillRect(St.Renderer, @RectArr[0]);
+  end;
+end;
+
+function TGuiListBox.HandleMouse(MX, MY, Btn: Integer; Down: Boolean): Boolean;
+var
+  VC, ItemIdx, NewTop, DeltaY: Integer;
+begin
+  Result := False;
+  if not Visible or not Enabled then Exit;
+  { scrollbar drag continues on mousemove (Btn=0) }
+  if DraggingScroll then
+  begin
+    if not Down then
+    begin
+      DraggingScroll := False;
+      Result := True;
+      Exit;
+    end;
+    if Btn = 0 then
+    begin
+      DeltaY := MY - DragStartY;
+      VC := VisibleItemCount;
+      if Items.Count > VC then
+      begin
+        NewTop := DragStartTop + (DeltaY * Items.Count) div H;
+        if NewTop < 0 then NewTop := 0;
+        if NewTop > Items.Count - VC then NewTop := Items.Count - VC;
+        if NewTop < 0 then NewTop := 0;
+        ScrollTop := NewTop;
+      end;
+      Result := True;
+      Exit;
+    end;
+  end;
+  { mousemove (no button) -- update hover }
+  if Btn = 0 then
+  begin
+    VC := VisibleItemCount;
+    if (MX >= X) and (MX < X + W - ScrollBarWidth) and
+       (MY >= Y + 4) and (MY < Y + 4 + VC * ItemHeight) then
+    begin
+      ItemIdx := ScrollTop + (MY - Y - 4) div ItemHeight;
+      if (ItemIdx >= 0) and (ItemIdx < Items.Count) then
+        HoveredItemIdx := ItemIdx
+      else
+        HoveredItemIdx := -1;
+    end
+    else
+      HoveredItemIdx := -1;
+    Exit;
+  end;
+  if Btn <> 1 then Exit;
+  if (MX < X) or (MX >= X + W) or (MY < Y) or (MY >= Y + H) then Exit;
+  { scrollbar area }
+  if MX >= X + W - ScrollBarWidth then
+  begin
+    if Down then
+    begin
+      VC := VisibleItemCount;
+      if Items.Count > VC then
+      begin
+        NewTop := ((MY - Y) * Items.Count) div H;
+        if NewTop < 0 then NewTop := 0;
+        if NewTop > Items.Count - VC then NewTop := Items.Count - VC;
+        if NewTop < 0 then NewTop := 0;
+        ScrollTop := NewTop;
+        DragStartY := MY;
+        DragStartTop := ScrollTop;
+        DraggingScroll := True;
+      end;
+    end;
+    Result := True;
+    Exit;
+  end;
+  { item click (mousedown) }
+  if Down then
+  begin
+    VC := VisibleItemCount;
+    ItemIdx := ScrollTop + (MY - Y - 4) div ItemHeight;
+    if (ItemIdx >= 0) and (ItemIdx < Items.Count) and
+       (MY >= Y + 4) and (MY < Y + 4 + VC * ItemHeight) then
+    begin
+      SelectedIdx := ItemIdx;
+      HoveredItemIdx := ItemIdx;
+    end;
+    Result := True;
+    Exit;
+  end
+  else
+    Result := True;
+end;
+
+function TGuiListBox.HandleKey(const Key: string; Down: Boolean): Boolean;
+var
+  VC: Integer;
+begin
+  Result := False;
+  if not Visible or not Enabled then Exit;
+  if not Down then Exit;
+  if Items.Count = 0 then Exit;
+  VC := VisibleItemCount;
+  { ENTER/SPACE -- activate selected (already selected) }
+  if (Key = 'ENTER') or (Key = 'SPACE') then
+  begin
+    if SelectedIdx < 0 then
+      SelectedIdx := 0;
+    Result := True;
+    Exit;
+  end;
+  { UP -- prev item }
+  if Key = 'UP' then
+  begin
+    if SelectedIdx > 0 then
+      Dec(SelectedIdx)
+    else if SelectedIdx < 0 then
+      SelectedIdx := 0;
+    EnsureSelectedVisible;
+    Result := True;
+    Exit;
+  end;
+  { DOWN -- next item }
+  if Key = 'DOWN' then
+  begin
+    if SelectedIdx < Items.Count - 1 then
+      Inc(SelectedIdx)
+    else if SelectedIdx < 0 then
+      SelectedIdx := 0;
+    EnsureSelectedVisible;
+    Result := True;
+    Exit;
+  end;
+  { PAGEUP -- jump VC up }
+  if Key = 'PAGEUP' then
+  begin
+    if SelectedIdx < 0 then SelectedIdx := 0;
+    Dec(SelectedIdx, VC);
+    if SelectedIdx < 0 then SelectedIdx := 0;
+    EnsureSelectedVisible;
+    Result := True;
+    Exit;
+  end;
+  { PAGEDOWN -- jump VC down }
+  if Key = 'PAGEDOWN' then
+  begin
+    if SelectedIdx < 0 then SelectedIdx := 0;
+    Inc(SelectedIdx, VC);
+    if SelectedIdx >= Items.Count then SelectedIdx := Items.Count - 1;
+    EnsureSelectedVisible;
+    Result := True;
+    Exit;
+  end;
+  { HOME -- first item }
+  if Key = 'HOME' then
+  begin
+    SelectedIdx := 0;
+    EnsureSelectedVisible;
+    Result := True;
+    Exit;
+  end;
+  { END -- last item }
+  if Key = 'END' then
+  begin
+    SelectedIdx := Items.Count - 1;
+    EnsureSelectedVisible;
+    Result := True;
+    Exit;
+  end;
+end;
+
 constructor TGuiSDLState.Create;
 begin
   inherited;
@@ -42123,6 +42469,125 @@ begin
   if not Assigned(W) then Exit;
   if not (W is TGuiComboBox) then Exit;
   Result := TValue.CreateBool(TGuiComboBox(W).DropdownOpen);
+end;
+
+{ v1.11.34: gui2.listbox(x, y, w, h, [initial], [r], [g], [b]) -> id }
+function Native_Gui2_ListBox(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  W: TGuiSDLWindow;
+  Widget: TGuiListBox;
+  X, Y, WW, HH, ID: Integer;
+  R, G, B: Integer;
+  Initial: string;
+begin
+  Result := TValue.CreateNum(0);
+  if (Args.Count < 4) or (Args.Count > 8) then Exit;
+  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Windows)) then Exit;
+  X := Trunc(TValue(Args[0]).NumVal);
+  Y := Trunc(TValue(Args[1]).NumVal);
+  WW := Trunc(TValue(Args[2]).NumVal);
+  HH := Trunc(TValue(Args[3]).NumVal);
+  Initial := '';
+  if (Args.Count >= 5) and (TValue(Args[4]).DataType = dtString) then
+    Initial := TValue(Args[4]).StrVal;
+  R := 40; G := 40; B := 60;
+  if (Args.Count >= 6) and (TValue(Args[5]).DataType = dtNumeric) then R := Trunc(TValue(Args[5]).NumVal);
+  if (Args.Count >= 7) and (TValue(Args[6]).DataType = dtNumeric) then G := Trunc(TValue(Args[6]).NumVal);
+  if (Args.Count >= 8) and (TValue(Args[7]).DataType = dtNumeric) then B := Trunc(TValue(Args[7]).NumVal);
+  W := GuiCurrentWindow;
+  if not Assigned(W) or not Assigned(W.Widgets) then Exit;
+  ID := GGuiSDL.NextWidgetID;
+  Inc(GGuiSDL.NextWidgetID);
+  Widget := TGuiListBox.Create(ID, W, X, Y, WW, HH, Initial, UInt8(R), UInt8(G), UInt8(B));
+  W.Widgets.Add(Widget);
+  Result := TValue.CreateNum(ID);
+end;
+
+{ v1.11.34: gui2.listSetItems(id, arr) -> bool }
+function Native_Gui2_ListSetItems(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget; I: Integer;
+begin
+  Result := TValue.CreateBool(False);
+  if Args.Count <> 2 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  if TValue(Args[1]).DataType <> dtArray then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  if not (W is TGuiListBox) then Exit;
+  TGuiListBox(W).Items.Clear;
+  for I := 0 to TValue(Args[1]).ArrayVal.Count - 1 do
+    if Assigned(TValue(Args[1]).ArrayVal[I]) and
+       (TValue(Args[1]).ArrayVal[I].DataType = dtString) then
+      TGuiListBox(W).Items.Add(TValue(Args[1]).ArrayVal[I].StrVal);
+  if TGuiListBox(W).SelectedIdx >= TGuiListBox(W).Items.Count then
+    TGuiListBox(W).SelectedIdx := TGuiListBox(W).Items.Count - 1;
+  Result := TValue.CreateBool(True);
+end;
+
+{ v1.11.34: gui2.listGetItems(id) -> arr }
+function Native_Gui2_ListGetItems(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget; L: TValueList; I: Integer;
+begin
+  Result := TValue.CreateNull;
+  if Args.Count <> 1 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  if not (W is TGuiListBox) then Exit;
+  L := TValueList.Create(True);
+  try
+    for I := 0 to TGuiListBox(W).Items.Count - 1 do
+      L.Add(TValue.CreateStr(TGuiListBox(W).Items[I]));
+    Result := TValue.CreateArray(L);
+  except
+    L.Free;
+    raise;
+  end;
+end;
+
+{ v1.11.34: gui2.listGetSelected(id) -> num (-1 if none) }
+function Native_Gui2_ListGetSelected(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget;
+begin
+  Result := TValue.CreateNum(-1);
+  if Args.Count <> 1 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  if not (W is TGuiListBox) then Exit;
+  Result := TValue.CreateNum(TGuiListBox(W).SelectedIdx);
+end;
+
+{ v1.11.34: gui2.listSetSelected(id, n) -> bool }
+function Native_Gui2_ListSetSelected(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget; N: Integer;
+begin
+  Result := TValue.CreateBool(False);
+  if Args.Count <> 2 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  if TValue(Args[1]).DataType <> dtNumeric then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  if not (W is TGuiListBox) then Exit;
+  N := Trunc(TValue(Args[1]).NumVal);
+  if N < -1 then N := -1;
+  if N >= TGuiListBox(W).Items.Count then N := TGuiListBox(W).Items.Count - 1;
+  TGuiListBox(W).SelectedIdx := N;
+  TGuiListBox(W).EnsureSelectedVisible;
+  Result := TValue.CreateBool(True);
+end;
+
+{ v1.11.34: gui2.listGetSelectedText(id) -> str }
+function Native_Gui2_ListGetSelectedText(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget;
+begin
+  Result := TValue.CreateStr('');
+  if Args.Count <> 1 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  if not (W is TGuiListBox) then Exit;
+  Result := TValue.CreateStr(TGuiListBox(W).SelectedText);
 end;
 
 function Native_Gui2_Poll(Args: TObjectList; CallEnv: TSymbolTable): TValue;
@@ -44348,6 +44813,13 @@ begin
   Gui2Inst.Members.DefineVar('comboSetSelected', TValue.CreateNative(@Native_Gui2_ComboSetSelected));
   Gui2Inst.Members.DefineVar('comboGetSelectedText', TValue.CreateNative(@Native_Gui2_ComboGetSelectedText));
   Gui2Inst.Members.DefineVar('comboIsOpen', TValue.CreateNative(@Native_Gui2_ComboIsOpen));
+  { v1.11.34: ListBox widget }
+  Gui2Inst.Members.DefineVar('listbox', TValue.CreateNative(@Native_Gui2_ListBox));
+  Gui2Inst.Members.DefineVar('listSetItems', TValue.CreateNative(@Native_Gui2_ListSetItems));
+  Gui2Inst.Members.DefineVar('listGetItems', TValue.CreateNative(@Native_Gui2_ListGetItems));
+  Gui2Inst.Members.DefineVar('listGetSelected', TValue.CreateNative(@Native_Gui2_ListGetSelected));
+  Gui2Inst.Members.DefineVar('listSetSelected', TValue.CreateNative(@Native_Gui2_ListSetSelected));
+  Gui2Inst.Members.DefineVar('listGetSelectedText', TValue.CreateNative(@Native_Gui2_ListGetSelectedText));
   Gui2Inst.Members.DefineVar('isOpen', TValue.CreateNative(@Native_Gui2_IsOpen));
   Gui2Inst.Members.DefineVar('clear', TValue.CreateNative(@Native_Gui2_Clear));
   Gui2Inst.Members.DefineVar('present', TValue.CreateNative(@Native_Gui2_Present));

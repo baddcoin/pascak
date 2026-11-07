@@ -17,6 +17,39 @@ Setiap phase selesai:
 
 ---
 
+## [1.11.34] - 2026-11-08
+
+### Added (feature) -- GUI Widget Toolkit Phase 6b (ListBox)
+- TGuiListBox widget -- scrollable list with selection
+- Items, SelectedIdx, ScrollTop, HoveredItemIdx
+- Scrollbar (proportional thumb, drag) -- reuse Memo pattern
+- Click item select, hover highlight (mousemove)
+- Click scrollbar track jump, drag thumb scroll
+- Keyboard: UP/DOWN, PageUp/PageDown, HOME/END, ENTER/SPACE
+- Auto-scroll EnsureSelectedVisible
+- Focus indicator (yellow border), selected blue + yellow, hover light blue
+
+### Natives (6)
+- gui2.listbox(x, y, w, h, [initial], [r], [g], [b]) -> id
+- gui2.listSetItems(id, arr) -> bool
+- gui2.listGetItems(id) -> arr
+- gui2.listGetSelected(id) -> num (-1 if none)
+- gui2.listSetSelected(id, n) -> bool
+- gui2.listGetSelectedText(id) -> str
+
+### Verified (interactive X11 test)
+- 26 items, initial Item 01
+- 14 selection changes in 60s (click + UP/DOWN + PgUp/PgDn)
+- Final: Item 06, index 5
+- Screenshot: selected highlight blue, hover visible, scrollbar proportional
+- No crash, clean exit
+- Regression: 17/17 lang tests PASS
+
+### Next phase
+- Phase 6c: Checkbox + Radio
+- Phase 6d: Layout API
+- Or: user feedback cycle (STRONGEST)
+
 ## [1.11.33] - 2026-11-07
 
 ### Added (feature) -- GUI Widget Toolkit Phase 6a (ComboBox)
