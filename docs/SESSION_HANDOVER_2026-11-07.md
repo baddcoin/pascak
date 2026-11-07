@@ -1,9 +1,9 @@
 📋 Handover Document — Pascak Development Context
 
 Generated: 2026-11-07
-Main HEAD: c6c1e27 (v1.11.32)
-Tags: 89 total (v0.4.0 → v1.11.32)
-Engine: 50,620 lines
+Main HEAD: 743b765 (v1.11.33)
+Tags: 90 total (v0.4.0 → v1.11.33)
+Engine: 51,135 lines
 Tests: 17/17 PASS
 Tree: clean
 
@@ -160,7 +160,7 @@ Termux:X11 mode: harus "touchscreen" (bukan "touchpad" default). Swipe keyboard 
 
 ## 3️⃣ YANG SUDAH SELESAI
 
-34 Main Tags (v1.11.0 → v1.11.32)
+35 Main Tags (v1.11.0 → v1.11.33)
 
 Language & Core (v1.11.0–v1.11.13):
 
@@ -178,7 +178,7 @@ GUI Features (v1.11.0–v1.11.13):
 · ETag + 304 caching
 · Last-Modified + If-Modified-Since
 
-GUI Widget Toolkit (v1.11.14 → v1.11.32):
+GUI Widget Toolkit (v1.11.14 → v1.11.33):
 
 Phase Tag Deliverable
 1 v1.11.14 SDL_TEXTINPUT + keyDown + textInputEnabled
@@ -200,6 +200,7 @@ Phase Tag Deliverable
 — v1.11.30 VSYNC hang fix + cursor symmetry + memo spacing
 5c-3a v1.11.31 Word wrap infrastructure (default OFF)
 5c-2a v1.11.32 Line numbers gutter
+6a v1.11.33 ComboBox dropdown (popup layer)
 
 Widget API Lengkap (Final State)
 
@@ -248,7 +249,7 @@ gui2.widgetGetClicks(id), widgetGetKeyCount(id)
 Documentation
 
 · Tutorial Bab 1–34 (~5,700 lines) — Bab 34 = GUI Widgets
-· CHANGELOG — 34 entries (v1.11.0 → v1.11.32)
+· CHANGELOG — 35 entries (v1.11.0 → v1.11.33)
 · Design docs di feat/gui-widgets branch (v1.13.0-plan)
 · Register VM design di feat/register-vm branch (v1.12.0-plan)
 
@@ -267,7 +268,6 @@ Tutorial Bab 34 Memo section update ~1 jam Docs sync
 New Widgets (Phase 6+)
 
 Widget Effort
-ComboBox (dropdown popup) ~2 sesi
 ListBox (scrollable list) ~1-2 sesi
 Checkbox / Radio ~1 sesi
 Reusable Scrollbar (standalone) ~1 sesi
@@ -406,7 +406,7 @@ docs/register_vm/ Register VM plan (feat/register-vm)
 tests/lang/ 17 language tests
 tests/fixtures/mock_server.py H2 test mock
 
-Key Line References (v1.11.32 approx)
+Key Line References (v1.11.33 approx)
 
 · TGuiWidget base class: ~38,200
 · TGuiButton: ~38,250
@@ -435,7 +435,7 @@ bash tests/run.sh lang 2>&1 | tail -3
 
 Trigger phrase untuk chat baru:
 
-"Lanjutkan Pascak development. HEAD = c6c1e27 (v1.11.32), 89 tags. Baca handover ini. [pilih path: user feedback / Phase 6 / docs / dll]"
+"Lanjutkan Pascak development. HEAD = 743b765 (v1.11.33), 90 tags. Baca handover ini. [pilih path: user feedback / Phase 6b / docs / dll]"
 
 AI assistant checklist:
 
@@ -487,7 +487,7 @@ Next Technical Options
 Final State for Next Session
 
 ```
-Main:      c6c1e27 (v1.11.32)
+Main:      743b765 (v1.11.33)
 Tags:      89 total
 Engine:    50,620 lines
 Tests:     17/17 PASS
