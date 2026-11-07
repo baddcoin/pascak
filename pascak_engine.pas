@@ -38186,6 +38186,7 @@ type
     CursorPos: Integer;      // byte index (0..Length)
     SelAnchor: Integer;      // v1.11.25: selection anchor (-1 = none)
     BgR, BgG, BgB: UInt8;    // background color
+    FontHeight: Integer;     // v1.11.30: measured glyph height
     constructor Create(AID: Integer; AOwner: Pointer;
       AX, AY, AW: Integer; const AInitial: string;
       ABgR, ABgG, ABgB: UInt8);
@@ -38206,7 +38207,13 @@ type
     CursorCol: Integer;     // byte offset within Lines[CursorLine]
     ScrollTop: Integer;     // first visible line index
     BgR, BgG, BgB: UInt8;
-    LineHeight: Integer;    // pixels per line (measured from font)
+    LineHeight: Integer;    // pixels per line (FontHeight + LineSpacing)
+    FontHeight: Integer;    // v1.11.30: measured glyph height
+    { v1.11.30: spacing configurable }
+    LineSpacing: Integer;   // extra space between lines (default 4)
+    PadTop: Integer;        // space above first line (default 4)
+    PadBottom: Integer;     // space below last line (default 4)
+    PadLeft: Integer;       // space at left edge (default 4)
     { v1.11.28: selection anchor (line, col) -- -1 = no selection }
     SelAnchorLine: Integer;
     SelAnchorCol: Integer;
@@ -38781,6 +38788,7 @@ begin
   SelAnchor := -1;
   BgR := ABgR; BgG := ABgG; BgB := ABgB;
   Focusable := True;
+  FontHeight := 0;
 end;
 
 procedure TGuiEdit.Draw(GuiState: Pointer);
@@ -38790,11 +38798,19 @@ var
   PrefixW, PrefixH: Int32;
   SelS, SelE, WStart, WEnd: Integer;
   WW, HH: Int32;
+  TextY: Integer;
 begin
   if not Visible then Exit;
   St := TGuiSDLState(GuiState);
   if not Assigned(St) then Exit;
   if not Assigned(St.Renderer) then Exit;
+  { v1.11.30: measure font height once for cursor + text alignment }
+  if (FontHeight <= 0) and Assigned(St.pTTF_SizeText) and Assigned(St.Font) then
+  begin
+    WW := 0; HH := 0;
+    St.pTTF_SizeText(St.Font, 'Ag', @WW, @HH);
+    if HH > 0 then FontHeight := HH;
+  end;
   { v1.11.21: background }
   if Assigned(St.pSetRenderDrawColor) and Assigned(St.pRenderFillRect) then
   begin
@@ -38831,9 +38847,18 @@ begin
     if RectArr[2] > 0 then
       St.pRenderFillRect(St.Renderer, @RectArr[0]);
   end;
-  { v1.11.21: text }
+  { v1.11.30: text -- vertical center using measured glyph height }
   if EditText <> '' then
-    GuiDrawTextAt(St, X + 4, Y + 6, EditText, 255, 255, 255);
+  begin
+    if FontHeight > 0 then
+    begin
+      TextY := Y + (H - FontHeight) div 2;
+      if TextY < Y then TextY := Y;
+    end
+    else
+      TextY := Y + 6;
+    GuiDrawTextAt(St, X + 4, TextY, EditText, 255, 255, 255);
+  end;
   { v1.11.24: cursor visible only when focused }
   if Focused and Assigned(St.pRenderFillRect) and Assigned(St.pTTF_SizeText)
      and Assigned(St.Font) then
@@ -38844,8 +38869,23 @@ begin
         PAnsiChar(AnsiString(Copy(EditText, 1, CursorPos))),
         @PrefixW, @PrefixH);
     St.pSetRenderDrawColor(St.Renderer, 255, 255, 255, 255);
-    RectArr[0] := X + 4 + PrefixW; RectArr[1] := Y + 4;
-    RectArr[2] := 2; RectArr[3] := H - 8;
+    RectArr[0] := X + 4 + PrefixW;
+    if FontHeight > 0 then
+    begin
+      RectArr[1] := Y + (H - FontHeight) div 2;
+      if RectArr[1] < Y then RectArr[1] := Y;
+      RectArr[2] := 2;
+      RectArr[3] := FontHeight;
+      if RectArr[1] + RectArr[3] > Y + H then
+        RectArr[3] := Y + H - RectArr[1];
+      if RectArr[3] < 1 then RectArr[3] := 1;
+    end
+    else
+    begin
+      RectArr[1] := Y + 4;
+      RectArr[2] := 2;
+      RectArr[3] := H - 8;
+    end;
     St.pRenderFillRect(St.Renderer, @RectArr[0]);
   end;
 end;
@@ -39133,6 +39173,11 @@ begin
   ScrollTop := 0;
   BgR := ABgR; BgG := ABgG; BgB := ABgB;
   LineHeight := 20;
+  FontHeight := 0;
+  LineSpacing := 4;
+  PadTop := 4;
+  PadBottom := 4;
+  PadLeft := 4;
   Focusable := True;
   SelAnchorLine := -1;
   SelAnchorCol := -1;
@@ -39187,7 +39232,8 @@ end;
 function TGuiMemo.VisibleLineCount: Integer;
 begin
   if LineHeight <= 0 then Exit(1);
-  Result := (H - 8) div LineHeight;
+  { v1.11.30: use PadTop + PadBottom instead of hardcoded 8 }
+  Result := (H - PadTop - PadBottom) div LineHeight;
   if Result < 1 then Result := 1;
 end;
 
@@ -39534,7 +39580,7 @@ procedure TGuiMemo.Draw(GuiState: Pointer);
 var
   St: TGuiSDLState;
   RectArr: array[0..3] of Int32;
-  VC, I, LineIdx, DrawY: Integer;
+  VC, I, LineIdx, DrawY, TextY: Integer;
   LineStr: string;
   PrefixW, PrefixH: Int32;
   SelS, SelE, SelSC, SelEC, StartCol, EndCol: Integer;
@@ -39546,6 +39592,17 @@ begin
   St := TGuiSDLState(GuiState);
   if not Assigned(St) then Exit;
   if not Assigned(St.Renderer) then Exit;
+  { v1.11.30: measure FontHeight + recompute LineHeight once }
+  if (FontHeight <= 0) and Assigned(St.pTTF_SizeText) and Assigned(St.Font) then
+  begin
+    PH1 := 0; PW1 := 0;
+    St.pTTF_SizeText(St.Font, 'Ag', @PW1, @PH1);
+    if PH1 > 0 then
+    begin
+      FontHeight := PH1;
+      LineHeight := FontHeight + LineSpacing;
+    end;
+  end;
   { v1.11.27: background }
   if Assigned(St.pSetRenderDrawColor) and Assigned(St.pRenderFillRect) then
   begin
@@ -39576,7 +39633,7 @@ begin
       if (LineIdx < 0) or (LineIdx >= Lines.Count) then Continue;
       if (LineIdx < SelS) or (LineIdx > SelE) then Continue;
       LineStr := Lines[LineIdx];
-      DrawY := Y + 4 + I * LineHeight;
+      DrawY := Y + PadTop + I * LineHeight;
       StartCol := 0;
       EndCol := Length(LineStr);
       if LineIdx = SelS then StartCol := SelSC;
@@ -39589,10 +39646,17 @@ begin
       if EndCol > 0 then
         St.pTTF_SizeText(St.Font,
           PAnsiChar(AnsiString(Copy(LineStr, 1, EndCol))), @PW2, @PH2);
-      RectArr[0] := X + 4 + PW1;
-      RectArr[1] := DrawY;
+      RectArr[0] := X + PadLeft + PW1;
+      { v1.11.30: highlight height = FontHeight, aligned with text }
+      if FontHeight > 0 then
+        RectArr[1] := DrawY + (LineHeight - FontHeight) div 2
+      else
+        RectArr[1] := DrawY;
       RectArr[2] := PW2 - PW1;
-      RectArr[3] := LineHeight - 4;
+      if FontHeight > 0 then
+        RectArr[3] := FontHeight
+      else
+        RectArr[3] := LineHeight - 4;
       if RectArr[2] > 0 then
         St.pRenderFillRect(St.Renderer, @RectArr[0]);
     end;
@@ -39605,8 +39669,13 @@ begin
     LineStr := Lines[LineIdx];
     if LineStr <> '' then
     begin
-      DrawY := Y + 4 + I * LineHeight;
-      GuiDrawTextAt(St, X + 4, DrawY, LineStr, 255, 255, 255);
+      DrawY := Y + PadTop + I * LineHeight;
+      { v1.11.30: vertical center text in LineHeight band }
+      if FontHeight > 0 then
+        TextY := DrawY + (LineHeight - FontHeight) div 2
+      else
+        TextY := DrawY;
+      GuiDrawTextAt(St, X + PadLeft, TextY, LineStr, 255, 255, 255);
     end;
   end;
   { v1.11.27: cursor at current line + col (only when focused) }
@@ -39621,12 +39690,24 @@ begin
       St.pTTF_SizeText(St.Font,
         PAnsiChar(AnsiString(Copy(LineStr, 1, CursorCol))),
         @PrefixW, @PrefixH);
-    DrawY := Y + 4 + (CursorLine - ScrollTop) * LineHeight;
-    if (DrawY >= Y + 4) and (DrawY < Y + H - 4) then
+    DrawY := Y + PadTop + (CursorLine - ScrollTop) * LineHeight;
+    if (DrawY >= Y + PadTop) and (DrawY < Y + H - PadBottom) then
     begin
       St.pSetRenderDrawColor(St.Renderer, 255, 255, 255, 255);
-      RectArr[0] := X + 4 + PrefixW; RectArr[1] := DrawY;
-      RectArr[2] := 2; RectArr[3] := LineHeight - 4;
+      RectArr[0] := X + PadLeft + PrefixW;
+      { v1.11.30: cursor height = FontHeight, aligned to text center }
+      if FontHeight > 0 then
+      begin
+        RectArr[1] := DrawY + (LineHeight - FontHeight) div 2;
+        RectArr[2] := 2;
+        RectArr[3] := FontHeight;
+      end
+      else
+      begin
+        RectArr[1] := DrawY;
+        RectArr[2] := 2;
+        RectArr[3] := LineHeight - 4;
+      end;
       St.pRenderFillRect(St.Renderer, @RectArr[0]);
     end;
   end;
@@ -39711,12 +39792,12 @@ begin
   if Down then
   begin
     if LineHeight <= 0 then LineHeight := 20;
-    LineIdx := ScrollTop + (MY - Y - 4) div LineHeight;
+    LineIdx := ScrollTop + (MY - Y - PadTop) div LineHeight;
     if LineIdx < 0 then LineIdx := 0;
     if LineIdx >= Lines.Count then LineIdx := Lines.Count - 1;
     CursorLine := LineIdx;
     if Assigned(GGuiSDL) then
-      ColIdx := GuiMemoCursorColFromX(GGuiSDL, Lines[CursorLine], X + 4, MX)
+      ColIdx := GuiMemoCursorColFromX(GGuiSDL, Lines[CursorLine], X + PadLeft, MX)
     else
       ColIdx := 0;
     CursorCol := ColIdx;
@@ -40293,8 +40374,10 @@ begin
     SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
     Int32(Gui2Scale(W)), Int32(Gui2Scale(H)), SDL_WINDOW_SHOWN);
   if not Assigned(NewWin) then Exit;
+  { v1.11.30: remove VSYNC -- Termux:X11 doesn't emit VSYNC signal,
+    RenderPresent would block indefinitely. gui2.delay(16) provides pacing. }
   NewRen := GGuiSDL.pCreateRenderer(NewWin, -1,
-    SDL_RENDERER_ACCELERATED or SDL_RENDERER_PRESENTVSYNC);
+    SDL_RENDERER_ACCELERATED);
   if not Assigned(NewRen) then
   begin
     try GGuiSDL.pDestroyWindow(NewWin); except end;
@@ -41283,6 +41366,53 @@ begin
   if not Assigned(W) then Exit;
   if not (W is TGuiMemo) then Exit;
   Result := TValue.CreateNum(TGuiMemo(W).ScrollTop);
+end;
+
+{ v1.11.30: gui2.memoSetSpacing(id, line_spacing, pad_top, pad_bottom, pad_left) -> bool }
+function Native_Gui2_MemoSetSpacing(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget;
+begin
+  Result := TValue.CreateBool(False);
+  if Args.Count <> 5 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  if not (W is TGuiMemo) then Exit;
+  if TValue(Args[1]).DataType = dtNumeric then
+    TGuiMemo(W).LineSpacing := Trunc(TValue(Args[1]).NumVal);
+  if TValue(Args[2]).DataType = dtNumeric then
+    TGuiMemo(W).PadTop := Trunc(TValue(Args[2]).NumVal);
+  if TValue(Args[3]).DataType = dtNumeric then
+    TGuiMemo(W).PadBottom := Trunc(TValue(Args[3]).NumVal);
+  if TValue(Args[4]).DataType = dtNumeric then
+    TGuiMemo(W).PadLeft := Trunc(TValue(Args[4]).NumVal);
+  { recompute LineHeight if FontHeight known }
+  if TGuiMemo(W).FontHeight > 0 then
+    TGuiMemo(W).LineHeight := TGuiMemo(W).FontHeight + TGuiMemo(W).LineSpacing;
+  Result := TValue.CreateBool(True);
+end;
+
+{ v1.11.30: gui2.memoGetSpacing(id) -> {line_spacing, pad_top, pad_bottom, pad_left} }
+function Native_Gui2_MemoGetSpacing(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget; D: TDictValue;
+begin
+  Result := TValue.CreateNull;
+  if Args.Count <> 1 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  if not (W is TGuiMemo) then Exit;
+  D := TDictValue.Create;
+  try
+    D.SetValue('line_spacing', TValue.CreateNum(TGuiMemo(W).LineSpacing));
+    D.SetValue('pad_top', TValue.CreateNum(TGuiMemo(W).PadTop));
+    D.SetValue('pad_bottom', TValue.CreateNum(TGuiMemo(W).PadBottom));
+    D.SetValue('pad_left', TValue.CreateNum(TGuiMemo(W).PadLeft));
+    Result := TValue.CreateDict(D);
+  except
+    D.Free;
+    raise;
+  end;
 end;
 
 function Native_Gui2_Poll(Args: TObjectList; CallEnv: TSymbolTable): TValue;
@@ -43490,6 +43620,9 @@ begin
   { v1.11.29: memo scrollbar }
   Gui2Inst.Members.DefineVar('memoSetScrollTop', TValue.CreateNative(@Native_Gui2_MemoSetScrollTop));
   Gui2Inst.Members.DefineVar('memoGetScrollTop', TValue.CreateNative(@Native_Gui2_MemoGetScrollTop));
+  { v1.11.30: memo spacing config }
+  Gui2Inst.Members.DefineVar('memoSetSpacing', TValue.CreateNative(@Native_Gui2_MemoSetSpacing));
+  Gui2Inst.Members.DefineVar('memoGetSpacing', TValue.CreateNative(@Native_Gui2_MemoGetSpacing));
   Gui2Inst.Members.DefineVar('isOpen', TValue.CreateNative(@Native_Gui2_IsOpen));
   Gui2Inst.Members.DefineVar('clear', TValue.CreateNative(@Native_Gui2_Clear));
   Gui2Inst.Members.DefineVar('present', TValue.CreateNative(@Native_Gui2_Present));

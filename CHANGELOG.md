@@ -1,5 +1,47 @@
 # Changelog
 
+## [1.11.30] - 2026-11-07
+
+### Fixed (critical)
+- **GUI hang after typing** -- root cause: SDL_RENDERER_PRESENTVSYNC flag.
+  Termux:X11 doesn't emit VSYNC signals, so SDL_RenderPresent blocked
+  indefinitely. Removed VSYNC flag; gui2.delay(16) provides pacing.
+- **Cursor not symmetric with text** -- cursor height was H - 8 (widget)
+  or LineHeight - 4 (hardcoded 16px). Now measures font glyph height
+  once via TTF_SizeText('Ag') -> FontHeight field.
+  - Edit cursor: aligned to text vertical center, height = FontHeight
+  - Memo cursor: aligned to text vertical center, height = FontHeight
+  - Selection highlight: height = FontHeight
+
+### Added (feature)
+- **Memo spacing configuration** -- configurable line spacing + padding
+  - LineSpacing: extra space between lines (default 4)
+  - PadTop: space above first line (default 4)
+  - PadBottom: space below last line (default 4)
+  - PadLeft: space at left edge (default 4)
+  - gui2.memoSetSpacing(id, line_spacing, pad_top, pad_bottom, pad_left) -> bool
+  - gui2.memoGetSpacing(id) -> {line_spacing, pad_top, pad_bottom, pad_left}
+- Recompute LineHeight when spacing changes (if FontHeight known)
+- VisibleLineCount uses (H - PadTop - PadBottom) instead of hardcoded H-8
+
+### Implementation
+- TGuiEdit.FontHeight field
+- TGuiMemo.FontHeight, LineSpacing, PadTop, PadBottom, PadLeft fields
+- Edit.Draw: TextY centered (Y + (H - FontHeight) div 2)
+- Memo.Draw: text centered in LineHeight band, cursor aligned
+- Memo.HandleMouse: MY - Y - PadTop, MX adjusted for PadLeft
+- memoSetSpacing recomputes LineHeight
+
+### Verified
+- Build: 50410 lines (+59 vs v1.11.29), EXIT 0
+- Interactive test on Termux:X11:
+  - Typing without hang (VSYNC fix)
+  - Cursor symmetric with glyph height
+  - 230 events processed, no crash, clean shutdown
+- Spacing smoke test: tight (spacing=0) vs loose (spacing=24)
+  values set/get correctly
+- Regression: 17/17 lang tests PASS
+
 ## [1.11.29] - 2026-11-06
 
 ### Added (feature) -- GUI Widget Toolkit Phase 5c-1 (Scrollbar)
