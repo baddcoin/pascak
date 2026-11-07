@@ -1,5 +1,22 @@
 # Changelog
 
+## [Unreleased] — Session Handover Maintenance Convention
+
+### Docs
+- **`docs/SESSION_HANDOVER_2026-11-07.md`** — living handover document
+  (502 lines, 9 sections). Reference untuk new chat / new session.
+
+### Convention (NEW — must follow each phase completion)
+Setiap phase selesai:
+1. Update `docs/SESSION_HANDOVER_YYYY-MM-DD.md` (current date)
+2. Update `Main HEAD`, `Tags count`, `Engine lines` di header
+3. Move completed items ke section "YANG SUDAH SELESAI"
+4. Update section "YANG BELUM SELESAI" (hapus done items)
+5. Commit handover file bersama phase commit
+6. **JANGAN hapus** — permanent reference
+
+---
+
 ## [1.11.32] - 2026-11-07
 
 ### Added (feature) -- GUI Widget Toolkit Phase 5c-2a (Line Numbers)
