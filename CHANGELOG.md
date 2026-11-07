@@ -17,6 +17,32 @@ Setiap phase selesai:
 
 ---
 
+## [1.11.33] - 2026-11-07
+
+### Added (feature) -- GUI Widget Toolkit Phase 6a (ComboBox)
+- TGuiComboBox widget -- dropdown selection
+- Items list, SelectedIdx, DropdownOpen, HoveredItemIdx
+- Dropdown popup layer (DrawPopup virtual, rendered above others)
+- Click combo -> toggle; Click item -> select + close; Click outside -> close
+- Keyboard: UP/DOWN, ENTER, SPACE, ESC
+- Focus indicator (yellow border), selected prefix + yellow, hover blue
+
+### Architecture
+- TGuiWidget.DrawPopup virtual (default no-op)
+- widgetsDraw two-pass (Draw all, then DrawPopup all)
+- GuiComboPopupHitTest + GuiDispatchMouse routing
+- Popup at Y+H, height = Items.Count * ItemHeight
+
+### Natives (7)
+- gui2.combobox, comboSetItems, comboGetItems
+- comboGetSelected, comboSetSelected, comboGetSelectedText, comboIsOpen
+
+### Verified (interactive X11)
+- 15 selection changes in 60s
+- Final: Option E, click/hover/keyboard all working
+- No hang, clean exit
+- Regression: 17/17 lang tests PASS
+
 ## [1.11.32] - 2026-11-07
 
 ### Added (feature) -- GUI Widget Toolkit Phase 5c-2a (Line Numbers)

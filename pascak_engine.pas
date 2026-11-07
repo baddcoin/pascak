@@ -38138,6 +38138,8 @@ type
     Focused: Boolean;
     constructor Create(AID: Integer; AOwner: Pointer);
     procedure Draw(GuiState: Pointer); virtual; abstract;
+    { v1.11.33: popup layer (rendered after all widgets' Draw) -- empty default }
+    procedure DrawPopup(GuiState: Pointer); virtual;
     { v1.11.16: event handlers -- return True if event consumed }
     function HandleMouse(MX, MY, Btn: Integer; Down: Boolean): Boolean; virtual;
     function HandleKey(const Key: string; Down: Boolean): Boolean; virtual;
@@ -38244,6 +38246,28 @@ type
     procedure EnsureCursorVisible;
     function VisibleLineCount: Integer;
     function VisualLineCount: Integer;
+  end;
+
+  { v1.11.33: ComboBox widget -- dropdown selection with popup layer }
+  TGuiComboBox = class(TGuiWidget)
+  public
+    Items: TStringList;
+    SelectedIdx: Integer;      // -1 = no selection
+    DropdownOpen: Boolean;
+    HoveredItemIdx: Integer;
+    BgR, BgG, BgB: UInt8;
+    ItemHeight: Integer;
+    constructor Create(AID: Integer; AOwner: Pointer;
+      AX, AY, AW: Integer; const AInitial: string;
+      ABgR, ABgG, ABgB: UInt8);
+    destructor Destroy; override;
+    procedure Draw(GuiState: Pointer); override;
+    procedure DrawPopup(GuiState: Pointer); override;
+    function HandleMouse(MX, MY, Btn: Integer; Down: Boolean): Boolean; override;
+    function HandleKey(const Key: string; Down: Boolean): Boolean; override;
+    function PopupContains(MX, MY: Integer): Boolean;
+    procedure ClosePopup;
+    function SelectedText: string;
   end;
 
   TGuiSDLWindow = class
@@ -38437,6 +38461,12 @@ begin
   KeyCount := 0;
   Hovered := False;
   Focused := False;
+end;
+
+{ v1.11.33: default DrawPopup -- no-op }
+procedure TGuiWidget.DrawPopup(GuiState: Pointer);
+begin
+  { default: no popup layer }
 end;
 
 { v1.11.16: default event handlers -- not consumed }
@@ -39942,6 +39972,309 @@ begin
     Result := True;
 end;
 
+{ v1.11.33: ComboBox implementation }
+constructor TGuiComboBox.Create(AID: Integer; AOwner: Pointer;
+  AX, AY, AW: Integer; const AInitial: string;
+  ABgR, ABgG, ABgB: UInt8);
+begin
+  inherited Create(AID, AOwner);
+  X := AX; Y := AY; W := AW; H := 30;
+  Items := TStringList.Create;
+  Items.SkipLastLineBreak := True;
+  SelectedIdx := -1;
+  DropdownOpen := False;
+  HoveredItemIdx := -1;
+  BgR := ABgR; BgG := ABgG; BgB := ABgB;
+  ItemHeight := 28;
+  Focusable := True;
+  if AInitial <> '' then
+  begin
+    Items.Add(AInitial);
+    SelectedIdx := 0;
+  end;
+end;
+
+destructor TGuiComboBox.Destroy;
+begin
+  if Assigned(Items) then Items.Free;
+  inherited;
+end;
+
+function TGuiComboBox.SelectedText: string;
+begin
+  if (SelectedIdx >= 0) and (SelectedIdx < Items.Count) then
+    Result := Items[SelectedIdx]
+  else
+    Result := '';
+end;
+
+procedure TGuiComboBox.ClosePopup;
+begin
+  DropdownOpen := False;
+  HoveredItemIdx := -1;
+end;
+
+procedure TGuiComboBox.Draw(GuiState: Pointer);
+var
+  St: TGuiSDLState;
+  RectArr: array[0..3] of Int32;
+  Txt, ArrowTxt: string;
+begin
+  if not Visible then Exit;
+  St := TGuiSDLState(GuiState);
+  if not Assigned(St) then Exit;
+  if not Assigned(St.Renderer) then Exit;
+  { background }
+  if Assigned(St.pSetRenderDrawColor) and Assigned(St.pRenderFillRect) then
+  begin
+    St.pSetRenderDrawColor(St.Renderer, BgR, BgG, BgB, 255);
+    RectArr[0] := X; RectArr[1] := Y;
+    RectArr[2] := W; RectArr[3] := H;
+    St.pRenderFillRect(St.Renderer, @RectArr[0]);
+  end;
+  { border }
+  if Assigned(St.pRenderDrawRect) then
+  begin
+    if Focused then
+      St.pSetRenderDrawColor(St.Renderer, 255, 200, 50, 255)
+    else
+      St.pSetRenderDrawColor(St.Renderer, 100, 100, 100, 255);
+    RectArr[0] := X; RectArr[1] := Y;
+    RectArr[2] := W; RectArr[3] := H;
+    St.pRenderDrawRect(St.Renderer, @RectArr[0]);
+  end;
+  { selected text }
+  Txt := SelectedText;
+  if Txt <> '' then
+    GuiDrawTextAt(St, X + 6, Y + (H - 16) div 2, Txt, 255, 255, 255);
+  { arrow (down) -- simple "v" char }
+  ArrowTxt := 'v';
+  GuiDrawTextAt(St, X + W - 18, Y + (H - 16) div 2, ArrowTxt, 200, 200, 200);
+end;
+
+procedure TGuiComboBox.DrawPopup(GuiState: Pointer);
+var
+  St: TGuiSDLState;
+  RectArr: array[0..3] of Int32;
+  PopY, PopH, I, ItemY: Integer;
+  ItemStr: string;
+  CR, CG, CB: UInt8;
+begin
+  if not Visible or not DropdownOpen then Exit;
+  if Items.Count = 0 then Exit;
+  St := TGuiSDLState(GuiState);
+  if not Assigned(St) then Exit;
+  if not Assigned(St.Renderer) then Exit;
+  PopY := Y + H;
+  PopH := Items.Count * ItemHeight;
+  { popup background }
+  if Assigned(St.pSetRenderDrawColor) and Assigned(St.pRenderFillRect) then
+  begin
+    St.pSetRenderDrawColor(St.Renderer, 45, 45, 60, 255);
+    RectArr[0] := X; RectArr[1] := PopY;
+    RectArr[2] := W; RectArr[3] := PopH;
+    St.pRenderFillRect(St.Renderer, @RectArr[0]);
+  end;
+  { popup border }
+  if Assigned(St.pRenderDrawRect) then
+  begin
+    St.pSetRenderDrawColor(St.Renderer, 150, 150, 150, 255);
+    RectArr[0] := X; RectArr[1] := PopY;
+    RectArr[2] := W; RectArr[3] := PopH;
+    St.pRenderDrawRect(St.Renderer, @RectArr[0]);
+  end;
+  { items }
+  for I := 0 to Items.Count - 1 do
+  begin
+    ItemY := PopY + I * ItemHeight;
+    { hover highlight }
+    if I = HoveredItemIdx then
+    begin
+      if Assigned(St.pSetRenderDrawColor) and Assigned(St.pRenderFillRect) then
+      begin
+        St.pSetRenderDrawColor(St.Renderer, 70, 110, 180, 255);
+        RectArr[0] := X + 1; RectArr[1] := ItemY + 1;
+        RectArr[2] := W - 2; RectArr[3] := ItemHeight - 2;
+        St.pRenderFillRect(St.Renderer, @RectArr[0]);
+      end;
+    end;
+    { selected mark (arrow prefix) }
+    ItemStr := Items[I];
+    if I = SelectedIdx then
+    begin
+      CR := 255; CG := 255; CB := 100;
+      ItemStr := '> ' + ItemStr;
+    end
+    else
+    begin
+      CR := 220; CG := 220; CB := 220;
+    end;
+    GuiDrawTextAt(St, X + 6, ItemY + (ItemHeight - 16) div 2,
+      ItemStr, CR, CG, CB);
+  end;
+end;
+
+function TGuiComboBox.HandleMouse(MX, MY, Btn: Integer; Down: Boolean): Boolean;
+var
+  PopY, ItemIdx: Integer;
+begin
+  Result := False;
+  if not Visible or not Enabled then Exit;
+  { v1.11.33: mousemove (Btn=0 from dispatch drag path) -- update hover }
+  if Btn = 0 then
+  begin
+    if DropdownOpen then
+    begin
+      if PopupContains(MX, MY) then
+      begin
+        PopY := Y + H;
+        ItemIdx := (MY - PopY) div ItemHeight;
+        if (ItemIdx >= 0) and (ItemIdx < Items.Count) then
+          HoveredItemIdx := ItemIdx
+        else
+          HoveredItemIdx := -1;
+      end
+      else
+        HoveredItemIdx := -1;
+    end;
+    Exit;
+  end;
+  if Btn <> 1 then Exit;
+  { v1.11.33: mousedown inside combo box -- toggle dropdown }
+  if (MX >= X) and (MX < X + W) and (MY >= Y) and (MY < Y + H) then
+  begin
+    if Down then
+    begin
+      if DropdownOpen then
+        ClosePopup
+      else if Items.Count > 0 then
+      begin
+        DropdownOpen := True;
+        HoveredItemIdx := SelectedIdx;
+      end;
+      Result := True;
+    end
+    else
+      Result := True;
+    Exit;
+  end;
+  { v1.11.33: mousedown inside popup -- select item }
+  if Down and PopupContains(MX, MY) then
+  begin
+    PopY := Y + H;
+    ItemIdx := (MY - PopY) div ItemHeight;
+    if (ItemIdx >= 0) and (ItemIdx < Items.Count) then
+    begin
+      SelectedIdx := ItemIdx;
+      ClosePopup;
+    end;
+    Result := True;
+    Exit;
+  end;
+  { v1.11.33: mousedown elsewhere while open -- close popup, don't consume }
+  if Down and DropdownOpen then
+  begin
+    ClosePopup;
+    Result := False;
+    Exit;
+  end;
+end;
+
+function TGuiComboBox.HandleKey(const Key: string; Down: Boolean): Boolean;
+begin
+  Result := False;
+  if not Visible or not Enabled then Exit;
+  if not Down then Exit;
+  { v1.11.33: ENTER -- open/select }
+  if Key = 'ENTER' then
+  begin
+    if DropdownOpen then
+    begin
+      if (HoveredItemIdx >= 0) and (HoveredItemIdx < Items.Count) then
+        SelectedIdx := HoveredItemIdx;
+      ClosePopup;
+    end
+    else if Items.Count > 0 then
+    begin
+      DropdownOpen := True;
+      HoveredItemIdx := SelectedIdx;
+    end;
+    Result := True;
+    Exit;
+  end;
+  { v1.11.33: SPACE -- toggle }
+  if Key = 'SPACE' then
+  begin
+    if DropdownOpen then
+      ClosePopup
+    else if Items.Count > 0 then
+    begin
+      DropdownOpen := True;
+      HoveredItemIdx := SelectedIdx;
+    end;
+    Result := True;
+    Exit;
+  end;
+  { v1.11.33: ESC -- close }
+  if Key = 'ESC' then
+  begin
+    if DropdownOpen then
+    begin
+      ClosePopup;
+      Result := True;
+    end;
+    Exit;
+  end;
+  { v1.11.33: UP -- prev item }
+  if Key = 'UP' then
+  begin
+    if DropdownOpen then
+    begin
+      if HoveredItemIdx > 0 then
+        Dec(HoveredItemIdx)
+      else if (HoveredItemIdx < 0) and (Items.Count > 0) then
+        HoveredItemIdx := Items.Count - 1;
+      Result := True;
+    end
+    else if SelectedIdx > 0 then
+    begin
+      Dec(SelectedIdx);
+      Result := True;
+    end;
+    Exit;
+  end;
+  { v1.11.33: DOWN -- next item }
+  if Key = 'DOWN' then
+  begin
+    if DropdownOpen then
+    begin
+      if HoveredItemIdx < Items.Count - 1 then
+        Inc(HoveredItemIdx)
+      else
+        HoveredItemIdx := 0;
+      Result := True;
+    end
+    else if SelectedIdx < Items.Count - 1 then
+    begin
+      Inc(SelectedIdx);
+      Result := True;
+    end;
+    Exit;
+  end;
+end;
+
+function TGuiComboBox.PopupContains(MX, MY: Integer): Boolean;
+var
+  PopY, PopH: Integer;
+begin
+  Result := False;
+  if not DropdownOpen or (Items.Count = 0) then Exit;
+  PopY := Y + H;
+  PopH := Items.Count * ItemHeight;
+  Result := (MX >= X) and (MX < X + W) and
+            (MY >= PopY) and (MY < PopY + PopH);
+end;
+
 constructor TGuiSDLState.Create;
 begin
   inherited;
@@ -40841,8 +41174,11 @@ begin
   if not Assigned(GGuiSDL) then Exit;
   W := GuiCurrentWindow;
   if not Assigned(W) or not Assigned(W.Widgets) then Exit;
+  { v1.11.33: two-pass -- regular draws first, then popup layer }
   for I := 0 to W.Widgets.Count - 1 do
     TGuiWidget(W.Widgets[I]).Draw(GGuiSDL);
+  for I := 0 to W.Widgets.Count - 1 do
+    TGuiWidget(W.Widgets[I]).DrawPopup(GGuiSDL);
   Result := TValue.CreateBool(True);
 end;
 
@@ -41022,17 +41358,56 @@ begin
 end;
 
 { v1.11.16: dispatch mouse event to captured widget or hit-test }
+{ v1.11.33: hit-test open ComboBox popup (popup extends beyond widget box) }
+function GuiComboPopupHitTest(MX, MY: Integer): TGuiComboBox;
+var
+  Idx, I: Integer;
+  W: TGuiSDLWindow;
+  Combo: TGuiComboBox;
+begin
+  Result := nil;
+  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Windows)) then Exit;
+  Idx := GGuiSDL.Windows.IndexOf(GGuiSDL.FocusedWindowID);
+  if Idx < 0 then Exit;
+  W := GGuiSDL.Windows.Data[Idx];
+  if not Assigned(W) or not Assigned(W.Widgets) then Exit;
+  { iterate reverse for topmost first }
+  for I := W.Widgets.Count - 1 downto 0 do
+  begin
+    if not (TGuiWidget(W.Widgets[I]) is TGuiComboBox) then Continue;
+    Combo := TGuiComboBox(W.Widgets[I]);
+    if Combo.Visible and Combo.Enabled and Combo.PopupContains(MX, MY) then
+    begin
+      Result := Combo;
+      Exit;
+    end;
+  end;
+end;
+
 procedure GuiDispatchMouse(MX, MY, Btn: Integer; Down: Boolean);
 var
   Idx: Integer;
   W: TGuiSDLWindow;
   Target: TGuiWidget;
+  PopupCombo: TGuiComboBox;
 begin
   if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Windows)) then Exit;
   Idx := GGuiSDL.Windows.IndexOf(GGuiSDL.FocusedWindowID);
   if Idx < 0 then Exit;
   W := GGuiSDL.Windows.Data[Idx];
   if not Assigned(W) then Exit;
+  { v1.11.33: route mousemove/down to open ComboBox popup first }
+  PopupCombo := nil;
+  if (Btn = 0) or Down then
+    PopupCombo := GuiComboPopupHitTest(MX, MY);
+  if Assigned(PopupCombo) then
+  begin
+    if Btn = 0 then
+      PopupCombo.HandleMouse(MX, MY, 0, Down)
+    else
+      PopupCombo.HandleMouse(MX, MY, Btn, True);
+    Exit;
+  end;
   { v1.11.16: route to captured widget first (drag) }
   if W.MouseCaptureID > 0 then
   begin
@@ -41616,6 +41991,138 @@ begin
   if not Assigned(W) then Exit;
   if not (W is TGuiMemo) then Exit;
   Result := TValue.CreateBool(TGuiMemo(W).LineNumbersEnabled);
+end;
+
+{ v1.11.33: gui2.combobox(x, y, w, [initial], [r], [g], [b]) -> id }
+function Native_Gui2_Combobox(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  W: TGuiSDLWindow;
+  Widget: TGuiComboBox;
+  X, Y, WW, ID: Integer;
+  R, G, B: Integer;
+  Initial: string;
+begin
+  Result := TValue.CreateNum(0);
+  if (Args.Count < 3) or (Args.Count > 7) then Exit;
+  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Windows)) then Exit;
+  X := Trunc(TValue(Args[0]).NumVal);
+  Y := Trunc(TValue(Args[1]).NumVal);
+  WW := Trunc(TValue(Args[2]).NumVal);
+  Initial := '';
+  if (Args.Count >= 4) and (TValue(Args[3]).DataType = dtString) then
+    Initial := TValue(Args[3]).StrVal;
+  R := 40; G := 40; B := 60;
+  if (Args.Count >= 5) and (TValue(Args[4]).DataType = dtNumeric) then R := Trunc(TValue(Args[4]).NumVal);
+  if (Args.Count >= 6) and (TValue(Args[5]).DataType = dtNumeric) then G := Trunc(TValue(Args[5]).NumVal);
+  if (Args.Count >= 7) and (TValue(Args[6]).DataType = dtNumeric) then B := Trunc(TValue(Args[6]).NumVal);
+  W := GuiCurrentWindow;
+  if not Assigned(W) or not Assigned(W.Widgets) then Exit;
+  ID := GGuiSDL.NextWidgetID;
+  Inc(GGuiSDL.NextWidgetID);
+  Widget := TGuiComboBox.Create(ID, W, X, Y, WW, Initial, UInt8(R), UInt8(G), UInt8(B));
+  W.Widgets.Add(Widget);
+  Result := TValue.CreateNum(ID);
+end;
+
+{ v1.11.33: gui2.comboSetItems(id, arr) -> bool }
+function Native_Gui2_ComboSetItems(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget; I: Integer;
+begin
+  Result := TValue.CreateBool(False);
+  if Args.Count <> 2 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  if TValue(Args[1]).DataType <> dtArray then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  if not (W is TGuiComboBox) then Exit;
+  TGuiComboBox(W).Items.Clear;
+  for I := 0 to TValue(Args[1]).ArrayVal.Count - 1 do
+    if Assigned(TValue(Args[1]).ArrayVal[I]) and
+       (TValue(Args[1]).ArrayVal[I].DataType = dtString) then
+      TGuiComboBox(W).Items.Add(TValue(Args[1]).ArrayVal[I].StrVal);
+  if TGuiComboBox(W).SelectedIdx >= TGuiComboBox(W).Items.Count then
+    TGuiComboBox(W).SelectedIdx := TGuiComboBox(W).Items.Count - 1;
+  if (TGuiComboBox(W).SelectedIdx < 0) and (TGuiComboBox(W).Items.Count > 0) then
+    TGuiComboBox(W).SelectedIdx := 0;
+  Result := TValue.CreateBool(True);
+end;
+
+{ v1.11.33: gui2.comboGetItems(id) -> arr }
+function Native_Gui2_ComboGetItems(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget; L: TValueList; I: Integer;
+begin
+  Result := TValue.CreateNull;
+  if Args.Count <> 1 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  if not (W is TGuiComboBox) then Exit;
+  L := TValueList.Create(True);
+  try
+    for I := 0 to TGuiComboBox(W).Items.Count - 1 do
+      L.Add(TValue.CreateStr(TGuiComboBox(W).Items[I]));
+    Result := TValue.CreateArray(L);
+  except
+    L.Free;
+    raise;
+  end;
+end;
+
+{ v1.11.33: gui2.comboGetSelected(id) -> num (-1 if none) }
+function Native_Gui2_ComboGetSelected(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget;
+begin
+  Result := TValue.CreateNum(-1);
+  if Args.Count <> 1 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  if not (W is TGuiComboBox) then Exit;
+  Result := TValue.CreateNum(TGuiComboBox(W).SelectedIdx);
+end;
+
+{ v1.11.33: gui2.comboSetSelected(id, n) -> bool }
+function Native_Gui2_ComboSetSelected(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget; N: Integer;
+begin
+  Result := TValue.CreateBool(False);
+  if Args.Count <> 2 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  if TValue(Args[1]).DataType <> dtNumeric then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  if not (W is TGuiComboBox) then Exit;
+  N := Trunc(TValue(Args[1]).NumVal);
+  if N < -1 then N := -1;
+  if N >= TGuiComboBox(W).Items.Count then N := TGuiComboBox(W).Items.Count - 1;
+  TGuiComboBox(W).SelectedIdx := N;
+  Result := TValue.CreateBool(True);
+end;
+
+{ v1.11.33: gui2.comboGetSelectedText(id) -> str }
+function Native_Gui2_ComboGetSelectedText(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget;
+begin
+  Result := TValue.CreateStr('');
+  if Args.Count <> 1 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  if not (W is TGuiComboBox) then Exit;
+  Result := TValue.CreateStr(TGuiComboBox(W).SelectedText);
+end;
+
+{ v1.11.33: gui2.comboIsOpen(id) -> bool }
+function Native_Gui2_ComboIsOpen(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget;
+begin
+  Result := TValue.CreateBool(False);
+  if Args.Count <> 1 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  if not (W is TGuiComboBox) then Exit;
+  Result := TValue.CreateBool(TGuiComboBox(W).DropdownOpen);
 end;
 
 function Native_Gui2_Poll(Args: TObjectList; CallEnv: TSymbolTable): TValue;
@@ -43833,6 +44340,14 @@ begin
   { v1.11.32: memo line numbers }
   Gui2Inst.Members.DefineVar('memoSetLineNumbers', TValue.CreateNative(@Native_Gui2_MemoSetLineNumbers));
   Gui2Inst.Members.DefineVar('memoGetLineNumbers', TValue.CreateNative(@Native_Gui2_MemoGetLineNumbers));
+  { v1.11.33: ComboBox widget }
+  Gui2Inst.Members.DefineVar('combobox', TValue.CreateNative(@Native_Gui2_Combobox));
+  Gui2Inst.Members.DefineVar('comboSetItems', TValue.CreateNative(@Native_Gui2_ComboSetItems));
+  Gui2Inst.Members.DefineVar('comboGetItems', TValue.CreateNative(@Native_Gui2_ComboGetItems));
+  Gui2Inst.Members.DefineVar('comboGetSelected', TValue.CreateNative(@Native_Gui2_ComboGetSelected));
+  Gui2Inst.Members.DefineVar('comboSetSelected', TValue.CreateNative(@Native_Gui2_ComboSetSelected));
+  Gui2Inst.Members.DefineVar('comboGetSelectedText', TValue.CreateNative(@Native_Gui2_ComboGetSelectedText));
+  Gui2Inst.Members.DefineVar('comboIsOpen', TValue.CreateNative(@Native_Gui2_ComboIsOpen));
   Gui2Inst.Members.DefineVar('isOpen', TValue.CreateNative(@Native_Gui2_IsOpen));
   Gui2Inst.Members.DefineVar('clear', TValue.CreateNative(@Native_Gui2_Clear));
   Gui2Inst.Members.DefineVar('present', TValue.CreateNative(@Native_Gui2_Present));
