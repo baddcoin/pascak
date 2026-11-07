@@ -1,9 +1,9 @@
 📋 Handover Document — Pascak Development Context
 
 Generated: 2026-11-07
-Main HEAD: 743b765 (v1.11.33)
-Tags: 90 total (v0.4.0 → v1.11.33)
-Engine: 51,135 lines
+Main HEAD: 2437d38 (v1.11.34)
+Tags: 91 total (v0.4.0 → v1.11.34)
+Engine: 51,607 lines
 Tests: 17/17 PASS
 Tree: clean
 
@@ -160,7 +160,7 @@ Termux:X11 mode: harus "touchscreen" (bukan "touchpad" default). Swipe keyboard 
 
 ## 3️⃣ YANG SUDAH SELESAI
 
-35 Main Tags (v1.11.0 → v1.11.33)
+36 Main Tags (v1.11.0 → v1.11.34)
 
 Language & Core (v1.11.0–v1.11.13):
 
@@ -178,7 +178,7 @@ GUI Features (v1.11.0–v1.11.13):
 · ETag + 304 caching
 · Last-Modified + If-Modified-Since
 
-GUI Widget Toolkit (v1.11.14 → v1.11.33):
+GUI Widget Toolkit (v1.11.14 → v1.11.34):
 
 Phase Tag Deliverable
 1 v1.11.14 SDL_TEXTINPUT + keyDown + textInputEnabled
@@ -201,6 +201,7 @@ Phase Tag Deliverable
 5c-3a v1.11.31 Word wrap infrastructure (default OFF)
 5c-2a v1.11.32 Line numbers gutter
 6a v1.11.33 ComboBox dropdown (popup layer)
+6b v1.11.34 ListBox widget (scrollable list)
 
 Widget API Lengkap (Final State)
 
@@ -249,7 +250,7 @@ gui2.widgetGetClicks(id), widgetGetKeyCount(id)
 Documentation
 
 · Tutorial Bab 1–34 (~5,700 lines) — Bab 34 = GUI Widgets
-· CHANGELOG — 35 entries (v1.11.0 → v1.11.33)
+· CHANGELOG — 36 entries (v1.11.0 → v1.11.34)
 · Design docs di feat/gui-widgets branch (v1.13.0-plan)
 · Register VM design di feat/register-vm branch (v1.12.0-plan)
 
@@ -268,7 +269,6 @@ Tutorial Bab 34 Memo section update ~1 jam Docs sync
 New Widgets (Phase 6+)
 
 Widget Effort
-ListBox (scrollable list) ~1-2 sesi
 Checkbox / Radio ~1 sesi
 Reusable Scrollbar (standalone) ~1 sesi
 Layout API (flow/grid) ~2 sesi
@@ -435,7 +435,7 @@ bash tests/run.sh lang 2>&1 | tail -3
 
 Trigger phrase untuk chat baru:
 
-"Lanjutkan Pascak development. HEAD = 743b765 (v1.11.33), 90 tags. Baca handover ini. [pilih path: user feedback / Phase 6b / docs / dll]"
+"Lanjutkan Pascak development. HEAD = 2437d38 (v1.11.34), 91 tags. Baca handover ini. [pilih path: user feedback / Phase 6c / docs / dll]"
 
 AI assistant checklist:
 
@@ -487,9 +487,9 @@ Next Technical Options
 Final State for Next Session
 
 ```
-Main:      743b765 (v1.11.33)
-Tags:      89 total
-Engine:    50,620 lines
+Main:      2437d38 (v1.11.34)
+Tags:      91 total
+Engine:    51,607 lines
 Tests:     17/17 PASS
 Tree:      clean
 Planning:  feat/register-vm + feat/gui-widgets branches
