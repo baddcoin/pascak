@@ -54,7 +54,7 @@ run_bench() {
 }
 
 echo "════════════════════════════════════════"
-echo "Pascak VM Benchmark Suite — v1.8.0"
+echo "Pascak VM Benchmark Suite — v1.11.40"
 echo "Binary: $BIN"
 echo "Runs: $RUNS + $WARMUP warm-up each"
 echo "Date: $(date '+%Y-%m-%d %H:%M %Z')"

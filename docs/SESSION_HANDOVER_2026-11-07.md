@@ -2,8 +2,8 @@
 
 Generated: 2026-11-07
 Main HEAD: 41a2c10 (v1.11.39)
-Tags: 96 total (v0.4.0 → v1.11.39)
-Engine: 52,043 lines
+Tags: 97 total (95 release + v1.12.0-plan + v1.13.0-plan)
+Engine: 52,033 lines
 Tests: 17/17 PASS
 Tree: clean
 
@@ -160,7 +160,7 @@ Termux:X11 mode: harus "touchscreen" (bukan "touchpad" default). Swipe keyboard 
 
 ## 3️⃣ YANG SUDAH SELESAI
 
-41 Main Tags (v1.11.0 → v1.11.39)
+40 releases (v1.11.0 → v1.11.39), 97 tags total
 
 Language & Core (v1.11.0–v1.11.13):
 
@@ -252,33 +252,61 @@ gui2.widgetFocus(id), widgetGetFocused(), widgetFocusNext([reverse])
 gui2.widgetGetClicks(id), widgetGetKeyCount(id)
 ```
 
-Documentation
+Documentation (Verified 2026-11-08)
 
-· Tutorial Bab 1–34 (~5,700 lines) — Bab 34 = GUI Widgets
-· CHANGELOG — 41 entries (v1.11.0 → v1.11.39)
+· Tutorial Bab 1–34 (6,111 lines) — Bab 34 = all 7 widgets ✅
+· API Reference (5,606 lines) — v1.11.38 SQLite sync ✅
+· Cookbook (1,553 lines) ✅
+· DEBUG_NOTES (125 lines) ✅
+· CHANGELOG (2,365 lines) — v1.11.0 → v1.11.39 ✅
 · Design docs di feat/gui-widgets branch (v1.13.0-plan)
 · Register VM design di feat/register-vm branch (v1.12.0-plan)
 
+Examples (Verified 2026-11-08)
+
+36 files, 2,322 lines total:
+· GUI2: counter, paint, image_viewer, audio_demo, multi_window, hidpi
+· Full apps: todo_gui, todo_gui_tls, chat_gui, music_player
+· Lang demos: lang_v110 → lang_v127 (9 files)
+· Other: hello_gui2, drawing_demo_gui2, input_demo_gui2, text_demo_gui2
+
+Benchmarks (Verified 2026-11-08)
+
+· Infrastructure: 8 suite (.pas) + runner + 6 result MD
+· Latest baseline: v1.9.4 (Oct 29)
+· v1.11.40 refresh: zero regression at 10-version milestone (see benchmarks/results_v1.11.40.md)
+
 ---
 
-## 4️⃣ YANG BELUM SELESAI
+## 4️⃣ YANG BELUM SELESAI (Verified 2026-11-08)
 
-Optional Widget Polish
+### Verified Pending — Quick Polish
+| Item | Effort | Priority |
+|---|---|---|
+| Dynamic gutter width (5c-2b) | 30 min | Nice-to-have |
+| Edit mouse drag select | 30 min | Nice-to-have |
 
-Item Effort Priority
-Phase 5c-3b: cursor remap in wrapped mode 1-2 sesi Optional (default OFF, works fine without)
-Phase 5c-2b: dynamic gutter width 30 min Nice-to-have
-Edit mouse drag select ~30 min Nice-to-have
-Tutorial Bab 34 Memo section update ~1 jam Docs sync
+### Verified Pending — New Features
+| Widget | Effort |
+|---|---|
+| Layout API (flow/grid) | 2 sesi |
+| Reusable Scrollbar (standalone) | 1 sesi |
+| Theming (color/font per widget) | 1 sesi |
+| Tab order customization | 1 sesi |
 
-New Widgets (Phase 6+)
+### Verified Pending — Deferred
+| Item | Effort | Note |
+|---|---|---|
+| Cursor remap in wrapped mode (5c-3b) | 1-2 sesi | Default OFF, safe |
+| Register VM Tier 3 | 15-20 sesi | Only if user reports perf |
+| Cross-language benchmark (Lua/Node/CPython) | 1-2 hari | New project, not refresh |
 
-Widget Effort
-Layout API (flow/grid) ~2 sesi
-Reusable Scrollbar (standalone) ~1 sesi
-Layout API (flow/grid) ~2 sesi
-Theming (color/font per widget) ~1 sesi
-Tab order customization ~1 sesi
+### ❌ REMOVED (previous handover false-pending)
+- "Phase 6 ComboBox pending" → DONE v1.11.33
+- "Tutorial Bab 34 Memo section pending" → DONE v1.11.36
+- "pascak_api.md sync pending" → DONE v1.11.38
+- "Example gallery (3 files) pending" → DONE (36 files, 2,322 lines)
+- "Docs Polish P3 pending" → DONE (cookbook + debug notes + all)
 
 Deferred Architecture
 
@@ -315,30 +343,17 @@ Value: Roadmap organic, bukan internal guess
 
 ---
 
-🟡 Priority 2 — Phase 6: ComboBox
+🟡 Priority 2 — ~~Phase 6: ComboBox~~ ❌ DONE v1.11.33
 
-Effort: ~2 sesi
-Risk: MEDIUM (popup layer above other widgets)
-
-Scope:
-
-· TGuiComboBox: rect + text + arrow + dropdown
-· Popup rendered top-most (z-order)
-· Click-outside-to-close
-· Items array + selected index
-· Keyboard nav (UP/DOWN, ENTER to open/select)
+ComboBox already shipped (v1.11.33), documented (tutorial §34.9).
+Replaced by: Layout API (flow/grid) — the last genuinely new widget feature.
 
 ---
 
-🟡 Priority 3 — Docs Polish
+🟡 Priority 3 — ~~Docs Polish~~ ❌ DONE v1.11.36–v1.11.39
 
-Effort: 1-2 jam
-
-Scope:
-
-· Tutorial Bab 34 Memo section (selection, clipboard, scrollbar, line numbers, spacing, wrap)
-· pascak_api.md sync untuk v1.11.x
-· Cross-link tutorial ↔ API
+All docs synced: Tutorial Memo §34 ✅, API ref v1.11.x ✅,
+Cookbook + DEBUG_NOTES ✅. Cross-link tutorial ↔ API ✅.
 
 ---
 
@@ -399,13 +414,13 @@ Test File Gotchas
 ## 7️⃣ KEY FILE REFERENCES
 
 File Purpose
-pascak_engine.pas 50,620 lines monolith
+pascak_engine.pas 52,033 lines monolith
 pascak_h2_conn.pas H2 multiplexing
 pascak_http.pas HTTP/1.1
 pascak_tls.pas SSL binding
 pascak_websocket.pas WS RFC 6455
 docs/tutorial.md Bab 1-34
-docs/pascak_api.md API reference
+docs/pascak_api.md API reference (5,606 lines)
 docs/gui_widgets/ Design docs (feat/gui-widgets)
 docs/register_vm/ Register VM plan (feat/register-vm)
 tests/lang/ 17 language tests
@@ -489,12 +504,15 @@ Next Technical Options
 · Word wrap cursor remap — optional, default safe (1-2 sesi)
 · Register VM Tier 3 — only if user reports perf (15-20 sesi)
 
-Final State for Next Session
+Final State for Next Session (Verified 2026-11-08)
 
 ```
-Main:      41a2c10 (v1.11.39)
-Tags:      91 total
-Engine:    51,607 lines
+Main:      41a2c10 (v1.11.39) + v1.11.40 commit
+Tags:      97 total (95 release + 2 plan), +v1.11.40 pending
+Engine:    52,033 lines
+Tutorial:  6,111 lines
+API ref:   5,606 lines
+Examples:  36 files (2,322 lines)
 Tests:     17/17 PASS
 Tree:      clean
 Planning:  feat/register-vm + feat/gui-widgets branches
