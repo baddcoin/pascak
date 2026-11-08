@@ -17,6 +17,36 @@ Setiap phase selesai:
 
 ---
 
+## [1.11.35] - 2026-11-08
+
+### Added (feature) -- GUI Widget Toolkit Phase 6c (Checkbox + Radio)
+- TGuiCheckbox widget -- independent toggle with caption
+- TGuiRadio widget -- mutually exclusive within same GroupId
+- Both: box + caption, focus indicator (yellow border), click anywhere in bounds
+- SPACE/ENTER when focused toggles
+- Checked state rendered: green checkmark (Checkbox), green dot (Radio)
+- Radio auto-uncheck siblings via SelectSelf loop
+
+### Natives (6)
+- gui2.checkbox(x, y, caption, [checked], [r], [g], [b]) -> id
+- gui2.checkboxGetChecked(id) -> bool
+- gui2.checkboxSetChecked(id, bool) -> bool
+- gui2.radio(x, y, caption, [group_id], [checked], [r], [g], [b]) -> id
+- gui2.radioGetChecked(id) -> bool
+- gui2.radioSetChecked(id, bool) -> bool (auto-uncheck siblings)
+
+### Verified (interactive X11 test)
+- 3 checkboxes + 3 radios, 10 state changes in 60s
+- Checkbox independent toggle (CB2 no effect on CB1/CB3)
+- Radio mutual exclusion (click any -> siblings auto-unchecked)
+- No crash, clean exit
+- Regression: 17/17 lang tests PASS
+
+### Next phase
+- Phase 6d: Layout API (flow/grid)
+- Phase 7: Theming
+- Or: user feedback cycle (STRONGEST)
+
 ## [1.11.34] - 2026-11-08
 
 ### Added (feature) -- GUI Widget Toolkit Phase 6b (ListBox)

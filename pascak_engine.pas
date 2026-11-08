@@ -38296,6 +38296,38 @@ type
     function SelectedText: string;
   end;
 
+  { v1.11.35: Checkbox widget -- toggle with caption }
+  TGuiCheckbox = class(TGuiWidget)
+  public
+    Caption: string;
+    Checked: Boolean;
+    BgR, BgG, BgB: UInt8;
+    BoxSize: Integer;
+    constructor Create(AID: Integer; AOwner: Pointer;
+      AX, AY: Integer; const ACaption: string; AChecked: Boolean;
+      ABgR, ABgG, ABgB: UInt8);
+    procedure Draw(GuiState: Pointer); override;
+    function HandleMouse(MX, MY, Btn: Integer; Down: Boolean): Boolean; override;
+    function HandleKey(const Key: string; Down: Boolean): Boolean; override;
+  end;
+
+  { v1.11.35: Radio widget -- mutually exclusive within same GroupId }
+  TGuiRadio = class(TGuiWidget)
+  public
+    Caption: string;
+    Checked: Boolean;
+    GroupId: Integer;
+    BgR, BgG, BgB: UInt8;
+    BoxSize: Integer;
+    constructor Create(AID: Integer; AOwner: Pointer;
+      AX, AY: Integer; const ACaption: string; AGroupId: Integer;
+      AChecked: Boolean; ABgR, ABgG, ABgB: UInt8);
+    procedure Draw(GuiState: Pointer); override;
+    function HandleMouse(MX, MY, Btn: Integer; Down: Boolean): Boolean; override;
+    function HandleKey(const Key: string; Down: Boolean): Boolean; override;
+    procedure SelectSelf;
+  end;
+
   TGuiSDLWindow = class
   public
     Window: Pointer;
@@ -40621,6 +40653,200 @@ begin
   end;
 end;
 
+{ v1.11.35: Checkbox widget implementation }
+constructor TGuiCheckbox.Create(AID: Integer; AOwner: Pointer;
+  AX, AY: Integer; const ACaption: string; AChecked: Boolean;
+  ABgR, ABgG, ABgB: UInt8);
+begin
+  inherited Create(AID, AOwner);
+  X := AX; Y := AY;
+  Caption := ACaption;
+  BoxSize := 24;
+  W := BoxSize + 8 + Length(ACaption) * 10;
+  if W < 100 then W := 100;
+  H := BoxSize + 6;
+  Checked := AChecked;
+  BgR := ABgR; BgG := ABgG; BgB := ABgB;
+  Focusable := True;
+end;
+
+procedure TGuiCheckbox.Draw(GuiState: Pointer);
+var
+  St: TGuiSDLState;
+  RectArr: array[0..3] of Int32;
+begin
+  if not Visible then Exit;
+  St := TGuiSDLState(GuiState);
+  if not Assigned(St) then Exit;
+  if not Assigned(St.Renderer) then Exit;
+  { box background }
+  if Assigned(St.pSetRenderDrawColor) and Assigned(St.pRenderFillRect) then
+  begin
+    St.pSetRenderDrawColor(St.Renderer, BgR, BgG, BgB, 255);
+    RectArr[0] := X; RectArr[1] := Y;
+    RectArr[2] := BoxSize; RectArr[3] := BoxSize;
+    St.pRenderFillRect(St.Renderer, @RectArr[0]);
+  end;
+  { box border (focused = yellow) }
+  if Assigned(St.pRenderDrawRect) then
+  begin
+    if Focused then
+      St.pSetRenderDrawColor(St.Renderer, 255, 200, 50, 255)
+    else
+      St.pSetRenderDrawColor(St.Renderer, 150, 150, 150, 255);
+    RectArr[0] := X; RectArr[1] := Y;
+    RectArr[2] := BoxSize; RectArr[3] := BoxSize;
+    St.pRenderDrawRect(St.Renderer, @RectArr[0]);
+  end;
+  { checkmark if checked }
+  if Checked and Assigned(St.pRenderFillRect) then
+  begin
+    St.pSetRenderDrawColor(St.Renderer, 100, 220, 100, 255);
+    RectArr[0] := X + 6; RectArr[1] := Y + 6;
+    RectArr[2] := BoxSize - 12; RectArr[3] := BoxSize - 12;
+    St.pRenderFillRect(St.Renderer, @RectArr[0]);
+  end;
+  { caption right of box }
+  if Caption <> '' then
+    GuiDrawTextAt(St, X + BoxSize + 8, Y + (BoxSize - 16) div 2,
+      Caption, 230, 230, 230);
+end;
+
+function TGuiCheckbox.HandleMouse(MX, MY, Btn: Integer; Down: Boolean): Boolean;
+begin
+  Result := False;
+  if not Visible or not Enabled then Exit;
+  if Btn <> 1 then Exit;
+  if not Down then
+  begin
+    Result := True;
+    Exit;
+  end;
+  if (MX < X) or (MX >= X + W) or (MY < Y) or (MY >= Y + H) then Exit;
+  Checked := not Checked;
+  Result := True;
+end;
+
+function TGuiCheckbox.HandleKey(const Key: string; Down: Boolean): Boolean;
+begin
+  Result := False;
+  if not Visible or not Enabled then Exit;
+  if not Down then Exit;
+  if (Key = 'SPACE') or (Key = 'ENTER') then
+  begin
+    Checked := not Checked;
+    Result := True;
+  end;
+end;
+
+{ v1.11.35: Radio widget implementation }
+constructor TGuiRadio.Create(AID: Integer; AOwner: Pointer;
+  AX, AY: Integer; const ACaption: string; AGroupId: Integer;
+  AChecked: Boolean; ABgR, ABgG, ABgB: UInt8);
+begin
+  inherited Create(AID, AOwner);
+  X := AX; Y := AY;
+  Caption := ACaption;
+  GroupId := AGroupId;
+  BoxSize := 24;
+  W := BoxSize + 8 + Length(ACaption) * 10;
+  if W < 100 then W := 100;
+  H := BoxSize + 6;
+  Checked := AChecked;
+  BgR := ABgR; BgG := ABgG; BgB := ABgB;
+  Focusable := True;
+end;
+
+procedure TGuiRadio.SelectSelf;
+var
+  I: Integer;
+  Win: TGuiSDLWindow;
+  Other: TGuiRadio;
+begin
+  if not Assigned(OwnerWindow) then Exit;
+  Win := TGuiSDLWindow(OwnerWindow);
+  if not Assigned(Win.Widgets) then Exit;
+  for I := 0 to Win.Widgets.Count - 1 do
+  begin
+    if not (TGuiWidget(Win.Widgets[I]) is TGuiRadio) then Continue;
+    Other := TGuiRadio(Win.Widgets[I]);
+    if (Other.ID <> ID) and (Other.GroupId = GroupId) then
+      Other.Checked := False;
+  end;
+  Checked := True;
+end;
+
+procedure TGuiRadio.Draw(GuiState: Pointer);
+var
+  St: TGuiSDLState;
+  RectArr: array[0..3] of Int32;
+  R: Integer;
+begin
+  if not Visible then Exit;
+  St := TGuiSDLState(GuiState);
+  if not Assigned(St) then Exit;
+  if not Assigned(St.Renderer) then Exit;
+  { background circle }
+  if Assigned(St.pSetRenderDrawColor) and Assigned(St.pRenderFillRect) then
+  begin
+    St.pSetRenderDrawColor(St.Renderer, BgR, BgG, BgB, 255);
+    RectArr[0] := X; RectArr[1] := Y;
+    RectArr[2] := BoxSize; RectArr[3] := BoxSize;
+    St.pRenderFillRect(St.Renderer, @RectArr[0]);
+  end;
+  { border (focused = yellow) }
+  if Assigned(St.pRenderDrawRect) then
+  begin
+    if Focused then
+      St.pSetRenderDrawColor(St.Renderer, 255, 200, 50, 255)
+    else
+      St.pSetRenderDrawColor(St.Renderer, 150, 150, 150, 255);
+    RectArr[0] := X; RectArr[1] := Y;
+    RectArr[2] := BoxSize; RectArr[3] := BoxSize;
+    St.pRenderDrawRect(St.Renderer, @RectArr[0]);
+  end;
+  { inner dot if checked }
+  if Checked and Assigned(St.pRenderFillRect) then
+  begin
+    St.pSetRenderDrawColor(St.Renderer, 100, 220, 100, 255);
+    R := BoxSize div 3;
+    RectArr[0] := X + (BoxSize - R) div 2; RectArr[1] := Y + (BoxSize - R) div 2;
+    RectArr[2] := R; RectArr[3] := R;
+    St.pRenderFillRect(St.Renderer, @RectArr[0]);
+  end;
+  { caption }
+  if Caption <> '' then
+    GuiDrawTextAt(St, X + BoxSize + 8, Y + (BoxSize - 16) div 2,
+      Caption, 230, 230, 230);
+end;
+
+function TGuiRadio.HandleMouse(MX, MY, Btn: Integer; Down: Boolean): Boolean;
+begin
+  Result := False;
+  if not Visible or not Enabled then Exit;
+  if Btn <> 1 then Exit;
+  if not Down then
+  begin
+    Result := True;
+    Exit;
+  end;
+  if (MX < X) or (MX >= X + W) or (MY < Y) or (MY >= Y + H) then Exit;
+  SelectSelf;
+  Result := True;
+end;
+
+function TGuiRadio.HandleKey(const Key: string; Down: Boolean): Boolean;
+begin
+  Result := False;
+  if not Visible or not Enabled then Exit;
+  if not Down then Exit;
+  if (Key = 'SPACE') or (Key = 'ENTER') then
+  begin
+    SelectSelf;
+    Result := True;
+  end;
+end;
+
 constructor TGuiSDLState.Create;
 begin
   inherited;
@@ -42588,6 +42814,136 @@ begin
   if not Assigned(W) then Exit;
   if not (W is TGuiListBox) then Exit;
   Result := TValue.CreateStr(TGuiListBox(W).SelectedText);
+end;
+
+{ v1.11.35: gui2.checkbox(x, y, caption, [checked], [r], [g], [b]) -> id }
+function Native_Gui2_Checkbox(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  W: TGuiSDLWindow;
+  Widget: TGuiCheckbox;
+  X, Y, ID: Integer;
+  R, G, B: Integer;
+  Caption: string;
+  Checked: Boolean;
+begin
+  Result := TValue.CreateNum(0);
+  if (Args.Count < 3) or (Args.Count > 7) then Exit;
+  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Windows)) then Exit;
+  if TValue(Args[2]).DataType <> dtString then Exit;
+  X := Trunc(TValue(Args[0]).NumVal);
+  Y := Trunc(TValue(Args[1]).NumVal);
+  Caption := TValue(Args[2]).StrVal;
+  Checked := False;
+  if (Args.Count >= 4) and (TValue(Args[3]).DataType = dtBoolean) then
+    Checked := TValue(Args[3]).BoolVal;
+  R := 40; G := 40; B := 60;
+  if (Args.Count >= 5) and (TValue(Args[4]).DataType = dtNumeric) then R := Trunc(TValue(Args[4]).NumVal);
+  if (Args.Count >= 6) and (TValue(Args[5]).DataType = dtNumeric) then G := Trunc(TValue(Args[5]).NumVal);
+  if (Args.Count >= 7) and (TValue(Args[6]).DataType = dtNumeric) then B := Trunc(TValue(Args[6]).NumVal);
+  W := GuiCurrentWindow;
+  if not Assigned(W) or not Assigned(W.Widgets) then Exit;
+  ID := GGuiSDL.NextWidgetID;
+  Inc(GGuiSDL.NextWidgetID);
+  Widget := TGuiCheckbox.Create(ID, W, X, Y, Caption, Checked, UInt8(R), UInt8(G), UInt8(B));
+  W.Widgets.Add(Widget);
+  Result := TValue.CreateNum(ID);
+end;
+
+{ v1.11.35: gui2.checkboxGetChecked(id) -> bool }
+function Native_Gui2_CheckboxGetChecked(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget;
+begin
+  Result := TValue.CreateBool(False);
+  if Args.Count <> 1 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  if not (W is TGuiCheckbox) then Exit;
+  Result := TValue.CreateBool(TGuiCheckbox(W).Checked);
+end;
+
+{ v1.11.35: gui2.checkboxSetChecked(id, bool) -> bool }
+function Native_Gui2_CheckboxSetChecked(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget;
+begin
+  Result := TValue.CreateBool(False);
+  if Args.Count <> 2 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  if TValue(Args[1]).DataType <> dtBoolean then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  if not (W is TGuiCheckbox) then Exit;
+  TGuiCheckbox(W).Checked := TValue(Args[1]).BoolVal;
+  Result := TValue.CreateBool(True);
+end;
+
+{ v1.11.35: gui2.radio(x, y, caption, [group_id], [checked], [r], [g], [b]) -> id }
+function Native_Gui2_Radio(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  W: TGuiSDLWindow;
+  Widget: TGuiRadio;
+  X, Y, ID: Integer;
+  R, G, B: Integer;
+  Caption: string;
+  GroupId: Integer;
+  Checked: Boolean;
+begin
+  Result := TValue.CreateNum(0);
+  if (Args.Count < 3) or (Args.Count > 8) then Exit;
+  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Windows)) then Exit;
+  if TValue(Args[2]).DataType <> dtString then Exit;
+  X := Trunc(TValue(Args[0]).NumVal);
+  Y := Trunc(TValue(Args[1]).NumVal);
+  Caption := TValue(Args[2]).StrVal;
+  GroupId := 0;
+  if (Args.Count >= 4) and (TValue(Args[3]).DataType = dtNumeric) then
+    GroupId := Trunc(TValue(Args[3]).NumVal);
+  Checked := False;
+  if (Args.Count >= 5) and (TValue(Args[4]).DataType = dtBoolean) then
+    Checked := TValue(Args[4]).BoolVal;
+  R := 40; G := 40; B := 60;
+  if (Args.Count >= 6) and (TValue(Args[5]).DataType = dtNumeric) then R := Trunc(TValue(Args[5]).NumVal);
+  if (Args.Count >= 7) and (TValue(Args[6]).DataType = dtNumeric) then G := Trunc(TValue(Args[6]).NumVal);
+  if (Args.Count >= 8) and (TValue(Args[7]).DataType = dtNumeric) then B := Trunc(TValue(Args[7]).NumVal);
+  W := GuiCurrentWindow;
+  if not Assigned(W) or not Assigned(W.Widgets) then Exit;
+  ID := GGuiSDL.NextWidgetID;
+  Inc(GGuiSDL.NextWidgetID);
+  Widget := TGuiRadio.Create(ID, W, X, Y, Caption, GroupId, Checked, UInt8(R), UInt8(G), UInt8(B));
+  W.Widgets.Add(Widget);
+  if Checked then Widget.SelectSelf;
+  Result := TValue.CreateNum(ID);
+end;
+
+{ v1.11.35: gui2.radioGetChecked(id) -> bool }
+function Native_Gui2_RadioGetChecked(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget;
+begin
+  Result := TValue.CreateBool(False);
+  if Args.Count <> 1 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  if not (W is TGuiRadio) then Exit;
+  Result := TValue.CreateBool(TGuiRadio(W).Checked);
+end;
+
+{ v1.11.35: gui2.radioSetChecked(id, bool) -> bool (auto-uncheck siblings) }
+function Native_Gui2_RadioSetChecked(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget;
+begin
+  Result := TValue.CreateBool(False);
+  if Args.Count <> 2 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  if TValue(Args[1]).DataType <> dtBoolean then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  if not (W is TGuiRadio) then Exit;
+  if TValue(Args[1]).BoolVal then
+    TGuiRadio(W).SelectSelf
+  else
+    TGuiRadio(W).Checked := False;
+  Result := TValue.CreateBool(True);
 end;
 
 function Native_Gui2_Poll(Args: TObjectList; CallEnv: TSymbolTable): TValue;
@@ -44820,6 +45176,13 @@ begin
   Gui2Inst.Members.DefineVar('listGetSelected', TValue.CreateNative(@Native_Gui2_ListGetSelected));
   Gui2Inst.Members.DefineVar('listSetSelected', TValue.CreateNative(@Native_Gui2_ListSetSelected));
   Gui2Inst.Members.DefineVar('listGetSelectedText', TValue.CreateNative(@Native_Gui2_ListGetSelectedText));
+  { v1.11.35: Checkbox + Radio widgets }
+  Gui2Inst.Members.DefineVar('checkbox', TValue.CreateNative(@Native_Gui2_Checkbox));
+  Gui2Inst.Members.DefineVar('checkboxGetChecked', TValue.CreateNative(@Native_Gui2_CheckboxGetChecked));
+  Gui2Inst.Members.DefineVar('checkboxSetChecked', TValue.CreateNative(@Native_Gui2_CheckboxSetChecked));
+  Gui2Inst.Members.DefineVar('radio', TValue.CreateNative(@Native_Gui2_Radio));
+  Gui2Inst.Members.DefineVar('radioGetChecked', TValue.CreateNative(@Native_Gui2_RadioGetChecked));
+  Gui2Inst.Members.DefineVar('radioSetChecked', TValue.CreateNative(@Native_Gui2_RadioSetChecked));
   Gui2Inst.Members.DefineVar('isOpen', TValue.CreateNative(@Native_Gui2_IsOpen));
   Gui2Inst.Members.DefineVar('clear', TValue.CreateNative(@Native_Gui2_Clear));
   Gui2Inst.Members.DefineVar('present', TValue.CreateNative(@Native_Gui2_Present));
