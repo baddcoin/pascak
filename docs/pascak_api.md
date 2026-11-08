@@ -673,6 +673,266 @@ state, HTML buttons, JS↔Pascal RPC.
 
 ---
 
+## GUI2 Widgets (v1.11.14-v1.11.36)
+
+High-level widget library built on gui2 primitives (SDL2).
+7 widgets: Button, Edit, Memo, ComboBox, ListBox, Checkbox, Radio.
+
+### Wajib Setup
+
+Sebelum render apapun, wajib panggil setFont. Tanpa ini semua text
+akan INVISIBLE (silent fail, no error).
+
+Urutan wajib: init -> setFont -> window -> textInputEnabled -> widget creation.
+
+Path font Termux: /data/data/com.termux/files/usr/share/fonts/TTF/DejaVuSans.ttf
+
+### Event Loop Pattern
+
+poll() -> clear() -> widgetsDraw() -> present() -> delay(16) repeat.
+
+widgetsDraw() two-pass: Draw regular + DrawPopup (popup layer on top).
+
+### Common Widget API (semua widget)
+
+| Method | Signature | Notes |
+|---|---|---|
+| widgetCount | () -> num | Count widgets in focused window |
+| widgetsDraw | () -> bool | Render all widgets (2-pass) |
+| widgetDestroy | (id) -> bool | Remove widget |
+| widgetSetPos | (id, x, y) | Move widget |
+| widgetSetSize | (id, w, h) | Resize |
+| widgetGetBounds | (id) -> {x,y,w,h} | Query position + size |
+| widgetSetVisible | (id, bool) | Show/hide |
+| widgetSetEnabled | (id, bool) | Enable/disable |
+| widgetFocus | (id) -> bool | Programmatic focus |
+| widgetGetFocused | () -> num | Current focused id (0 = none) |
+| widgetFocusNext | ([reverse]) -> bool | Tab/Shift+Tab cycle |
+| widgetGetClicks | (id) -> num | Click counter (testing) |
+| widgetGetKeyCount | (id) -> num | Key event counter (testing) |
+
+### Focus Navigation
+
+Semua widget: Focusable = True default. Focus border kuning saat focused.
+Tab/Shift+Tab cycle dengan wraparound. Skip hidden/disabled.
+
+### Button Widget (v1.11.18-20)
+
+Clickable button dengan caption + optional onClick callback.
+
+| Method | Signature |
+|---|---|
+| button | (x, y, w, h, caption, [r], [g], [b]) -> id |
+| buttonSetCaption | (id, str) -> bool |
+| buttonGetCaption | (id) -> str |
+| buttonOnClick | (id, fn) -> bool |
+| buttonClearOnClick | (id) -> bool |
+
+States: normal, hover (lighter), pressed (darker), focused (yellow border).
+
+onClick fired on: click (mousedown+mouseup within bounds), Enter/Space when focused.
+Callback = 0-arg function. Errors swallowed (tidak crash GUI loop).
+
+### Edit Widget (v1.11.21-26)
+
+Single-line UTF-8 text input dengan cursor, selection, clipboard.
+
+| Method | Signature |
+|---|---|
+| edit | (x, y, w, [initial], [r], [g], [b]) -> id |
+| editGetText | (id) -> str |
+| editSetText | (id, str) -> bool (cursor at end) |
+| editGetSelection | (id) -> {start, finish} (or {-1,-1}) |
+
+Keyboard (saat focused):
+LEFT/RIGHT (prev/next codepoint), HOME/END (line start/end),
+BACKSPACE (delete prev), DELETE (delete next), SHIFT+arrow (extend selection),
+Ctrl+A (select all), Ctrl+C/V/X (clipboard).
+
+Click dalam bounds: cursor jumps ke posisi terdekat (UTF-8 aware).
+
+Naming note: selection dict pakai 'finish' bukan 'end' (end reserved keyword).
+
+### Memo Widget (v1.11.27-32)
+
+Multi-line UTF-8 editor dengan scrollbar, line numbers, spacing, wrap.
+
+| Method | Signature |
+|---|---|
+| memo | (x, y, w, h, [initial], [r], [g], [b]) -> id |
+| memoGetText | (id) -> str (lines joined by \n) |
+| memoSetText | (id, str) -> bool (split by \n) |
+| memoGetCursor | (id) -> {line, col} |
+| memoGetSelection | (id) -> {start_line, start_col, end_line, end_col} |
+| memoSetScrollTop | (id, n) -> bool |
+| memoGetScrollTop | (id) -> num |
+| memoSetSpacing | (id, line_spacing, pad_top, pad_bottom, pad_left) -> bool |
+| memoGetSpacing | (id) -> {line_spacing, pad_top, pad_bottom, pad_left} |
+| memoSetLineNumbers | (id, bool) -> bool |
+| memoGetLineNumbers | (id) -> bool |
+| memoSetWrap | (id, bool) -> bool |
+| memoGetWrap | (id) -> bool |
+| memoGetVisualLineCount | (id) -> num (debug) |
+
+Keyboard: ENTER (split line), BACKSPACE at col 0 (merge prev), DELETE at end
+(merge next), UP/DOWN (change line col-clamped), PgUp/PgDn, HOME/END,
+Shift+arrows (extend selection), Ctrl+A/C/X/V clipboard.
+
+Wrap default OFF. Known limitation: cursor pakai logical lines,
+bukan visual (may look off when wrap ON).
+
+### ComboBox Widget (v1.11.33)
+
+Dropdown selection. Pilih 1 dari N opsi compact.
+
+| Method | Signature |
+|---|---|
+| combobox | (x, y, w, [initial], [r], [g], [b]) -> id |
+| comboSetItems | (id, [arr]) -> bool |
+| comboGetItems | (id) -> arr |
+| comboGetSelected | (id) -> num (-1 if none) |
+| comboSetSelected | (id, n) -> bool |
+| comboGetSelectedText | (id) -> str |
+| comboIsOpen | (id) -> bool |
+
+Behavior: click box -> toggle dropdown. Click item -> select + close.
+Click outside -> close. Keyboard: ENTER (open/confirm), SPACE (toggle),
+ESC (close), UP/DOWN (cycle closed or hover open).
+
+Popup layer above other widgets (via DrawPopup virtual, two-pass render).
+
+### ListBox Widget (v1.11.34)
+
+Scrollable list dengan selection + hover + scrollbar.
+
+| Method | Signature |
+|---|---|
+| listbox | (x, y, w, h, [initial], [r], [g], [b]) -> id |
+| listSetItems | (id, [arr]) -> bool |
+| listGetItems | (id) -> arr |
+| listGetSelected | (id) -> num (-1 if none) |
+| listSetSelected | (id, n) -> bool |
+| listGetSelectedText | (id) -> str |
+
+Behavior: click item -> select. Hover -> highlight. Scrollbar otomatis
+muncul saat overflow (drag track thumb, click track jump). Keyboard:
+UP/DOWN, PageUp/PageDown, HOME/END, ENTER/SPACE. Auto-scroll saat
+selection bergerak keluar viewport.
+
+### Checkbox Widget (v1.11.35)
+
+Independent toggle dengan caption.
+
+| Method | Signature |
+|---|---|
+| checkbox | (x, y, caption, [checked], [r], [g], [b]) -> id |
+| checkboxGetChecked | (id) -> bool |
+| checkboxSetChecked | (id, bool) -> bool |
+
+Behavior: click anywhere dalam bounds (box OR caption) toggle.
+State independent (check A, B, C tanpa effect satu sama lain).
+SPACE/ENTER saat focused toggle. Visual: box 24x24 + green checkmark.
+
+### Radio Widget (v1.11.35)
+
+Mutually exclusive toggle dalam group.
+
+| Method | Signature |
+|---|---|
+| radio | (x, y, caption, [group_id], [checked], [r], [g], [b]) -> id |
+| radioGetChecked | (id) -> bool |
+| radioSetChecked | (id, bool) -> bool (auto-uncheck siblings) |
+
+Behavior: click -> SelectSelf (check self + uncheck ALL siblings same
+group_id dalam same window). SPACE/ENTER saat focused SelectSelf.
+Visual: box 24x24 + green inner dot saat checked.
+
+GroupId convention: 0 = default, 1/2/3/... = different independent groups.
+Contoh: form dengan size (group 1) + color (group 2) = 2 independent radio sets.
+
+### Widget Comparison
+
+| Widget | Kapan Pakai | Use Case |
+|---|---|---|
+| Button | Trigger action | Submit, Cancel, Save |
+| Edit | Single-line text | Name, Email, URL |
+| Memo | Multi-line text | Notes, Description, Code |
+| ComboBox | Pilih dari N (compact) | Country, Category |
+| ListBox | Pilih dari banyak (visible) | File picker, Log viewer |
+| Checkbox | Multiple independent | Feature toggles, Filters |
+| Radio | Single exclusive | Size, Gender, Priority |
+
+Anti-patterns:
+- Radio tanpa group_id beda untuk 2 kategori -> semua exclusive across category
+- Checkbox untuk single-selection -> use Radio
+- ComboBox untuk 3 items -> Button x 3 atau Radio lebih jelas
+- Edit untuk 1000+ karakter -> use Memo
+- ListBox untuk 5 items -> Radio group lebih ringkas
+
+### Full Example: Form with All Widgets
+
+    var nameEdit = 0;
+    var emailEdit = 0;
+    var country = 0;
+    var subscribe = 0;
+    var sizeS = 0;
+    var sizeM = 0;
+    var submit = 0;
+
+    begin
+      gui2.init();
+      gui2.setFont("/data/data/com.termux/files/usr/share/fonts/TTF/DejaVuSans.ttf", 20);
+      gui2.window("Registration", 800, 600);
+      gui2.textInputEnabled(true);
+
+      gui2.text(50, 30, "Name:", 200, 200, 200);
+      nameEdit = gui2.edit(50, 60, 400, "");
+
+      gui2.text(50, 120, "Email:", 200, 200, 200);
+      emailEdit = gui2.edit(50, 150, 400, "");
+
+      gui2.text(50, 210, "Country:", 200, 200, 200);
+      country = gui2.combobox(50, 240, 400, "Select country");
+      gui2.comboSetItems(country, ["Indonesia", "Malaysia", "Singapore"]);
+
+      subscribe = gui2.checkbox(50, 300, "Subscribe newsletter", true);
+
+      gui2.text(50, 360, "Size:", 200, 200, 200);
+      sizeS = gui2.radio(50, 390, "Small", 1, false);
+      sizeM = gui2.radio(50, 430, "Medium", 1, true);
+      submit = gui2.button(50, 490, 150, 40, "Submit");
+
+      gui2.widgetFocus(nameEdit);
+
+      while true do begin
+        var ev = gui2.poll();
+        if ev == "quit" then break;
+        gui2.clear(20, 20, 30, 255);
+        gui2.text(50, 30, "Name:", 200, 200, 200);
+        gui2.text(50, 120, "Email:", 200, 200, 200);
+        gui2.text(50, 210, "Country:", 200, 200, 200);
+        gui2.text(50, 360, "Size:", 200, 200, 200);
+        gui2.widgetsDraw();
+        gui2.present();
+        gui2.delay(16);
+      end;
+    end.
+
+Tab order: nameEdit -> emailEdit -> country -> subscribe -> sizeS ->
+sizeM -> submit -> wrap.
+
+### Focus Chain
+
+Tab / Shift+Tab cycle focusable widgets (sequential creation order,
+wraparound). Programmatic control:
+
+- gui2.widgetFocus(id) -> bool (set focus)
+- gui2.widgetGetFocused() -> num (0 = none)
+- gui2.widgetFocusNext([reverse]) -> bool (Tab/Shift+Tab)
+
+Semua widget default Focusable = True. Focus border kuning saat focused.
+Skip widget yang not Visible atau not Enabled.
+
 ## Embedding (In-Process)
 
 **Library-level** embedding: host Pascal code `uses pascak_engine` to

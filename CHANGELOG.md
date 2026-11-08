@@ -17,6 +17,32 @@ Setiap phase selesai:
 
 ---
 
+## [1.11.37] - 2026-11-08
+
+### Docs (API reference)
+- pascak_api.md: new section "GUI2 Widgets" (was 0 mentions)
+- Coverage: Common widget API (12 methods) + 7 widget types:
+  - Button (v1.11.18-20) -- click, callback
+  - Edit (v1.11.21-26) -- UTF-8, selection, clipboard
+  - Memo (v1.11.27-32) -- scrollbar, line numbers, spacing, wrap
+  - ComboBox (v1.11.33) -- dropdown popup
+  - ListBox (v1.11.34) -- scrollable list
+  - Checkbox (v1.11.35) -- independent toggle
+  - Radio (v1.11.35) -- mutually exclusive
+- Widget comparison table + anti-patterns
+- Full example: Registration form (all 7 widgets)
+- Focus chain documentation
+- API ref now 5,578 lines (+260). Sync with tutorial Bab 34.
+
+### Documentation completion
+- Tutorial Bab 34: 12 sections, all 7 widgets (v1.11.36)
+- API reference: GUI2 Widgets section (this release)
+- Handover: living document, updated 5x
+
+### Next docs
+- Cookbook widget patterns (recipes)
+- Examples gallery examples/gui_*.pas
+
 ## [1.11.36] - 2026-11-08
 
 ### Docs (tutorial)
