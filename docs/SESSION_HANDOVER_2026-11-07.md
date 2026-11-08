@@ -1,9 +1,9 @@
 📋 Handover Document — Pascak Development Context
 
 Generated: 2026-11-07
-Main HEAD: 2437d38 (v1.11.34)
-Tags: 91 total (v0.4.0 → v1.11.34)
-Engine: 51,607 lines
+Main HEAD: ebc274a (v1.11.35)
+Tags: 92 total (v0.4.0 → v1.11.35)
+Engine: 51,970 lines
 Tests: 17/17 PASS
 Tree: clean
 
@@ -160,7 +160,7 @@ Termux:X11 mode: harus "touchscreen" (bukan "touchpad" default). Swipe keyboard 
 
 ## 3️⃣ YANG SUDAH SELESAI
 
-36 Main Tags (v1.11.0 → v1.11.34)
+37 Main Tags (v1.11.0 → v1.11.35)
 
 Language & Core (v1.11.0–v1.11.13):
 
@@ -202,6 +202,7 @@ Phase Tag Deliverable
 5c-2a v1.11.32 Line numbers gutter
 6a v1.11.33 ComboBox dropdown (popup layer)
 6b v1.11.34 ListBox widget (scrollable list)
+6c v1.11.35 Checkbox + Radio (toggles)
 
 Widget API Lengkap (Final State)
 
@@ -250,7 +251,7 @@ gui2.widgetGetClicks(id), widgetGetKeyCount(id)
 Documentation
 
 · Tutorial Bab 1–34 (~5,700 lines) — Bab 34 = GUI Widgets
-· CHANGELOG — 36 entries (v1.11.0 → v1.11.34)
+· CHANGELOG — 37 entries (v1.11.0 → v1.11.35)
 · Design docs di feat/gui-widgets branch (v1.13.0-plan)
 · Register VM design di feat/register-vm branch (v1.12.0-plan)
 
@@ -269,7 +270,7 @@ Tutorial Bab 34 Memo section update ~1 jam Docs sync
 New Widgets (Phase 6+)
 
 Widget Effort
-Checkbox / Radio ~1 sesi
+Layout API (flow/grid) ~2 sesi
 Reusable Scrollbar (standalone) ~1 sesi
 Layout API (flow/grid) ~2 sesi
 Theming (color/font per widget) ~1 sesi
@@ -406,7 +407,7 @@ docs/register_vm/ Register VM plan (feat/register-vm)
 tests/lang/ 17 language tests
 tests/fixtures/mock_server.py H2 test mock
 
-Key Line References (v1.11.33 approx)
+Key Line References (v1.11.35 approx)
 
 · TGuiWidget base class: ~38,200
 · TGuiButton: ~38,250
@@ -435,7 +436,7 @@ bash tests/run.sh lang 2>&1 | tail -3
 
 Trigger phrase untuk chat baru:
 
-"Lanjutkan Pascak development. HEAD = 2437d38 (v1.11.34), 91 tags. Baca handover ini. [pilih path: user feedback / Phase 6c / docs / dll]"
+"Lanjutkan Pascak development. HEAD = ebc274a (v1.11.35), 92 tags. Baca handover ini. [pilih path: user feedback / Phase 6d / docs / dll]"
 
 AI assistant checklist:
 
@@ -487,7 +488,7 @@ Next Technical Options
 Final State for Next Session
 
 ```
-Main:      2437d38 (v1.11.34)
+Main:      ebc274a (v1.11.35)
 Tags:      91 total
 Engine:    51,607 lines
 Tests:     17/17 PASS
