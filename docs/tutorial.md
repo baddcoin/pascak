@@ -5331,13 +5331,18 @@ Bab 28 bahas native GUI primitives (rect, line, text, event polling).
 Bab 34 ini bahas **widget high-level** yang dibangun di atas primitives:
 Button, Edit, dll. Widget punya state, event handling, callback.
 
-**Available (v1.11.21):**
-- **Button** -- clickable, dengan caption + onClick callback
-- **Edit** -- single-line text input, UTF-8 aware
-- **Placeholder** -- colored rect (testing/dev)
+**Available (v1.11.35) — 7 widgets:**
 
-**Coming (Phase 4b+)**: selection, clipboard, Memo (multi-line),
-ComboBox, ListBox, Checkbox, Radio.
+- **Button** -- clickable, caption, onClick callback, hover state
+- **Edit** -- single-line UTF-8 text, cursor, selection, clipboard,
+  click-to-position, focus
+- **Memo** -- multi-line UTF-8, selection, clipboard, scrollbar,
+  line numbers, spacing config, word wrap
+- **ComboBox** -- dropdown selection with popup layer
+- **ListBox** -- scrollable list with selection + hover
+- **Checkbox** -- independent toggle
+- **Radio** -- mutually exclusive within group
+- **Placeholder** -- colored rect (testing/dev only)
 
 ### 34.1 — Konsep: Primitives vs Widgets
 
@@ -5618,32 +5623,35 @@ Contoh: form dengan Tab navigation:
 User Tab: nameEdit -> emailEdit -> submitBtn -> nameEdit (cycle).
 Typing otomatis masuk ke Edit yang focused.
 
-### 34.6 — Limitations v1 (v1.11.21)
+### 34.6 — Limitations v1 (v1.11.35)
 
-Widget types shipped:
+Widget types shipped (v1.11.35):
 
 - Button (Phase 3, 3b, 3c) -- complete
-- Edit (Phase 4a) -- basic, UTF-8 aware
+- Edit (Phase 4a-4c) -- complete (selection + clipboard)
+- Memo (Phase 5a-5c) -- complete (scrollbar + line numbers + wrap)
+- ComboBox (Phase 6a) -- complete (dropdown)
+- ListBox (Phase 6b) -- complete (scrollable)
+- Checkbox (Phase 6c) -- complete (independent toggle)
+- Radio (Phase 6c) -- complete (mutually exclusive)
 - Placeholder -- testing/dev only
 
-Deferred to Phase 4b+ (Edit polish):
+Deferred to Phase 6d+:
 
-- Selection (SHIFT+arrow, mouse drag)
-- Clipboard (Ctrl+C/V/X)
-- Mouse click to position cursor
-- Horizontal scroll for long text
-- Cursor blink animation
-- Focus indicator visual (cursor always visible for now)
+- Layout API (flow, grid) -- planned
+- Theming (color/font per widget) -- planned
+- Mouse drag selection (Edit/Memo) -- optional
+- Word wrap cursor remap -- optional, default OFF
+- Dynamic gutter width (line numbers) -- optional
 
-Deferred to Phase 5+:
+Known limitations:
 
-- Memo (multi-line editor with scroll)
-- ComboBox (dropdown selection)
-- ListBox (scrollable list)
-- Checkbox / Radio
-- Scrollbar (reusable component)
-- Layout API (flow, grid)
-- Theming
+- Widgets are per-window (each window has own widget list)
+- No z-order control (draw order = widget list order)
+- No clipping (widgets can overflow window bounds)
+- No tab order customization (sequential creation order)
+- Callback fire synchronously (mini-VM, blocks GUI loop)
+- No drag-drop between widgets
 
 Known limitations:
 
@@ -5698,6 +5706,395 @@ Full example -- Todo GUI (button + edit + list):
 
 Untuk detail lengkap: lihat pascak_api.md, bagian gui2.button,
 gui2.edit, widget APIs.
+
+### 34.7 — Edit Widget Advanced (v1.11.24-26)
+
+Edit sudah dibahas di 34.3 (basic typing + cursor). Section ini cover
+fitur lanjutan: focus, navigation, selection, clipboard.
+
+**Focus + click position:**
+
+- Tap/klik dalam Edit box → cursor jumps ke posisi terdekat
+- Tab navigation: pindah focus antar widget (Edit/Button/Memo/dll)
+- `gui2.widgetFocus(edit_id)` — programmatic focus
+- `gui2.widgetGetFocused()` — current focused widget id
+- Cursor bar **hanya visible saat focused** (fokus indicator natural)
+
+**Navigation (keyboard, saat focused):**
+
+- LEFT/RIGHT — prev/next codepoint (UTF-8 aware)
+- HOME/END — line start/end
+- BACKSPACE — delete previous codepoint
+- DELETE — delete next codepoint
+- Type text — insert at cursor
+
+**Selection (blue highlight):**
+
+- SHIFT+LEFT/RIGHT — extend selection
+- SHIFT+HOME/END — extend to start/end
+- Plain LEFT/RIGHT/HOME/END — clear selection
+- BACKSPACE/DELETE with selection — delete whole range
+- Type text with selection — replace range
+- Selection API: `gui2.editGetSelection(id)` → `{start, finish}`
+
+**Clipboard (Ctrl+C/V/X):**
+
+- Ctrl+A — select all
+- Ctrl+C — copy selection to system clipboard
+- Ctrl+X — cut (copy + delete)
+- Ctrl+V — paste (replaces selection if exists)
+- Requires SDL clipboard support (Termux:X11: works)
+
+**Catatan:** Selection range pakai `finish` bukan `end` — `end` reserved
+keyword di Pascak. Ingat!
+
+### 34.8 — Memo Widget (Multi-line)
+
+Memo = Edit multi-line. Cover semua fitur dari Edit (selection,
+clipboard, focus) + tambahan khusus multi-line.
+
+**Signature:**
+
+    gui2.memo(x, y, w, h, [initial], [r], [g], [b]) -> id
+    gui2.memoGetText(id) -> str            // lines joined by \n
+    gui2.memoSetText(id, str) -> bool      // split by \n
+    gui2.memoGetCursor(id) -> {line, col}
+    gui2.memoGetSelection(id) -> {start_line, start_col, end_line, end_col}
+
+**Example — editor minimal:**
+
+    var m = 0;
+    begin
+      gui2.init();
+      gui2.setFont("/data/data/com.termux/files/usr/share/fonts/TTF/DejaVuSans.ttf", 20);
+      gui2.window("Editor", 800, 600);
+      m = gui2.memo(50, 50, 700, 500, "Hello\nWorld", 40, 60, 80);
+      gui2.widgetFocus(m);
+      while true do begin
+        var ev = gui2.poll();
+        if ev == "quit" then break;
+        gui2.clear(20, 20, 30, 255);
+        gui2.widgetsDraw();
+        gui2.present();
+        gui2.delay(16);
+      end;
+    end.
+
+**Multi-line editing:**
+
+- ENTER — split line at cursor (new line)
+- BACKSPACE at col 0 — merge with previous line
+- DELETE at end of line — merge with next line
+- UP/DOWN — change line, col clamped
+- LEFT/RIGHT — wrap across line boundaries
+- PageUp/PageDown — jump by visible line count
+- HOME/END — line start/end
+
+**Scrollbar (v1.11.29):**
+
+- Auto-visible saat content overflow (Lines.Count > VisibleLineCount)
+- Proporsional thumb (reflect ratio visible/total)
+- Click track → jump scroll
+- Drag thumb → smooth scroll
+- `gui2.memoSetScrollTop(id, n)` — programmatic
+- `gui2.memoGetScrollTop(id)` — query
+
+**Line numbers (v1.11.32):**
+
+    gui2.memoSetLineNumbers(m, true);   // enable gutter
+    gui2.memoGetLineNumbers(m);         // query
+
+- Gutter width fixed 50px (default)
+- Numbers 1-indexed, colored yellow-ish
+- Auto-update saat add/remove line
+- Empty lines tetap dapat nomor
+
+**Spacing configuration (v1.11.30):**
+
+    gui2.memoSetSpacing(m, line_spacing, pad_top, pad_bottom, pad_left);
+
+- `line_spacing` — extra space antara baris (default 4)
+- `pad_top` / `pad_bottom` — margin atas/bawah (default 4)
+- `pad_left` — margin kiri (default 4)
+- Cursor height = glyph height (measured dari font)
+- `gui2.memoGetSpacing(m)` — query current values
+
+**Word wrap (v1.11.31, default OFF):**
+
+    gui2.memoSetWrap(m, true);   // enable wrap
+    gui2.memoGetWrap(m);         // query
+
+- Wrap long lines at word boundaries (measured via TTF_SizeText)
+- **Known limitation:** cursor still uses logical lines, not visual
+  (may look off when wrap ON — default OFF safe)
+- `gui2.memoGetVisualLineCount(m)` — debug wrapped line count
+
+### 34.9 — ComboBox Widget (Dropdown)
+
+ComboBox = single-selection widget dengan dropdown popup. Pilih 1
+dari N opsi tanpa makan space (dropdown muncul saat di-click).
+
+**Signature:**
+
+    gui2.combobox(x, y, w, [initial], [r], [g], [b]) -> id
+    gui2.comboSetItems(id, [arr of strings])
+    gui2.comboGetItems(id) -> arr
+    gui2.comboGetSelected(id) -> num (-1 if none)
+    gui2.comboSetSelected(id, n)
+    gui2.comboGetSelectedText(id) -> str
+    gui2.comboIsOpen(id) -> bool
+
+**Example — country picker:**
+
+    var combo = 0;
+    var lastSel = "";
+
+    begin
+      gui2.init();
+      gui2.setFont("/data/data/com.termux/files/usr/share/fonts/TTF/DejaVuSans.ttf", 20);
+      gui2.window("Combo", 500, 400);
+      gui2.textInputEnabled(true);
+
+      gui2.text(50, 30, "Pilih negara:", 255, 255, 100);
+      combo = gui2.combobox(50, 70, 300, "Select...", 60, 60, 100);
+      gui2.comboSetItems(combo, [
+        "Indonesia", "Malaysia", "Singapore",
+        "Thailand", "Vietnam", "Philippines"
+      ]);
+      gui2.comboSetSelected(combo, 0);
+      gui2.widgetFocus(combo);
+
+      while true do begin
+        var ev = gui2.poll();
+        if ev == "quit" then break;
+        var cur = gui2.comboGetSelectedText(combo);
+        if cur != lastSel then begin
+          lastSel = cur;
+          println("Dipilih: " + cur);
+        end;
+        gui2.clear(20, 20, 30, 255);
+        gui2.text(50, 30, "Pilih negara:", 255, 255, 100);
+        gui2.text(50, 250, "Selected: " + cur, 200, 255, 200);
+        gui2.widgetsDraw();
+        gui2.present();
+        gui2.delay(16);
+      end;
+    end.
+
+**Behavior:**
+
+- Click combo box → dropdown opens (6 items visible below)
+- Hover item → highlight blue
+- Selected item marked dengan `> ` prefix + kuning color
+- Click item → selected, dropdown close
+- Click outside → dropdown close (auto)
+- Keyboard saat focused:
+  - ENTER — open dropdown (jika closed) atau confirm (jika open)
+  - SPACE — toggle dropdown
+  - ESC — close dropdown
+  - UP/DOWN — cycle selection (closed) atau hover (open)
+
+**Popup layer architecture:**
+
+ComboBox pakai **popup layer** di atas semua widget lain. Ini
+di-handle otomatis oleh `widgetsDraw()` (two-pass: Draw + DrawPopup).
+Popup boleh keluar dari bounds widget (extends ke Y+H).
+
+### 34.10 — ListBox Widget (Scrollable List)
+
+ListBox = list yang bisa di-scroll dengan selection. Cocok untuk:
+- File browser
+- Log viewer
+- Menu option banyak
+- Contact list
+
+**Signature:**
+
+    gui2.listbox(x, y, w, h, [initial], [r], [g], [b]) -> id
+    gui2.listSetItems(id, [arr of strings])
+    gui2.listGetItems(id) -> arr
+    gui2.listGetSelected(id) -> num (-1 if none)
+    gui2.listSetSelected(id, n)
+    gui2.listGetSelectedText(id) -> str
+
+**Example — 25 items with scroll:**
+
+    var lb = 0;
+    var items = [];
+
+    begin
+      gui2.init();
+      gui2.setFont("/data/data/com.termux/files/usr/share/fonts/TTF/DejaVuSans.ttf", 20);
+      gui2.window("ListBox", 600, 700);
+
+      for i = 1 to 25 do
+        items = items + ["Item " + str(i)];
+
+      lb = gui2.listbox(50, 50, 400, 500, "", 60, 60, 100);
+      gui2.listSetItems(lb, items);
+      gui2.listSetSelected(lb, 0);
+      gui2.widgetFocus(lb);
+
+      while true do begin
+        var ev = gui2.poll();
+        if ev == "quit" then break;
+        gui2.clear(20, 20, 30, 255);
+        gui2.text(500, 50, "Selected: " + gui2.listGetSelectedText(lb), 200, 255, 200);
+        gui2.text(500, 90, "Index: " + str(gui2.listGetSelected(lb)), 200, 200, 255);
+        gui2.widgetsDraw();
+        gui2.present();
+        gui2.delay(16);
+      end;
+    end.
+
+**Behavior:**
+
+- Click item → select
+- Hover item → highlight (light blue)
+- Selected item → blue highlight + yellow text
+- Scrollbar otomatis muncul jika overflow (25 items > visible)
+- Drag scrollbar → smooth scroll
+- Click track → jump scroll
+
+**Keyboard:**
+
+- UP/DOWN — prev/next item
+- PageUp/PageDown — jump visible count
+- HOME/END — first/last item
+- ENTER/SPACE — activate (jika ada callback, tapi ListBox belum)
+- Auto-scroll saat selection bergerak keluar viewport
+
+**Perbedaan dengan ComboBox:**
+
+| Aspect | ComboBox | ListBox |
+|---|---|---|
+| Popup layer | Ya (extends below) | Tidak (fixed bounds) |
+| Space used | Compact saat closed | Fixed W × H |
+| Visible items | 0 (closed) / N (open) | Selalu visible |
+| Kapan pakai | Pilih 1 dari sedikit | Pilih 1 dari banyak |
+
+### 34.11 — Checkbox + Radio Widget (v1.11.35)
+
+Dua widget toggle dengan perilaku berbeda:
+- **Checkbox** — independent toggle (A, B, C bisa checked bersamaan)
+- **Radio** — mutually exclusive dalam group (hanya 1 checked)
+
+**Checkbox — signature:**
+
+    gui2.checkbox(x, y, caption, [checked], [r], [g], [b]) -> id
+    gui2.checkboxGetChecked(id) -> bool
+    gui2.checkboxSetChecked(id, bool)
+
+**Radio — signature:**
+
+    gui2.radio(x, y, caption, [group_id], [checked], [r], [g], [b]) -> id
+    gui2.radioGetChecked(id) -> bool
+    gui2.radioSetChecked(id, bool)   // auto-uncheck siblings
+
+**Example — form settings:**
+
+    var optA = 0;
+    var optB = 0;
+    var sizeS = 0;
+    var sizeM = 0;
+    var sizeL = 0;
+
+    begin
+      gui2.init();
+      gui2.setFont("/data/data/com.termux/files/usr/share/fonts/TTF/DejaVuSans.ttf", 20);
+      gui2.window("Settings", 800, 500);
+
+      gui2.text(50, 30, "Feature flags (independent):", 255, 255, 100);
+      optA = gui2.checkbox(50, 70, "Enable feature A", true, 60, 60, 100);
+      optB = gui2.checkbox(50, 110, "Enable feature B", false, 60, 60, 100);
+
+      gui2.text(50, 180, "Size (mutually exclusive, group=1):", 255, 255, 100);
+      sizeS = gui2.radio(50, 220, "Small", 1, false, 60, 60, 100);
+      sizeM = gui2.radio(50, 260, "Medium", 1, true, 60, 60, 100);
+      sizeL = gui2.radio(50, 300, "Large", 1, false, 60, 60, 100);
+
+      gui2.widgetFocus(optA);
+
+      while true do begin
+        var ev = gui2.poll();
+        if ev == "quit" then break;
+        gui2.clear(20, 20, 30, 255);
+        gui2.text(50, 30, "Settings", 255, 255, 100);
+        gui2.text(500, 70, "A=" + str(gui2.checkboxGetChecked(optA)), 200, 200, 200);
+        gui2.text(500, 110, "B=" + str(gui2.checkboxGetChecked(optB)), 200, 200, 200);
+        gui2.text(500, 220, "S=" + str(gui2.radioGetChecked(sizeS)), 200, 200, 200);
+        gui2.text(500, 260, "M=" + str(gui2.radioGetChecked(sizeM)), 200, 200, 200);
+        gui2.text(500, 300, "L=" + str(gui2.radioGetChecked(sizeL)), 200, 200, 200);
+        gui2.widgetsDraw();
+        gui2.present();
+        gui2.delay(16);
+      end;
+    end.
+
+**Behavior — Checkbox:**
+
+- Click anywhere dalam bounds (box OR caption) → toggle
+- State independent (check A, B, C tanpa effect satu sama lain)
+- Visual: box 24×24 + green checkmark (filled square) jika checked
+- SPACE/ENTER saat focused → toggle
+
+**Behavior — Radio:**
+
+- Click → SelectSelf: check self + uncheck ALL siblings (same `group_id`)
+- Group scope: **same window** (tidak across windows)
+- Visual: box 24×24 + green inner dot jika checked
+- SPACE/ENTER saat focused → SelectSelf (same as click)
+- **Critical**: jangan check 2 radio dalam group yang sama → akan
+  auto-uncheck satu. Default behavior sudah handle ini.
+
+**GroupId convention:**
+
+- 0 = default group (kalau cuma 1 group radio, pakai 0)
+- 1, 2, 3, ... = different groups (independent mutual exclusion)
+- Contoh: 2 form group (size + color) → group 1 = size, group 2 = color
+
+**Focus indicator:**
+
+Semua widget (Checkbox, Radio, Button) punya focus border kuning
+saat Tab-focused. Ini membantu user tahu widget mana active.
+
+### 34.12 — Widget Comparison & Use Cases
+
+Tabel perbandingan untuk pilih widget yang tepat:
+
+| Widget | Kapan Pakai | Example Use Case |
+|---|---|---|
+| **Button** | Trigger action | Submit, Cancel, Save |
+| **Edit** | Single-line text | Name, Email, URL, Search |
+| **Memo** | Multi-line text | Notes, Description, Code |
+| **ComboBox** | Pilih dari N (compact) | Country, Category, Sort order |
+| **ListBox** | Pilih dari banyak (visible) | File picker, Log viewer |
+| **Checkbox** | Multiple independent | Feature toggles, Filters |
+| **Radio** | Single exclusive | Size, Gender, Priority |
+
+**Anti-patterns:**
+
+- ❌ Radio tanpa group_id berbeda untuk 2 kategori → semua exclusive
+  across category
+- ❌ Checkbox untuk single-selection → use Radio instead
+- ❌ ComboBox dengan 3 items → Button × 3 atau Radio mungkin lebih
+  jelas
+- ❌ Edit untuk 1000+ karakter → use Memo
+- ❌ ListBox untuk 5 items → Radio group lebih ringkas
+
+**Design combination pattern:**
+
+    // Form typical:
+    var nameEdit = gui2.edit(50, 50, 300, "");
+    var emailEdit = gui2.edit(50, 100, 300, "");
+    var country = gui2.combobox(50, 150, 300, "");
+    gui2.comboSetItems(country, ["ID", "MY", "SG"]);
+    var subscribe = gui2.checkbox(50, 200, "Subscribe newsletter", false);
+    var sizeS = gui2.radio(50, 250, "Small", 1, true);
+    var sizeM = gui2.radio(50, 290, "Medium", 1, false);
+    var submit = gui2.button(50, 350, 100, 40, "Submit");
+
+    // Tab order: name → email → country → subscribe → sizeS → sizeM → submit
 
 ---
 

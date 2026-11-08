@@ -17,6 +17,34 @@ Setiap phase selesai:
 
 ---
 
+## [1.11.36] - 2026-11-08
+
+### Docs (tutorial)
+- Bab 34 rewrite -- cover all 7 widgets (was 3):
+  - 34.1-34.6 preserved (existing content)
+  - 34.7 Edit Widget Advanced (focus + navigation + selection + clipboard)
+  - 34.8 Memo Widget (multi-line + scrollbar + line numbers + spacing + wrap)
+  - 34.9 ComboBox Widget (dropdown popup layer)
+  - 34.10 ListBox Widget (scrollable list with scrollbar)
+  - 34.11 Checkbox + Radio Widget (toggles with mutual exclusion)
+  - 34.12 Widget Comparison & Use Cases (decision matrix + anti-patterns)
+- Update "Available" head list: 3 widgets -> 7 widgets (v1.11.21 -> v1.11.35)
+- Remove "Coming (Phase 4b+)" block (all shipped)
+- Update 34.6 Limitations (v1.11.21 -> v1.11.35)
+- Tutorial now 6,111 lines (+267)
+
+### Widgets covered in Bab 34
+- Button (v1.11.18-20)
+- Edit (v1.11.21-26) -- selection, clipboard
+- Memo (v1.11.27-32) -- scrollbar, line numbers, wrap, spacing
+- ComboBox (v1.11.33)
+- ListBox (v1.11.34)
+- Checkbox + Radio (v1.11.35)
+
+### Next docs
+- pascak_api.md widget section sync
+- Cookbook recipes for widget patterns
+
 ## [1.11.35] - 2026-11-08
 
 ### Added (feature) -- GUI Widget Toolkit Phase 6c (Checkbox + Radio)
