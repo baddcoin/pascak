@@ -23101,6 +23101,76 @@ begin
   end;    
 end;
 
+{ v1.11.38: get last inserted rowid for given connection }
+function Native_SQLiteLastInsertId(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  Conn: TSQLite3Connection;
+  Qry: TSQLQuery;
+  Idx: Integer;
+begin
+  if Args.Count <> 1 then
+    raise EScriptRuntimeError.Create('sqliteLastInsertId(connID) butuh 1 argumen');
+  if TValue(Args[0]).DataType <> dtNumeric then
+    raise EScriptRuntimeError.Create('SQLite Error: Argumen ID Koneksi harus numerik!');
+  Idx := Trunc(TValue(Args[0]).NumVal);
+  SQLiteLock.Acquire;
+  try
+    if (Idx < 0) or (Idx >= SQLiteConnections.Count) or (SQLiteConnections[Idx] = nil) then
+      raise EScriptRuntimeError.Create('sqliteLastInsertId: Invalid connection ID');
+    Conn := TSQLite3Connection(SQLiteConnections[Idx]);
+    Qry := TSQLQuery.Create(nil);
+    try
+      Qry.DataBase := Conn;
+      Qry.Transaction := Conn.Transaction;
+      Qry.SQL.Text := 'SELECT last_insert_rowid() AS id';
+      Qry.Open;
+      if not Qry.EOF then
+        Result := TValue.CreateNum(Qry.Fields[0].AsLargeInt)
+      else
+        Result := TValue.CreateNum(0);
+    finally
+      Qry.Free;
+    end;
+  finally
+    SQLiteLock.Release;
+  end;
+end;
+
+{ v1.11.38: get rows affected by last INSERT/UPDATE/DELETE on connection }
+function Native_SQLiteChanges(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  Conn: TSQLite3Connection;
+  Qry: TSQLQuery;
+  Idx: Integer;
+begin
+  if Args.Count <> 1 then
+    raise EScriptRuntimeError.Create('sqliteChanges(connID) butuh 1 argumen');
+  if TValue(Args[0]).DataType <> dtNumeric then
+    raise EScriptRuntimeError.Create('SQLite Error: Argumen ID Koneksi harus numerik!');
+  Idx := Trunc(TValue(Args[0]).NumVal);
+  SQLiteLock.Acquire;
+  try
+    if (Idx < 0) or (Idx >= SQLiteConnections.Count) or (SQLiteConnections[Idx] = nil) then
+      raise EScriptRuntimeError.Create('sqliteChanges: Invalid connection ID');
+    Conn := TSQLite3Connection(SQLiteConnections[Idx]);
+    Qry := TSQLQuery.Create(nil);
+    try
+      Qry.DataBase := Conn;
+      Qry.Transaction := Conn.Transaction;
+      Qry.SQL.Text := 'SELECT changes() AS n';
+      Qry.Open;
+      if not Qry.EOF then
+        Result := TValue.CreateNum(Qry.Fields[0].AsLargeInt)
+      else
+        Result := TValue.CreateNum(0);
+    finally
+      Qry.Free;
+    end;
+  finally
+    SQLiteLock.Release;
+  end;
+end;
+
 function Native_SQLiteClose(Args: TObjectList; CallEnv: TSymbolTable): TValue;
 var
   Idx: Integer;
@@ -45674,6 +45744,9 @@ begin
   GEnvv.DefineVar('sqliteExec', TValue.CreateNative(@Native_SQLiteExec),true);
   GEnvv.DefineVar('sqliteQuery', TValue.CreateNative(@Native_SQLiteQuery),true);
   GEnvv.DefineVar('sqliteClose', TValue.CreateNative(@Native_SQLiteClose),true);
+  { v1.11.38: last insert id + changes }
+  GEnvv.DefineVar('sqliteLastInsertId', TValue.CreateNative(@Native_SQLiteLastInsertId),true);
+  GEnvv.DefineVar('sqliteChanges', TValue.CreateNative(@Native_SQLiteChanges),true);
   
   GEnvv.DefineVar('thread', TValue.CreateNative(@Native_RunThread),true); 
   GEnvv.DefineVar('poolRun', TValue.CreateNative(@Native_PoolRun), true);

@@ -17,6 +17,34 @@ Setiap phase selesai:
 
 ---
 
+## [1.11.38] - 2026-11-08
+
+### Added (feature) -- SQLite API extension
+- sqliteLastInsertId(handle) -> num -- get last inserted rowid
+  (essential for INSERT + use returned ID)
+- sqliteChanges(handle) -> num -- get rows affected by last
+  INSERT/UPDATE/DELETE (feedback + validation)
+
+### Implementation
+- Native_SQLiteLastInsertId -- SELECT last_insert_rowid()
+- Native_SQLiteChanges -- SELECT changes()
+- Both use existing SQLiteLock + connection validation pattern
+- Registered in GEnvv.DefineVar after sqliteClose
+
+### Verified (smoke test)
+- sqliteLastInsertId returns correct auto-increment IDs
+  (INSERT Alice -> 1, Bob -> 2, Charlie -> 3)
+- sqliteChanges returns correct affected count
+  (UPDATE 1 -> 1, UPDATE 3 -> 3, DELETE 1 -> 1)
+- Build: 52043 lines (+85 vs v1.11.37), EXIT 0
+- Regression: 17/17 lang tests PASS
+
+### Gap remaining (deferred)
+- Transaction wrapper (sqliteBegin/Commit/Rollback) -- ~30 min
+- Prepared statement cache -- ~1-2 jam
+- Async query -- ~2-3 jam
+- BLOB support -- ~1 jam
+
 ## [1.11.37] - 2026-11-08
 
 ### Docs (API reference)
