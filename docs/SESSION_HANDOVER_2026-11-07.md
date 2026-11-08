@@ -1,9 +1,9 @@
 📋 Handover Document — Pascak Development Context
 
 Generated: 2026-11-07
-Main HEAD: f00459a (v1.11.37)
-Tags: 94 total (v0.4.0 → v1.11.37)
-Engine: 51,970 lines
+Main HEAD: 41a2c10 (v1.11.39)
+Tags: 96 total (v0.4.0 → v1.11.39)
+Engine: 52,043 lines
 Tests: 17/17 PASS
 Tree: clean
 
@@ -160,7 +160,7 @@ Termux:X11 mode: harus "touchscreen" (bukan "touchpad" default). Swipe keyboard 
 
 ## 3️⃣ YANG SUDAH SELESAI
 
-39 Main Tags (v1.11.0 → v1.11.37)
+41 Main Tags (v1.11.0 → v1.11.39)
 
 Language & Core (v1.11.0–v1.11.13):
 
@@ -205,6 +205,8 @@ Phase Tag Deliverable
 6c v1.11.35 Checkbox + Radio (toggles)
 -- v1.11.36 Tutorial Bab 34 -- all 7 widgets
 -- v1.11.37 API ref: GUI2 Widgets section
+-- v1.11.38 SQLite: last_insert_id + changes
+-- v1.11.39 API ref: SQLite sync
 
 Widget API Lengkap (Final State)
 
@@ -253,7 +255,7 @@ gui2.widgetGetClicks(id), widgetGetKeyCount(id)
 Documentation
 
 · Tutorial Bab 1–34 (~5,700 lines) — Bab 34 = GUI Widgets
-· CHANGELOG — 39 entries (v1.11.0 → v1.11.37)
+· CHANGELOG — 41 entries (v1.11.0 → v1.11.39)
 · Design docs di feat/gui-widgets branch (v1.13.0-plan)
 · Register VM design di feat/register-vm branch (v1.12.0-plan)
 
@@ -409,7 +411,7 @@ docs/register_vm/ Register VM plan (feat/register-vm)
 tests/lang/ 17 language tests
 tests/fixtures/mock_server.py H2 test mock
 
-Key Line References (v1.11.37 approx)
+Key Line References (v1.11.39 approx)
 
 · TGuiWidget base class: ~38,200
 · TGuiButton: ~38,250
@@ -438,7 +440,7 @@ bash tests/run.sh lang 2>&1 | tail -3
 
 Trigger phrase untuk chat baru:
 
-"Lanjutkan Pascak development. HEAD = f00459a (v1.11.37), 94 tags. Baca handover ini. [pilih path: user feedback / Phase 6d / docs / dll]"
+"Lanjutkan Pascak development. HEAD = 41a2c10 (v1.11.39), 96 tags. Baca handover ini. [pilih path: user feedback / Phase 6d / docs / dll]"
 
 AI assistant checklist:
 
@@ -490,7 +492,7 @@ Next Technical Options
 Final State for Next Session
 
 ```
-Main:      f00459a (v1.11.37)
+Main:      41a2c10 (v1.11.39)
 Tags:      91 total
 Engine:    51,607 lines
 Tests:     17/17 PASS
