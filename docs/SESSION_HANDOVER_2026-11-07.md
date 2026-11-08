@@ -291,8 +291,16 @@ Benchmarks (Verified 2026-11-08)
 |---|---|---|
 | Layout API (flow) | 30 min | DONE ✅ |
 | Layout API (grid) | 30 min | DONE ✅ |
+
+### ✅ DONE in v1.11.43
+| Widget | Effort | Status |
+|---|---|---|
+| Theming (color/font per widget) | 1 sesi | DONE ✅ |
+
+### Verified Pending — New Features
+| Widget | Effort |
+|---|---|
 | Reusable Scrollbar (standalone) | 1 sesi |
-| Theming (color/font per widget) | 1 sesi |
 | Tab order customization | 1 sesi |
 
 ### Verified Pending — Deferred

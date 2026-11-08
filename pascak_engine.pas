@@ -38206,6 +38206,11 @@ type
     Hovered: Boolean;
     { v1.11.24: focus state (synced from W.FocusedWidgetID) }
     Focused: Boolean;
+    { v1.11.43: theming colors (base class -- all widgets inherit) }
+    BgR, BgG, BgB: UInt8;
+    FgR, FgG, FgB: UInt8;
+    HoverR, HoverG, HoverB: UInt8;
+    BdR, BdG, BdB: UInt8;
     constructor Create(AID: Integer; AOwner: Pointer);
     procedure Draw(GuiState: Pointer); virtual; abstract;
     { v1.11.33: popup layer (rendered after all widgets' Draw) -- empty default }
@@ -38219,7 +38224,7 @@ type
   { v1.11.15: minimal concrete widget for testing infrastructure }
   TGuiPlaceholderWidget = class(TGuiWidget)
   public
-    R, G, B, A: UInt8;
+    A: UInt8;
     constructor Create(AID: Integer; AOwner: Pointer;
       AX, AY, AW, AH: Integer; AR, AG, AB, AA: UInt8);
     procedure Draw(GuiState: Pointer); override;
@@ -38236,7 +38241,6 @@ type
   TGuiButton = class(TGuiWidget)
   public
     Caption: string;
-    R, G, B: UInt8;
     Pressed: Boolean;
     { v1.11.20: optional onClick callback (invoked via mini-VM) }
     OnClick: TValue;
@@ -38258,7 +38262,6 @@ type
     CursorPos: Integer;      // byte index (0..Length)
     SelAnchor: Integer;      // v1.11.25: selection anchor (-1 = none)
     DragActive: Boolean;     // v1.11.41: mouse drag selection state
-    BgR, BgG, BgB: UInt8;    // background color
     FontHeight: Integer;     // v1.11.30: measured glyph height
     constructor Create(AID: Integer; AOwner: Pointer;
       AX, AY, AW: Integer; const AInitial: string;
@@ -38279,7 +38282,6 @@ type
     CursorLine: Integer;    // 0..Lines.Count-1
     CursorCol: Integer;     // byte offset within Lines[CursorLine]
     ScrollTop: Integer;     // first visible line index
-    BgR, BgG, BgB: UInt8;
     LineHeight: Integer;    // pixels per line (FontHeight + LineSpacing)
     FontHeight: Integer;    // v1.11.30: measured glyph height
     { v1.11.30: spacing configurable }
@@ -38326,7 +38328,6 @@ type
     SelectedIdx: Integer;      // -1 = no selection
     DropdownOpen: Boolean;
     HoveredItemIdx: Integer;
-    BgR, BgG, BgB: UInt8;
     ItemHeight: Integer;
     constructor Create(AID: Integer; AOwner: Pointer;
       AX, AY, AW: Integer; const AInitial: string;
@@ -38349,7 +38350,6 @@ type
     SelectedIdx: Integer;      // -1 = no selection
     ScrollTop: Integer;        // first visible item index
     HoveredItemIdx: Integer;
-    BgR, BgG, BgB: UInt8;
     ItemHeight: Integer;
     ScrollBarWidth: Integer;
     DraggingScroll: Boolean;
@@ -38372,7 +38372,6 @@ type
   public
     Caption: string;
     Checked: Boolean;
-    BgR, BgG, BgB: UInt8;
     BoxSize: Integer;
     constructor Create(AID: Integer; AOwner: Pointer;
       AX, AY: Integer; const ACaption: string; AChecked: Boolean;
@@ -38388,7 +38387,6 @@ type
     Caption: string;
     Checked: Boolean;
     GroupId: Integer;
-    BgR, BgG, BgB: UInt8;
     BoxSize: Integer;
     constructor Create(AID: Integer; AOwner: Pointer;
       AX, AY: Integer; const ACaption: string; AGroupId: Integer;
@@ -38590,6 +38588,11 @@ begin
   KeyCount := 0;
   Hovered := False;
   Focused := False;
+  { v1.11.43: theming defaults }
+  BgR := 60; BgG := 60; BgB := 60;
+  FgR := 255; FgG := 255; FgB := 255;
+  HoverR := 90; HoverG := 90; HoverB := 90;
+  BdR := 100; BdG := 100; BdB := 100;
 end;
 
 { v1.11.33: default DrawPopup -- no-op }
@@ -38619,7 +38622,7 @@ constructor TGuiPlaceholderWidget.Create(AID: Integer; AOwner: Pointer;
 begin
   inherited Create(AID, AOwner);
   X := AX; Y := AY; W := AW; H := AH;
-  R := AR; G := AG; B := AB; A := AA;
+  BgR := AR; BgG := AG; BgB := AB; A := AA;
 end;
 
 procedure TGuiPlaceholderWidget.Draw(GuiState: Pointer);
@@ -38633,7 +38636,7 @@ begin
   if not Assigned(St.Renderer) then Exit;
   if not Assigned(St.pSetRenderDrawColor) then Exit;
   if not Assigned(St.pRenderFillRect) then Exit;
-  St.pSetRenderDrawColor(St.Renderer, R, G, B, A);
+  St.pSetRenderDrawColor(St.Renderer, BgR, BgG, BgB, A);
   RectArr[0] := X; RectArr[1] := Y;
   RectArr[2] := W; RectArr[3] := H;
   St.pRenderFillRect(St.Renderer, @RectArr[0]);
@@ -38710,7 +38713,7 @@ begin
   inherited Create(AID, AOwner);
   X := AX; Y := AY; W := AW; H := AH;
   Caption := ACaption;
-  R := AR; G := AG; B := AB;
+  BgR := AR; BgG := AG; BgB := AB;
   Pressed := False;
   OnClick := nil;
 end;
@@ -38739,17 +38742,17 @@ begin
   { v1.11.18: state-based background color }
   if Pressed then
   begin
-    CR := R div 2; CG := G div 2; CB := B div 2;
+    CR := BgR div 2; CG := BgG div 2; CB := BgB div 2;
   end
   else if Hovered then
   begin
-    CR := UInt8((Integer(R) + 255) div 2);
-    CG := UInt8((Integer(G) + 255) div 2);
-    CB := UInt8((Integer(B) + 255) div 2);
+    CR := UInt8((Integer(BgR) + 255) div 2);
+    CG := UInt8((Integer(BgG) + 255) div 2);
+    CB := UInt8((Integer(BgB) + 255) div 2);
   end
   else
   begin
-    CR := R; CG := G; CB := B;
+    CR := BgR; CG := BgG; CB := BgB;
   end;
   { v1.11.18: fill background }
   if Assigned(St.pSetRenderDrawColor) and Assigned(St.pRenderFillRect) then
@@ -38784,7 +38787,7 @@ begin
       St.pTTF_SizeText(St.Font, PAnsiChar(AnsiString(Caption)), @TW, @TH);
       if (TW > 0) and (TH > 0) then
         GuiDrawTextAt(St, X + (W - TW) div 2, Y + (H - TH) div 2,
-          Caption, 255, 255, 255);
+          Caption, FgR, FgG, FgB);
     end;
   end;
 end;
@@ -39026,7 +39029,7 @@ begin
     end
     else
       TextY := Y + 6;
-    GuiDrawTextAt(St, X + 4, TextY, EditText, 255, 255, 255);
+    GuiDrawTextAt(St, X + 4, TextY, EditText, FgR, FgG, FgB);
   end;
   { v1.11.24: cursor visible only when focused }
   if Focused and Assigned(St.pRenderFillRect) and Assigned(St.pTTF_SizeText)
@@ -40005,7 +40008,7 @@ begin
       end;
     end;
     if LineStr <> '' then
-      GuiDrawTextAt(St, TextX, TextY, LineStr, 255, 255, 255);
+      GuiDrawTextAt(St, TextX, TextY, LineStr, FgR, FgG, FgB);
   end;
   { v1.11.27: cursor at current line + col (only when focused) }
   if Focused and Assigned(St.pRenderFillRect) and Assigned(St.pTTF_SizeText)
@@ -40216,7 +40219,7 @@ begin
   { selected text }
   Txt := SelectedText;
   if Txt <> '' then
-    GuiDrawTextAt(St, X + 6, Y + (H - 16) div 2, Txt, 255, 255, 255);
+    GuiDrawTextAt(St, X + 6, Y + (H - 16) div 2, Txt, FgR, FgG, FgB);
   { arrow (down) -- simple "v" char }
   ArrowTxt := 'v';
   GuiDrawTextAt(St, X + W - 18, Y + (H - 16) div 2, ArrowTxt, 200, 200, 200);
@@ -40821,7 +40824,7 @@ begin
   { caption right of box }
   if Caption <> '' then
     GuiDrawTextAt(St, X + BoxSize + 8, Y + (BoxSize - 16) div 2,
-      Caption, 230, 230, 230);
+      Caption, FgR, FgG, FgB);
 end;
 
 function TGuiCheckbox.HandleMouse(MX, MY, Btn: Integer; Down: Boolean): Boolean;
@@ -40929,7 +40932,7 @@ begin
   { caption }
   if Caption <> '' then
     GuiDrawTextAt(St, X + BoxSize + 8, Y + (BoxSize - 16) div 2,
-      Caption, 230, 230, 230);
+      Caption, FgR, FgG, FgB);
 end;
 
 function TGuiRadio.HandleMouse(MX, MY, Btn: Integer; Down: Boolean): Boolean;
@@ -41767,6 +41770,66 @@ begin
       end;
     end;
   Result := TValue.CreateNum(Placed);
+end;
+
+{ v1.11.43: gui2.widgetSetColors(id, bgR, bgG, bgB, fgR, fgG, fgB) -> bool }
+function Native_Gui2_WidgetSetColors(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget;
+begin
+  Result := TValue.CreateBool(False);
+  if Args.Count <> 7 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  W.BgR := UInt8(Trunc(TValue(Args[1]).NumVal));
+  W.BgG := UInt8(Trunc(TValue(Args[2]).NumVal));
+  W.BgB := UInt8(Trunc(TValue(Args[3]).NumVal));
+  W.FgR := UInt8(Trunc(TValue(Args[4]).NumVal));
+  W.FgG := UInt8(Trunc(TValue(Args[5]).NumVal));
+  W.FgB := UInt8(Trunc(TValue(Args[6]).NumVal));
+  Result := TValue.CreateBool(True);
+end;
+
+{ v1.11.43: gui2.widgetSetHoverColor(id, r, g, b) -> bool }
+function Native_Gui2_WidgetSetHoverColor(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget;
+begin
+  Result := TValue.CreateBool(False);
+  if Args.Count <> 4 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  W.HoverR := UInt8(Trunc(TValue(Args[1]).NumVal));
+  W.HoverG := UInt8(Trunc(TValue(Args[2]).NumVal));
+  W.HoverB := UInt8(Trunc(TValue(Args[3]).NumVal));
+  Result := TValue.CreateBool(True);
+end;
+
+{ v1.11.43: gui2.widgetGetColors(id) -> dict }
+function Native_Gui2_WidgetGetColors(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget; D: TDictValue;
+begin
+  Result := TValue.CreateNull;
+  if Args.Count <> 1 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  D := TDictValue.Create;
+  try
+    D.SetValue('bg_r', TValue.CreateNum(W.BgR));
+    D.SetValue('bg_g', TValue.CreateNum(W.BgG));
+    D.SetValue('bg_b', TValue.CreateNum(W.BgB));
+    D.SetValue('fg_r', TValue.CreateNum(W.FgR));
+    D.SetValue('fg_g', TValue.CreateNum(W.FgG));
+    D.SetValue('fg_b', TValue.CreateNum(W.FgB));
+    D.SetValue('hover_r', TValue.CreateNum(W.HoverR));
+    D.SetValue('hover_g', TValue.CreateNum(W.HoverG));
+    D.SetValue('hover_b', TValue.CreateNum(W.HoverB));
+    Result := TValue.CreateDict(D);
+  except
+    D.Free;
+    raise;
+  end;
 end;
 
 function Native_Gui2_WidgetSetPos(Args: TObjectList; CallEnv: TSymbolTable): TValue;
@@ -45316,6 +45379,10 @@ begin
   Gui2Inst.Members.DefineVar('placeholder', TValue.CreateNative(@Native_Gui2_Placeholder));
   Gui2Inst.Members.DefineVar('widgetCount', TValue.CreateNative(@Native_Gui2_WidgetCount));
   Gui2Inst.Members.DefineVar('widgetsDraw', TValue.CreateNative(@Native_Gui2_WidgetsDraw));
+  { v1.11.43: theming }
+  Gui2Inst.Members.DefineVar('widgetSetColors', TValue.CreateNative(@Native_Gui2_WidgetSetColors));
+  Gui2Inst.Members.DefineVar('widgetSetHoverColor', TValue.CreateNative(@Native_Gui2_WidgetSetHoverColor));
+  Gui2Inst.Members.DefineVar('widgetGetColors', TValue.CreateNative(@Native_Gui2_WidgetGetColors));
   Gui2Inst.Members.DefineVar('widgetSetPos', TValue.CreateNative(@Native_Gui2_WidgetSetPos));
   Gui2Inst.Members.DefineVar('widgetSetSize', TValue.CreateNative(@Native_Gui2_WidgetSetSize));
   Gui2Inst.Members.DefineVar('widgetSetVisible', TValue.CreateNative(@Native_Gui2_WidgetSetVisible));
