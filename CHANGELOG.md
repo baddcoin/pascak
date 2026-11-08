@@ -17,6 +17,20 @@ Setiap phase selesai:
 
 ---
 
+## [1.11.39] - 2026-11-08
+
+### Docs (API reference)
+- pascak_api.md SQLite section updated:
+  - Add `sqliteLastInsertId(handle) -> num` documentation
+  - Add `sqliteChanges(handle) -> num` documentation
+- SQLite section headers: 4 -> 6
+- Both natives ship in v1.11.38, docs sync now
+
+### Verified
+- API ref now 5,606 lines (+28)
+- SQLite section: Connect, Exec, Query, LastInsertId, Changes, Close
+- Section boundaries: SQLite (4028) -> Crypto (4122), intact
+
 ## [1.11.38] - 2026-11-08
 
 ### Added (feature) -- SQLite API extension

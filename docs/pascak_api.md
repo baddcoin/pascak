@@ -4066,6 +4066,34 @@ end;
 
 **Batas**: 10.000 baris per query.
 
+### `sqliteLastInsertId(handle) → num`
+
+ID auto-increment dari INSERT terakhir pada koneksi ini.
+
+    sqliteExec(db, "INSERT INTO users (name) VALUES (?)", ["Alice"]);
+    var id := sqliteLastInsertId(db);   // 1
+    println("New user id: ", id);
+
+**Use case**: setelah INSERT, ambil ID baru untuk relasi (foreign key),
+redirect URL, atau feedback ke user.
+
+**Behavior**: mengembalikan 0 jika belum ada INSERT, atau pakai rowid
+manual (tanpa AUTOINCREMENT).
+
+### `sqliteChanges(handle) → num`
+
+Jumlah baris terpengaruh oleh INSERT/UPDATE/DELETE terakhir.
+
+    sqliteExec(db, "UPDATE users SET active = 1 WHERE age > ?", [18]);
+    var affected := sqliteChanges(db);
+    println("Updated rows: ", affected);
+
+**Use case**: validasi UPDATE/DELETE ("user tidak ditemukan" jika
+changes = 0), feedback ke user, batch operation count.
+
+**Behavior**: reset ke 0 setiap statement baru. Return rows affected
+by last INSERT/UPDATE/DELETE, tidak termasuk SELECT.
+
 ### `sqliteClose(handle) → bool`
 
 Tutup koneksi.
