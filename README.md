@@ -10,7 +10,7 @@
 Full-stack scripting language implemented in FreePascal. Single static binary (~3 MB) — no runtime dependencies beyond standard C libraries.
 
 **Design goals:**
-- **Fast startup** — ~2 ms cold start (bytecode cache)
+- **Fast startup** — ~110 ms end-to-end (10x faster than Node, 2x faster than Python in Termux)
 - **Batteries included** — HTTP/2, WebSocket, TLS, SQLite, crypto, FFI, async
 - **Modern language** — destructuring, `?.`, `??`, enums, coroutines
 - **Native GUI** — SDL2-based toolkit with 7 widgets, flow/grid layouts, and full theming
