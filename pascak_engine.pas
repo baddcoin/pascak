@@ -41680,6 +41680,95 @@ end;
 function GuiFindWidget(ID: Integer): TGuiWidget; forward;
 
 { v1.11.15: gui2.widgetSetPos(id, x, y) }
+{ v1.11.42: gui2.layoutFlow(x, y, maxWidth, [ids], spacing) -> count placed }
+function Native_Gui2_LayoutFlow(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  X0, Y0, MaxW, Spacing, I, CurX, CurY, RowH, Placed: Integer;
+  W: TGuiWidget;
+begin
+  Result := TValue.CreateNum(0);
+  if Args.Count <> 5 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  if TValue(Args[1]).DataType <> dtNumeric then Exit;
+  if TValue(Args[2]).DataType <> dtNumeric then Exit;
+  if TValue(Args[3]).DataType <> dtArray then Exit;
+  if TValue(Args[4]).DataType <> dtNumeric then Exit;
+  X0 := Trunc(TValue(Args[0]).NumVal);
+  Y0 := Trunc(TValue(Args[1]).NumVal);
+  MaxW := Trunc(TValue(Args[2]).NumVal);
+  Spacing := Trunc(TValue(Args[4]).NumVal);
+  CurX := X0; CurY := Y0; RowH := 0; Placed := 0;
+  for I := 0 to TValue(Args[3]).ArrayVal.Count - 1 do
+    if Assigned(TValue(Args[3]).ArrayVal[I]) and
+       (TValue(Args[3]).ArrayVal[I].DataType = dtNumeric) then
+    begin
+      W := GuiFindWidget(Trunc(TValue(Args[3]).ArrayVal[I].NumVal));
+      if Assigned(W) then
+      begin
+        if (CurX > X0) and (MaxW > 0) and (CurX + W.W > X0 + MaxW) then
+        begin
+          CurX := X0;
+          CurY := CurY + RowH + Spacing;
+          RowH := 0;
+        end;
+        W.X := CurX;
+        W.Y := CurY;
+        if W.H > RowH then RowH := W.H;
+        CurX := CurX + W.W + Spacing;
+        Placed := Placed + 1;
+      end;
+    end;
+  Result := TValue.CreateNum(Placed);
+end;
+
+{ v1.11.42: gui2.layoutGrid(x, y, cols, [ids], spacing) -> count placed }
+function Native_Gui2_LayoutGrid(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  X0, Y0, Cols, Spacing, I, Placed, Col, Row, MaxW, MaxH: Integer;
+  W: TGuiWidget;
+begin
+  Result := TValue.CreateNum(0);
+  if Args.Count <> 5 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  if TValue(Args[1]).DataType <> dtNumeric then Exit;
+  if TValue(Args[2]).DataType <> dtNumeric then Exit;
+  if TValue(Args[3]).DataType <> dtArray then Exit;
+  if TValue(Args[4]).DataType <> dtNumeric then Exit;
+  X0 := Trunc(TValue(Args[0]).NumVal);
+  Y0 := Trunc(TValue(Args[1]).NumVal);
+  Cols := Trunc(TValue(Args[2]).NumVal);
+  if Cols < 1 then Cols := 1;
+  Spacing := Trunc(TValue(Args[4]).NumVal);
+  MaxW := 0; MaxH := 0;
+  for I := 0 to TValue(Args[3]).ArrayVal.Count - 1 do
+    if Assigned(TValue(Args[3]).ArrayVal[I]) and
+       (TValue(Args[3]).ArrayVal[I].DataType = dtNumeric) then
+    begin
+      W := GuiFindWidget(Trunc(TValue(Args[3]).ArrayVal[I].NumVal));
+      if Assigned(W) then
+      begin
+        if W.W > MaxW then MaxW := W.W;
+        if W.H > MaxH then MaxH := W.H;
+      end;
+    end;
+  Placed := 0; Col := 0; Row := 0;
+  for I := 0 to TValue(Args[3]).ArrayVal.Count - 1 do
+    if Assigned(TValue(Args[3]).ArrayVal[I]) and
+       (TValue(Args[3]).ArrayVal[I].DataType = dtNumeric) then
+    begin
+      W := GuiFindWidget(Trunc(TValue(Args[3]).ArrayVal[I].NumVal));
+      if Assigned(W) then
+      begin
+        W.X := X0 + Col * (MaxW + Spacing);
+        W.Y := Y0 + Row * (MaxH + Spacing);
+        Placed := Placed + 1;
+        Col := Col + 1;
+        if Col >= Cols then begin Col := 0; Row := Row + 1; end;
+      end;
+    end;
+  Result := TValue.CreateNum(Placed);
+end;
+
 function Native_Gui2_WidgetSetPos(Args: TObjectList; CallEnv: TSymbolTable): TValue;
 var W: TGuiWidget;
 begin
@@ -45233,6 +45322,9 @@ begin
   Gui2Inst.Members.DefineVar('widgetSetEnabled', TValue.CreateNative(@Native_Gui2_WidgetSetEnabled));
   Gui2Inst.Members.DefineVar('widgetGetBounds', TValue.CreateNative(@Native_Gui2_WidgetGetBounds));
   Gui2Inst.Members.DefineVar('widgetDestroy', TValue.CreateNative(@Native_Gui2_WidgetDestroy));
+  { v1.11.42: layout API }
+  Gui2Inst.Members.DefineVar('layoutFlow', TValue.CreateNative(@Native_Gui2_LayoutFlow));
+  Gui2Inst.Members.DefineVar('layoutGrid', TValue.CreateNative(@Native_Gui2_LayoutGrid));
   { v1.11.16: event dispatch }
   Gui2Inst.Members.DefineVar('widgetGetClicks', TValue.CreateNative(@Native_Gui2_WidgetGetClicks));
   { v1.11.17: focus chain + keyboard dispatch }

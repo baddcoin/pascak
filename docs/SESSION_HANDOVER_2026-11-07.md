@@ -286,10 +286,11 @@ Benchmarks (Verified 2026-11-08)
 | Dynamic gutter width (5c-2b) | 30 min | DONE ✅ |
 | Edit mouse drag select | 30 min | DONE ✅ |
 
-### Verified Pending — New Features
-| Widget | Effort |
-|---|---|
-| Layout API (flow/grid) | 2 sesi |
+### ✅ DONE in v1.11.42
+| Widget | Effort | Status |
+|---|---|---|
+| Layout API (flow) | 30 min | DONE ✅ |
+| Layout API (grid) | 30 min | DONE ✅ |
 | Reusable Scrollbar (standalone) | 1 sesi |
 | Theming (color/font per widget) | 1 sesi |
 | Tab order customization | 1 sesi |
