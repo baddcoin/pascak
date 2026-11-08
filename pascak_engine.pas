@@ -38257,6 +38257,7 @@ type
     EditText: string;        // UTF-8 buffer
     CursorPos: Integer;      // byte index (0..Length)
     SelAnchor: Integer;      // v1.11.25: selection anchor (-1 = none)
+    DragActive: Boolean;     // v1.11.41: mouse drag selection state
     BgR, BgG, BgB: UInt8;    // background color
     FontHeight: Integer;     // v1.11.30: measured glyph height
     constructor Create(AID: Integer; AOwner: Pointer;
@@ -39235,20 +39236,44 @@ begin
 end;
 
 function TGuiEdit.HandleMouse(MX, MY, Btn: Integer; Down: Boolean): Boolean;
+var
+  NewPos: Integer;
 begin
   Result := False;
   if not Visible or not Enabled then Exit;
+  { v1.11.41: drag motion (Btn=0, Down=True from SDL_MOUSEMOTION via capture) }
+  if (Btn = 0) and Down then
+  begin
+    if not DragActive then Exit;
+    if Assigned(GGuiSDL) then
+    begin
+      NewPos := GuiEditCursorFromX(GGuiSDL, Self, MX);
+      if NewPos <> CursorPos then
+      begin
+        CursorPos := NewPos;
+        Result := True;
+      end;
+    end;
+    Exit;
+  end;
   if Btn <> 1 then Exit;
   if (MX < X) or (MX >= X + W) or (MY < Y) or (MY >= Y + H) then Exit;
-  { v1.11.24: mousedown -> set cursor from click X, auto-focus via dispatch }
   if Down then
   begin
     if Assigned(GGuiSDL) then
-      CursorPos := GuiEditCursorFromX(GGuiSDL, Self, MX);
+    begin
+      NewPos := GuiEditCursorFromX(GGuiSDL, Self, MX);
+      CursorPos := NewPos;
+      SelAnchor := NewPos;   // v1.11.41: anchor for drag selection
+      DragActive := True;
+    end;
     Result := True;
   end
   else
+  begin
+    DragActive := False;
     Result := True;
+  end;
 end;
 
 { v1.11.28: Memo selection helpers }
@@ -39767,12 +39792,26 @@ end;
 procedure TGuiMemo.RebuildVisualLines;
 var
   I, WAvail, ChunkStart, ChunkEnd, LastSpace, j: Integer;
+  DigCount, CharW, PHtmp: Integer;
   LineStr, LinePart: string;
   TW, TH: Int32;
 begin
   VisualLines.Clear;
   VisualToLogical.Clear;
   VisualStartCol.Clear;
+  { v1.11.41: dynamic gutter width based on line count }
+  if LineNumbersEnabled then
+  begin
+    DigCount := Length(IntToStr(Lines.Count));
+    if DigCount < 2 then DigCount := 2;
+    CharW := 0; PHtmp := 0;
+    if Assigned(GGuiSDL) and Assigned(GGuiSDL.pTTF_SizeText)
+       and Assigned(GGuiSDL.Font) then
+      GGuiSDL.pTTF_SizeText(GGuiSDL.Font, PAnsiChar(AnsiString('0')), @CharW, @PHtmp);
+    if CharW <= 0 then CharW := FontHeight div 2;
+    if CharW <= 0 then CharW := 8;
+    GutterWidth := DigCount * CharW + 14;
+  end;
   { v1.11.32: subtract GutterWidth when line numbers ON }
   WAvail := W - PadLeft - ScrollBarWidth - 8;
   if LineNumbersEnabled then
@@ -39958,7 +39997,10 @@ begin
       if LogIdx <> PrevLogIdx then
       begin
         NumStr := IntToStr(LogIdx + 1);
-        GuiDrawTextAt(St, X + 6, TextY, NumStr, 180, 180, 100);
+        { v1.11.41: right-align line number in gutter }
+        PW1 := 0; PH1 := 0;
+        St.pTTF_SizeText(St.Font, PAnsiChar(AnsiString(NumStr)), @PW1, @PH1);
+        GuiDrawTextAt(St, X + GutterWidth - PW1 - 6, TextY, NumStr, 180, 180, 100);
         PrevLogIdx := LogIdx;
       end;
     end;

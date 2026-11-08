@@ -280,11 +280,11 @@ Benchmarks (Verified 2026-11-08)
 
 ## 4️⃣ YANG BELUM SELESAI (Verified 2026-11-08)
 
-### Verified Pending — Quick Polish
-| Item | Effort | Priority |
+### ✅ DONE in v1.11.41
+| Item | Effort | Status |
 |---|---|---|
-| Dynamic gutter width (5c-2b) | 30 min | Nice-to-have |
-| Edit mouse drag select | 30 min | Nice-to-have |
+| Dynamic gutter width (5c-2b) | 30 min | DONE ✅ |
+| Edit mouse drag select | 30 min | DONE ✅ |
 
 ### Verified Pending — New Features
 | Widget | Effort |
