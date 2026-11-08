@@ -1,9 +1,12 @@
-begin
+function bench(n) begin
   var s := 0;
-  var i := 0;
-  while i < 1000000 do begin
+  for i := 0 to n - 1 do begin
     s := s + i;
-    i := i + 1;
   end;
-  println("arith_done " + str(s));
+  return s;
+end;
+
+begin
+  var r := bench(1000000);
+  println("arith_done " + str(r));
 end.
