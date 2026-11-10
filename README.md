@@ -1,5 +1,5 @@
 # Pascak VM
-> Pascal-style scripting language with Python's expressiveness. Now with a production-ready Native GUI Toolkit.
+> Pascal-style scripting language. 27x faster startup than Node. Compute parity with Node/Python. Native GUI included.
 
 [![Version](https://img.shields.io/badge/version-v1.11.43-blue)]()
 [![License](https://img.shields.io/badge/license-MIT-green)]()
@@ -10,7 +10,7 @@
 Full-stack scripting language implemented in FreePascal. Single static binary (~3 MB) — no runtime dependencies beyond standard C libraries.
 
 **Design goals:**
-- **Fast startup** — ~110 ms end-to-end (10x faster than Node, 2x faster than Python in Termux)
+- **Fast startup + compute** — 52 ms startup (27x faster than Node), 685 ms arith loop (faster than Node/Python)
 - **Batteries included** — HTTP/2, WebSocket, TLS, SQLite, crypto, FFI, async
 - **Modern language** — destructuring, `?.`, `??`, enums, coroutines
 - **Native GUI** — SDL2-based toolkit with 7 widgets, flow/grid layouts, and full theming

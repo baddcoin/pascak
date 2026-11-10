@@ -16188,15 +16188,7 @@ begin
     
             ContinueTarget := FChunk.CodeCount;
             
-            // ✅ FIX: exit-before-increment (sama seperti global path)
-            FChunk.AddInstruction(opcGetLocal, ResolveLocal(TForNode(Node).VarName));
-            FChunk.AddInstruction(opcGetLocal, ResolveLocal('#end_' + TForNode(Node).VarName));
-            FChunk.AddInstruction(opcEqual);
-            ExitGuardIdx := FChunk.AddInstruction(opcJumpIfFalse, 0);
-            ExitLoopIdx := FChunk.AddInstruction(opcJump, 0);
-            
-            FChunk.Code[ExitGuardIdx].Operand := 
-              FChunk.CodeCount - ExitGuardIdx - 1;
+            { v1.11.47: removed redundant bottom check }
             
             if HasStep then
             begin
@@ -16219,8 +16211,6 @@ begin
             
             FChunk.AddInstruction(opcJump, LoopStartIdx - FChunk.CodeCount - 1);
             
-            FChunk.Code[ExitLoopIdx].Operand := 
-              FChunk.CodeCount - ExitLoopIdx - 1;            
         
           finally
             EndLoopTracking;
