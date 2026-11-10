@@ -22,23 +22,24 @@ toolkit built directly into the 3MB binary.
 We benchmarked Pascak against Python 3.14, Node 26, and Lua 5.4 on a
 Termux (aarch64) device. We believe in honest numbers:
 
-**Startup Time (Cold Start)**
-- **Pascak:** 63 ms
-- **Python:** 373 ms
-- **Node:** 1,279 ms
-- **Lua:** 39 ms
+**Startup Time**
+- **Pascak:** 52–134 ms (warm/cold)
+- **Python:** 191–373 ms
+- **Node:** 1,048–1,430 ms
+- **Lua:** 39–59 ms
 
-Pascak is **20x faster to start** than Node — perfect for CLIs and
+Pascak is **8–27x faster to start** than Node — perfect for CLIs and
 one-shot scripts.
 
 **Arithmetic Loop (1M iterations)**
-- **Pascak:** 3,568 ms (using idiomatic `for` loop)
-- **Python:** 687 ms
-- **Node:** 657 ms
-- **Lua:** 82 ms
+- **Pascak:** 685 ms
+- **Python:** 688 ms
+- **Node:** 616–723 ms
+- **Lua:** 84 ms
 
-Pascak is **5.4x slower** on raw numeric compute than JIT-based VMs.
-This is the tradeoff for a simple tree-walking interpreter without a JIT.
+Pascak is **at parity** with Python and Node on numeric loops. v1.11.47
+closed a 5.2x gap via profiler-driven bytecode cleanup (removed
+redundant for-loop bottom check). Lua's register VM remains ~8x faster.
 
 ## 💡 Why Pascak?
 

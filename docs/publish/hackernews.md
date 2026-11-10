@@ -15,10 +15,11 @@ The core idea is "batteries included, fast to start":
 
 We just crossed 100 release tags (v1.11.45) and hit zero technical debt.
 
-To be completely honest: we are 5.4x slower than Node on raw numeric
-loops. We use a tree-walking interpreter without a JIT. But for CLIs,
-one-shot scripts, and desktop GUI tools, that startup speed and built-in
-toolkit make it a joy to use.
+To be completely honest: three months ago we were 5.4x slower than
+Node on numeric loops. A profiling tool found a compiler bug (redundant
+for-loop bottom check), and fixing it gave us a 5.2x speedup. We are now
+at parity with Node and Python (685ms vs 616-723ms for 1M iterations).
+Lua's register VM is still ~8x faster on raw compute.
 
 Repo: https://github.com/baddcoin/pascak
 Docs: 34-chapter tutorial + full API reference.

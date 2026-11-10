@@ -31,27 +31,29 @@ For a long time, we assumed we were "pretty fast." Then we ran the
 numbers against Node and Python.
 
 We wrote an arithmetic loop (1M iterations):
-- **Node:** 657 ms
-- **Pascak:** 3,568 ms
+- **Node:** 616–723 ms
+- **Python:** 688 ms
+- **Pascak:** 685 ms
 
-We were **5.4x slower** on raw compute. Why? Because Pascak is a
-*tree-walking interpreter*. Node uses V8's JIT. Python 3.14 uses loop
-specialization. We don't have those optimizations.
+We were **at parity**. But three months earlier, we'd been 5.4x slower.
+What changed?
 
-We had a choice: hide the numbers, or be honest.
-
-We chose honesty. We documented the benchmark, explained the tradeoffs,
-and optimized what we could (switching to `for` loops over `while` loops
-improved performance by 2.65x).
+A profiling tool (`--profile`, v1.11.46) revealed our for-loop compiler
+was emitting a redundant bottom check — 8 opcodes per iteration when 3
+would suffice. Removing 30 lines of redundant bytecode gave a **5.2x
+speedup** (3,568 ms → 685 ms). The lesson: **measure before rewriting**.
+We almost spent 15 sessions refactoring to a register VM. One profiling
+session saved us 13.
 
 ## Why Startup Matters
 
-Where Pascak *does* win is startup time:
-- **Node:** 1,279 ms
-- **Pascak:** 63 ms
+Startup time is where Pascak's advantage is most dramatic:
+- **Node:** 1,048–1,430 ms
+- **Python:** 191–233 ms
+- **Pascak:** 52–134 ms (warm/cold cache)
 
-That's a **20x difference**. For a CLI tool or a serverless handler, 1.2
-seconds of waiting is an eternity. Pascak executes instantly.
+That's an **8–27x difference vs Node**. For a CLI tool or serverless
+handler, 1.2 seconds of waiting is eternity. Pascak executes in a blink.
 
 ## What's Next?
 
