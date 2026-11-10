@@ -10,8 +10,11 @@
 
 ---
 
-## FASE 0 — Measurement Infrastructure (2-3 hari)
-**Tanpa data, semua optimisasi adalah tebakan.**
+## FASE 0 — Measurement Infrastructure ✅ DONE v1.11.46
+**Tool:** `--dump-bytecode` (disassembler), `--profile` (opcode counter).
+**Data actual (arith.pas 1M iter):** 8 opcodes/iterasi, `opcGetLocal` 25% hotspot.
+**Finding:** For-loop compile has redundancy — `opcForLoopCond` coexist with unfused opcodes.
+**Priority update:** Phase 5 (fix redundancy) may give 40% win faster than Phase 1.
 - `--dump-bytecode`: Disassembler per chunk.
 - `--profile`: Hit-count per opcode, waktu per fungsi.
 - `--trace`: Log eksekusi per-instruksi.

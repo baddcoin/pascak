@@ -5583,6 +5583,96 @@ begin
   end;
 end;
 
+{ v1.11.46: Phase 0 — measurement infrastructure }
+var
+  GDumpBytecode: Boolean = False;
+  GProfileEnabled: Boolean = False;
+  GProfileCounts: array[TVMOpCode] of Int64;
+
+function OpcodeName(Op: TVMOpCode): string;
+begin
+  Result := 'opc_#' + IntToStr(Ord(Op));
+  case Op of
+    opcConstant: Result := 'opcConstant';
+    opcNull: Result := 'opcNull';
+    opcTrue: Result := 'opcTrue';
+    opcFalse: Result := 'opcFalse';
+    opcPop: Result := 'opcPop';
+    opcDup: Result := 'opcDup';
+    opcAdd: Result := 'opcAdd';
+    opcSub: Result := 'opcSub';
+    opcMul: Result := 'opcMul';
+    opcDiv: Result := 'opcDiv';
+    opcMod: Result := 'opcMod';
+    opcEqual: Result := 'opcEqual';
+    opcLess: Result := 'opcLess';
+    opcGreater: Result := 'opcGreater';
+    opcJump: Result := 'opcJump';
+    opcJumpIfFalse: Result := 'opcJumpIfFalse';
+    opcCall: Result := 'opcCall';
+    opcReturn: Result := 'opcReturn';
+    opcHalt: Result := 'opcHalt';
+    opcGetGlobal: Result := 'opcGetGlobal';
+    opcSetGlobal: Result := 'opcSetGlobal';
+    opcGetLocal: Result := 'opcGetLocal';
+    opcSetLocal: Result := 'opcSetLocal';
+    opcIncrLocal: Result := 'opcIncrLocal';
+    opcDecrLocal: Result := 'opcDecrLocal';
+    opcAddNum: Result := 'opcAddNum';
+    opcSubNum: Result := 'opcSubNum';
+    opcMulNum: Result := 'opcMulNum';
+    opcDivNum: Result := 'opcDivNum';
+    opcAddLocalLocal: Result := 'opcAddLocalLocal';
+    opcAddLocalConst: Result := 'opcAddLocalConst';
+    opcForLoopCond: Result := 'opcForLoopCond';
+    opcForLoopCondDown: Result := 'opcForLoopCondDown';
+    opcIncrGlobal: Result := 'opcIncrGlobal';
+    opcDecrGlobal: Result := 'opcDecrGlobal';
+    opcAddGlobalConst: Result := 'opcAddGlobalConst';
+    opcSumArrayIndex: Result := 'opcSumArrayIndex';
+    opcGetIndexArrayInt: Result := 'opcGetIndexArrayInt';
+    opcReturnNull: Result := 'opcReturnNull';
+    opcThrow: Result := 'opcThrow';
+    opcJumpIfNull: Result := 'opcJumpIfNull';
+    opcJumpIfNotNull: Result := 'opcJumpIfNotNull';
+  end;
+end;
+
+procedure DumpChunk(const C: TChunk; const SrcName: string);
+var I: Integer;
+begin
+  WriteLn('=== Bytecode dump: ', SrcName, ' (', C.CodeCount, ' instructions) ===');
+  for I := 0 to C.CodeCount - 1 do
+    WriteLn('[', I, '] ',
+      OpcodeName(C.Code[I].OpCode), ' ',
+      C.Code[I].Operand, ' ',
+      C.Code[I].Operand2, ' ',
+      C.Code[I].Operand3);
+  WriteLn('=== End bytecode dump ===');
+end;
+
+procedure PrintProfileReport;
+var
+  Op: TVMOpCode;
+  Total: Int64;
+  Pct: Double;
+begin
+  Total := 0;
+  for Op := Low(TVMOpCode) to High(TVMOpCode) do
+    Total := Total + GProfileCounts[Op];
+  WriteLn('=== Opcode profile (total: ', Total, ') ===');
+  for Op := Low(TVMOpCode) to High(TVMOpCode) do
+    if GProfileCounts[Op] > 0 then
+    begin
+      if Total > 0 then
+        Pct := 100.0 * GProfileCounts[Op] / Total
+      else
+        Pct := 0;
+      WriteLn(OpcodeName(Op), '  ', GProfileCounts[Op], '  (', Pct:0:1, '%)');
+    end;
+  WriteLn('=== End profile ===');
+end;
+
 function TPascakEngine.ExecuteChunk(Chunk: TChunk; OutVM: TVM): TValue;
 var
   LocalVM: TVM;
@@ -5636,12 +5726,18 @@ begin
   FIsRunning := True;
   try
     BytecodeChunk := CompileSource(Source, SourceName);
+    { v1.11.46: Phase 0 bytecode dump }
+    if GDumpBytecode then
+      DumpChunk(BytecodeChunk, SourceName);
     try
       LocalVM := TVM.Create(FGlobalEnv);
       try
         LocalVM.MaxExecutionTimeMs := FMaxExecTimeMs;
         LocalVM.MaxInstructions := FMaxInstructions;
         Result := LocalVM.Run(BytecodeChunk);
+        { v1.11.46: Phase 0 profile report }
+        if GProfileEnabled then
+          PrintProfileReport;
       finally
         LocalVM.Free;
       end;
@@ -5669,12 +5765,18 @@ begin
   
   // ✨ PHASE 4: Gunakan LoadOrCompile untuk caching
   BytecodeChunk := LoadOrCompile(SafePath, CacheHit);
+  { v1.11.46: Phase 0 bytecode dump }
+  if GDumpBytecode then
+    DumpChunk(BytecodeChunk, SafePath);
   try
     LocalVM := TVM.Create(FGlobalEnv);
     try
       LocalVM.MaxExecutionTimeMs := FMaxExecTimeMs;
       LocalVM.MaxInstructions := FMaxInstructions;
       Result := LocalVM.Run(BytecodeChunk);
+      { v1.11.46: Phase 0 profile report }
+      if GProfileEnabled then
+        PrintProfileReport;
     finally
       LocalVM.Free;
     end;
@@ -17558,6 +17660,10 @@ begin
            and FContext.DebugServer.Enabled then
           FContext.DebugServer.PollDebugger(Self, CurrentLine);
           
+        { v1.11.46: Phase 0 profiling counter }
+        if GProfileEnabled then
+          Inc(GProfileCounts[Inst.OpCode]);
+
         case Inst.OpCode of
           opcTryBegin:
             begin
@@ -52081,7 +52187,11 @@ begin
     else if ParamStr(ArgIdx) = '--lsp' then
       LspMode := True
     else if ParamStr(ArgIdx) = '--test' then
-      TestMode := True    
+      TestMode := True
+    else if ParamStr(ArgIdx) = '--dump-bytecode' then
+      GDumpBytecode := True
+    else if ParamStr(ArgIdx) = '--profile' then
+      GProfileEnabled := True    
     else if ParamStr(ArgIdx) = '--fmt' then
       FmtMode := True
     else if ParamStr(ArgIdx) = '--check' then
