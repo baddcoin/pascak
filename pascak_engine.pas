@@ -258,6 +258,8 @@ type
     opcAddGlobalConst,  // Operand: varidx, Operand2: constidx → Name := Name + const
     opcAddLocalConst,   // Operand: localidx, Operand2: constidx → Local += const
     opcForLoopCondDown, // Operand: i, Operand2: end, Operand3: jump → for..downto
+    opcForLoopCheckGlobal, // v1.11.48: fused global for-loop top check
+    opcForLoopIncGlobal,   // v1.11.48: fused global for-loop bottom incr
     opcReturnNull,      // Return null tanpa push stack
     opcThrow,
     opcDefineOrReplaceGlobal, opcJumpIfNull, opcJumpIfNotNull
@@ -5626,6 +5628,8 @@ begin
     opcAddLocalConst: Result := 'opcAddLocalConst';
     opcForLoopCond: Result := 'opcForLoopCond';
     opcForLoopCondDown: Result := 'opcForLoopCondDown';
+    opcForLoopCheckGlobal: Result := 'opcForLoopCheckGlobal';
+    opcForLoopIncGlobal: Result := 'opcForLoopIncGlobal';
     opcIncrGlobal: Result := 'opcIncrGlobal';
     opcDecrGlobal: Result := 'opcDecrGlobal';
     opcAddGlobalConst: Result := 'opcAddGlobalConst';
@@ -15352,8 +15356,10 @@ var
   LoopVarGlobalIdx: Integer;     // ← baru
   EndValueSlot: Integer;         // ← baru
 
-  ExitGuardIdx: Integer;    // ← baru
-  ExitLoopIdx: Integer;     // ← baru
+  ExitGuardIdx: Integer;    // legacy (unused after v1.11.48 for-global)
+  ExitLoopIdx: Integer;     // legacy (unused after v1.11.48 for-global)
+  TopCheckIdx: Integer;     // v1.11.48
+  IncLoopIdx: Integer;      // v1.11.48
 
   function CheckSpreadOperator(List: TObjectList): Boolean;
   var k: Integer;
@@ -16073,15 +16079,11 @@ begin
           try
             LoopStartIdx := FChunk.CodeCount;
       
-            // Kondisi: a <= end (asc) / a >= end (desc)
-            FChunk.AddInstruction(opcGetGlobal, LoopVarGlobalIdx);
-            FChunk.AddInstruction(opcGetLocal, EndValueSlot);
+            { v1.11.48: fused top check }
+            TopCheckIdx := FChunk.AddInstruction(
+              opcForLoopCheckGlobal, LoopVarGlobalIdx, EndValueSlot);
             if ForIsDownto then
-              FChunk.AddInstruction(opcGreaterEq)
-            else
-              FChunk.AddInstruction(opcLessEq);
-      
-            JumpIfFalseIdx := FChunk.AddInstruction(opcJumpIfFalse, 0);
+              FChunk.Code[TopCheckIdx].Operand3 := $40000000;
       
             BeginScope;
             Compile(TForNode(Node).Body, True);
@@ -16089,20 +16091,16 @@ begin
      
             ContinueTarget := FChunk.CodeCount;
           
-            // ✅ FIX: exit-before-increment untuk match semantik Pascal/FPC.
-            // Cek: a == end? Kalau ya, keluar tanpa increment.
-            FChunk.AddInstruction(opcGetGlobal, LoopVarGlobalIdx);
-            FChunk.AddInstruction(opcGetLocal, EndValueSlot);
-            FChunk.AddInstruction(opcEqual);
-            ExitGuardIdx := FChunk.AddInstruction(opcJumpIfFalse, 0);
-            // 'a' sudah == end: keluar loop
-            ExitLoopIdx := FChunk.AddInstruction(opcJump, 0);
-            
-            // Path increment (a != end)
-            FChunk.Code[ExitGuardIdx].Operand := 
-              FChunk.CodeCount - ExitGuardIdx - 1;
-            
-            if HasStep then
+            { v1.11.48: fused bottom increment + jump-back (no-step only) }
+            if not HasStep then
+            begin
+              IncLoopIdx := FChunk.AddInstruction(
+                opcForLoopIncGlobal, LoopVarGlobalIdx, EndValueSlot);
+              FChunk.Code[IncLoopIdx].Operand3 := (IncLoopIdx + 1) - LoopStartIdx;
+              if ForIsDownto then
+                FChunk.Code[IncLoopIdx].Operand3 := FChunk.Code[IncLoopIdx].Operand3 or $40000000;
+            end
+            else
             begin
               FChunk.AddInstruction(opcGetGlobal, LoopVarGlobalIdx);
               FChunk.AddInstruction(opcGetLocal,
@@ -16112,25 +16110,16 @@ begin
               else
                 FChunk.AddInstruction(opcAdd);
               FChunk.AddInstruction(opcSetGlobal, LoopVarGlobalIdx);
-            end
-            else
-            begin
-              if ForIsDownto then
-                FChunk.AddInstruction(opcDecrGlobal, LoopVarGlobalIdx)
-              else
-                FChunk.AddInstruction(opcIncrGlobal, LoopVarGlobalIdx);
+              FChunk.AddInstruction(opcJump, LoopStartIdx - FChunk.CodeCount - 1);
             end;
-          
-            FChunk.AddInstruction(opcJump, LoopStartIdx - FChunk.CodeCount - 1);
-            
-            // Target exit loop setelah increment di-skip
-            FChunk.Code[ExitLoopIdx].Operand := 
-              FChunk.CodeCount - ExitLoopIdx - 1;
           finally
             EndLoopTracking;
           end;
           
-          FChunk.Code[JumpIfFalseIdx].Operand := FChunk.CodeCount - JumpIfFalseIdx - 1;
+          { v1.11.48: patch TopCheckIdx exit offset }
+          FChunk.Code[TopCheckIdx].Operand3 :=
+            FChunk.Code[TopCheckIdx].Operand3 or
+            ((FChunk.CodeCount - TopCheckIdx - 1) and $3FFFFFFF);
           PatchLoopJumps(ContinueTarget);
           EndScope;
           PushedValue := False;          
@@ -19506,6 +19495,114 @@ begin
                 Inc(CurrentFrame^.IP, Inst.Operand3);
               end;
             end;            
+
+          opcForLoopCheckGlobal:
+            begin
+              { v1.11.48: fused global for-loop top check }
+              if (Inst.Operand < 0) or (Inst.Operand >= CurrentFrame^.Chunk.VarNames.Count) then
+                errMSG.callerror(102, 'TVM.Run (opcForLoopCheckGlobal: gidx OOB)', CurrentLine, CurrentCol);
+              if (Inst.Operand2 < 0) or (CurrentFrame^.BaseSlot + Inst.Operand2 >= STACK_MAX) then
+                errMSG.callerror(105, 'TVM.Run (opcForLoopCheckGlobal: end slot OOB)', CurrentLine, CurrentCol);
+              VarName := CurrentFrame^.Chunk.VarNames[Inst.Operand];
+              { v1.11.48a: inline cache for global read }
+              CacheSlot := @FGlobalCache[CurrentFrame^.IP - 1];
+              if CacheSlot^.GValid
+                 and (CacheSlot^.GVarName = VarName)
+                 and (CacheSlot^.GItem <> nil)
+                 and (CacheSlot^.GRoot = Pointer(CurrentFrame^.Env.GetGlobal))
+                 and Assigned(CacheSlot^.GItem^.Value)
+                 and (TSymbolTable(CacheSlot^.GRoot).Generation = CacheSlot^.GGen) then
+              begin
+                a := CacheSlot^.GItem^.Value;
+              end
+              else
+              begin
+                a := CurrentFrame^.Env.GetVar(VarName);
+                LookupRoot := CurrentFrame^.Env.GetGlobal;
+                LookupItem := LookupRoot.FindLocalEntry(VarName);
+                if (LookupItem <> nil) and Assigned(LookupItem^.Value) then
+                begin
+                  CacheSlot^.GVarName := VarName;
+                  CacheSlot^.GItem := LookupItem;
+                  CacheSlot^.GRoot := Pointer(LookupRoot);
+                  CacheSlot^.GGen := LookupRoot.Generation;
+                  CacheSlot^.GValid := True;
+                end
+                else
+                begin
+                  CacheSlot^.GValid := False;
+                  CacheSlot^.GItem := nil;
+                end;
+              end;
+              b := FStack[CurrentFrame^.BaseSlot + Inst.Operand2];
+              if (a = nil) or (a.DataType <> dtNumeric) then
+                errMSG.callerror(19, 'TVM.Run (opcForLoopCheckGlobal: i non-numeric)', CurrentLine, CurrentCol);
+              if (b = nil) or (b.DataType <> dtNumeric) then
+                errMSG.callerror(19, 'TVM.Run (opcForLoopCheckGlobal: end non-numeric)', CurrentLine, CurrentCol);
+              if (Inst.Operand3 and $40000000) <> 0 then
+              begin
+                if a.FNumVal < b.FNumVal then
+                  Inc(CurrentFrame^.IP, Inst.Operand3 and $3FFFFFFF);
+              end
+              else
+              begin
+                if a.FNumVal > b.FNumVal then
+                  Inc(CurrentFrame^.IP, Inst.Operand3 and $3FFFFFFF);
+              end;
+            end;
+
+          opcForLoopIncGlobal:
+            begin
+              { v1.11.48: fused global for-loop bottom increment + jump-back }
+              if (Inst.Operand < 0) or (Inst.Operand >= CurrentFrame^.Chunk.VarNames.Count) then
+                errMSG.callerror(102, 'TVM.Run (opcForLoopIncGlobal: gidx OOB)', CurrentLine, CurrentCol);
+              if (Inst.Operand2 < 0) or (CurrentFrame^.BaseSlot + Inst.Operand2 >= STACK_MAX) then
+                errMSG.callerror(105, 'TVM.Run (opcForLoopIncGlobal: end slot OOB)', CurrentLine, CurrentCol);
+              VarName := CurrentFrame^.Chunk.VarNames[Inst.Operand];
+              { v1.11.48a: inline cache for global read }
+              CacheSlot := @FGlobalCache[CurrentFrame^.IP - 1];
+              if CacheSlot^.GValid
+                 and (CacheSlot^.GVarName = VarName)
+                 and (CacheSlot^.GItem <> nil)
+                 and (CacheSlot^.GRoot = Pointer(CurrentFrame^.Env.GetGlobal))
+                 and Assigned(CacheSlot^.GItem^.Value)
+                 and (TSymbolTable(CacheSlot^.GRoot).Generation = CacheSlot^.GGen) then
+              begin
+                a := CacheSlot^.GItem^.Value;
+              end
+              else
+              begin
+                a := CurrentFrame^.Env.GetVar(VarName);
+                LookupRoot := CurrentFrame^.Env.GetGlobal;
+                LookupItem := LookupRoot.FindLocalEntry(VarName);
+                if (LookupItem <> nil) and Assigned(LookupItem^.Value) then
+                begin
+                  CacheSlot^.GVarName := VarName;
+                  CacheSlot^.GItem := LookupItem;
+                  CacheSlot^.GRoot := Pointer(LookupRoot);
+                  CacheSlot^.GGen := LookupRoot.Generation;
+                  CacheSlot^.GValid := True;
+                end
+                else
+                begin
+                  CacheSlot^.GValid := False;
+                  CacheSlot^.GItem := nil;
+                end;
+              end;
+              b := FStack[CurrentFrame^.BaseSlot + Inst.Operand2];
+              if (a = nil) or (a.DataType <> dtNumeric) then
+                errMSG.callerror(19, 'TVM.Run (opcForLoopIncGlobal: i non-numeric)', CurrentLine, CurrentCol);
+              if (b = nil) or (b.DataType <> dtNumeric) then
+                errMSG.callerror(19, 'TVM.Run (opcForLoopIncGlobal: end non-numeric)', CurrentLine, CurrentCol);
+              if a.FNumVal <> b.FNumVal then
+              begin
+                if (Inst.Operand3 and $40000000) <> 0 then
+                  CurrentFrame^.Env.AtomicAddNumeric(VarName, -1.0)
+                else
+                  CurrentFrame^.Env.AtomicAddNumeric(VarName, 1.0);
+                Dec(CurrentFrame^.IP, Inst.Operand3 and $3FFFFFFF);
+              end;
+            end;
 
           opcIncrGlobal:
             begin

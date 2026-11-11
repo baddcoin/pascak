@@ -70,15 +70,20 @@
 
 ---
 
-## FASE 5 — Superinstruction Polishing (1 minggu)
-**Root cause:** `TryEmit*` saat ini hanya jalan untuk local scope, miss untuk global.
-**Perubahan:**
-- Extend `TryEmit*` untuk global scope.
-- Tambah superinstruction untuk `while` loop (`Lt + JumpIfFalse`).
-- Tambah `opcLtLocalConst`.
-**Expected speedup:** **1.2–1.3x**.
-**Target:** `for` loop ~300–500 ms → **~250–400 ms**.
-**Risk:** LOW (Tinggal extend pattern).
+## FASE 5 — Superinstruction Polishing
+**Status:** ✅ DONE local (v1.11.47), ⚠️ ATTEMPTED global (v1.11.48, no win)
+
+### 5a — Local for-loop (v1.11.47) ✅
+Remove redundant bottom check → 5.2x speedup (3568ms → 685ms).
+
+### 5b — Global for-loop (v1.11.48) ⚠️ Negative result
+Attempted: fuse 8 opcodes → 3 for global for-loop + inline cache.
+Result: -53% opcode count, **0% runtime improvement**.
+Root cause: Generation counter invalidation on every SetGlobal forces cache
+miss. Plus TValue boxing + AtomicAdd locking.
+**Conclusion:** Global for-loop cannot be optimized without Register VM or
+arena allocator. Do not attempt further global loop optimizations. See
+`benchmarks/cross_lang/results_v1.11.48.md` for full analysis.
 
 ---
 
