@@ -42560,6 +42560,11 @@ begin
   if (Args.Count >= 6) and (TValue(Args[5]).DataType = dtNumeric) then R := Trunc(TValue(Args[5]).NumVal);
   if (Args.Count >= 7) and (TValue(Args[6]).DataType = dtNumeric) then G := Trunc(TValue(Args[6]).NumVal);
   if (Args.Count >= 8) and (TValue(Args[7]).DataType = dtNumeric) then B := Trunc(TValue(Args[7]).NumVal);
+  if not Assigned(GGuiSDL.Font) then
+  begin
+    GGuiSDL.LastError := 'button: font not loaded, call gui2.setFont() first';
+    Exit(TValue.CreateNum(-1));
+  end;
   W := GuiCurrentWindow;
   if not Assigned(W) or not Assigned(W.Widgets) then Exit;
   ID := GGuiSDL.NextWidgetID;
@@ -42687,6 +42692,11 @@ begin
   if (Args.Count >= 5) and (TValue(Args[4]).DataType = dtNumeric) then R := Trunc(TValue(Args[4]).NumVal);
   if (Args.Count >= 6) and (TValue(Args[5]).DataType = dtNumeric) then G := Trunc(TValue(Args[5]).NumVal);
   if (Args.Count >= 7) and (TValue(Args[6]).DataType = dtNumeric) then B := Trunc(TValue(Args[6]).NumVal);
+  if not Assigned(GGuiSDL.Font) then
+  begin
+    GGuiSDL.LastError := 'edit: font not loaded, call gui2.setFont() first';
+    Exit(TValue.CreateNum(-1));
+  end;
   W := GuiCurrentWindow;
   if not Assigned(W) or not Assigned(W.Widgets) then Exit;
   ID := GGuiSDL.NextWidgetID;
@@ -42777,6 +42787,11 @@ begin
   if (Args.Count >= 6) and (TValue(Args[5]).DataType = dtNumeric) then R := Trunc(TValue(Args[5]).NumVal);
   if (Args.Count >= 7) and (TValue(Args[6]).DataType = dtNumeric) then G := Trunc(TValue(Args[6]).NumVal);
   if (Args.Count >= 8) and (TValue(Args[7]).DataType = dtNumeric) then B := Trunc(TValue(Args[7]).NumVal);
+  if not Assigned(GGuiSDL.Font) then
+  begin
+    GGuiSDL.LastError := 'memo: font not loaded, call gui2.setFont() first';
+    Exit(TValue.CreateNum(-1));
+  end;
   W := GuiCurrentWindow;
   if not Assigned(W) or not Assigned(W.Widgets) then Exit;
   ID := GGuiSDL.NextWidgetID;
@@ -43044,6 +43059,11 @@ begin
   if (Args.Count >= 5) and (TValue(Args[4]).DataType = dtNumeric) then R := Trunc(TValue(Args[4]).NumVal);
   if (Args.Count >= 6) and (TValue(Args[5]).DataType = dtNumeric) then G := Trunc(TValue(Args[5]).NumVal);
   if (Args.Count >= 7) and (TValue(Args[6]).DataType = dtNumeric) then B := Trunc(TValue(Args[6]).NumVal);
+  if not Assigned(GGuiSDL.Font) then
+  begin
+    GGuiSDL.LastError := 'combobox: font not loaded, call gui2.setFont() first';
+    Exit(TValue.CreateNum(-1));
+  end;
   W := GuiCurrentWindow;
   if not Assigned(W) or not Assigned(W.Widgets) then Exit;
   ID := GGuiSDL.NextWidgetID;
@@ -43177,6 +43197,11 @@ begin
   if (Args.Count >= 6) and (TValue(Args[5]).DataType = dtNumeric) then R := Trunc(TValue(Args[5]).NumVal);
   if (Args.Count >= 7) and (TValue(Args[6]).DataType = dtNumeric) then G := Trunc(TValue(Args[6]).NumVal);
   if (Args.Count >= 8) and (TValue(Args[7]).DataType = dtNumeric) then B := Trunc(TValue(Args[7]).NumVal);
+  if not Assigned(GGuiSDL.Font) then
+  begin
+    GGuiSDL.LastError := 'listbox: font not loaded, call gui2.setFont() first';
+    Exit(TValue.CreateNum(-1));
+  end;
   W := GuiCurrentWindow;
   if not Assigned(W) or not Assigned(W.Widgets) then Exit;
   ID := GGuiSDL.NextWidgetID;
@@ -43297,6 +43322,11 @@ begin
   if (Args.Count >= 5) and (TValue(Args[4]).DataType = dtNumeric) then R := Trunc(TValue(Args[4]).NumVal);
   if (Args.Count >= 6) and (TValue(Args[5]).DataType = dtNumeric) then G := Trunc(TValue(Args[5]).NumVal);
   if (Args.Count >= 7) and (TValue(Args[6]).DataType = dtNumeric) then B := Trunc(TValue(Args[6]).NumVal);
+  if not Assigned(GGuiSDL.Font) then
+  begin
+    GGuiSDL.LastError := 'checkbox: font not loaded, call gui2.setFont() first';
+    Exit(TValue.CreateNum(-1));
+  end;
   W := GuiCurrentWindow;
   if not Assigned(W) or not Assigned(W.Widgets) then Exit;
   ID := GGuiSDL.NextWidgetID;
@@ -43362,6 +43392,11 @@ begin
   if (Args.Count >= 6) and (TValue(Args[5]).DataType = dtNumeric) then R := Trunc(TValue(Args[5]).NumVal);
   if (Args.Count >= 7) and (TValue(Args[6]).DataType = dtNumeric) then G := Trunc(TValue(Args[6]).NumVal);
   if (Args.Count >= 8) and (TValue(Args[7]).DataType = dtNumeric) then B := Trunc(TValue(Args[7]).NumVal);
+  if not Assigned(GGuiSDL.Font) then
+  begin
+    GGuiSDL.LastError := 'radio: font not loaded, call gui2.setFont() first';
+    Exit(TValue.CreateNum(-1));
+  end;
   W := GuiCurrentWindow;
   if not Assigned(W) or not Assigned(W.Widgets) then Exit;
   ID := GGuiSDL.NextWidgetID;
