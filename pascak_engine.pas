@@ -38449,6 +38449,15 @@ type
   { v1.11.21: Edit widget (Phase 4a) -- single-line text input.
     Phase 4a: basic typing + backspace + cursor movement.
     Phase 4b+: selection, clipboard, HOME/END, scroll. }
+  { v1.12.2: Progress bar widget (Phase 7b) -- value 0..100. }
+  TGuiProgressBar = class(TGuiWidget)
+  public
+    Value: Integer;  { 0..100 }
+    constructor Create(AID: Integer; AOwner: Pointer;
+      AX, AY, AW, AH: Integer; AInitialValue: Integer);
+    procedure Draw(GuiState: Pointer); override;
+  end;
+
   { v1.12.1: Label widget (Phase 7) -- static text display. }
   TGuiLabel = class(TGuiWidget)
   public
@@ -38909,6 +38918,59 @@ procedure GuiDrawTextAt(St: TGuiSDLState; X, Y: Integer;
 procedure GuiInvokeCallback(Cb: TValue; CallEnv: TSymbolTable); forward;
 
 { v1.11.18: Button widget implementation }
+constructor TGuiProgressBar.Create(AID: Integer; AOwner: Pointer;
+  AX, AY, AW, AH: Integer; AInitialValue: Integer);
+begin
+  inherited Create(AID, AOwner);
+  X := AX; Y := AY; W := AW; H := AH;
+  Value := AInitialValue;
+  if Value < 0 then Value := 0;
+  if Value > 100 then Value := 100;
+  BgR := 40; BgG := 40; BgB := 60;
+  FgR := 80; FgG := 160; FgB := 240;
+  Focusable := False;
+end;
+
+procedure TGuiProgressBar.Draw(GuiState: Pointer);
+var
+  St: TGuiSDLState;
+  RectArr: array[0..3] of Int32;
+  FillW: Integer;
+begin
+  if not Visible then Exit;
+  St := TGuiSDLState(GuiState);
+  if not Assigned(St) then Exit;
+  if not Assigned(St.Renderer) then Exit;
+  { Track background }
+  if Assigned(St.pSetRenderDrawColor) and Assigned(St.pRenderFillRect) then
+  begin
+    St.pSetRenderDrawColor(St.Renderer, BgR, BgG, BgB, 255);
+    RectArr[0] := X; RectArr[1] := Y;
+    RectArr[2] := W; RectArr[3] := H;
+    St.pRenderFillRect(St.Renderer, @RectArr[0]);
+  end;
+  { Fill proportional }
+  FillW := (W * Value) div 100;
+  if FillW > 0 then
+  begin
+    if Assigned(St.pSetRenderDrawColor) and Assigned(St.pRenderFillRect) then
+    begin
+      St.pSetRenderDrawColor(St.Renderer, FgR, FgG, FgB, 255);
+      RectArr[0] := X; RectArr[1] := Y;
+      RectArr[2] := FillW; RectArr[3] := H;
+      St.pRenderFillRect(St.Renderer, @RectArr[0]);
+    end;
+  end;
+  { Border }
+  if Assigned(St.pRenderDrawRect) then
+  begin
+    St.pSetRenderDrawColor(St.Renderer, BgR div 2, BgG div 2, BgB div 2, 255);
+    RectArr[0] := X; RectArr[1] := Y;
+    RectArr[2] := W; RectArr[3] := H;
+    St.pRenderDrawRect(St.Renderer, @RectArr[0]);
+  end;
+end;
+
 constructor TGuiLabel.Create(AID: Integer; AOwner: Pointer;
   AX, AY, AW, AH: Integer; const ACaption: string; AAlign: Integer);
 begin
@@ -42606,6 +42668,90 @@ end;
 
 { v1.11.18: gui2.button(x, y, w, h, caption, [r], [g], [b]) -> widget id }
 { v1.12.1: gui2.label(x, y, w, h, text[, align[, r, g, b]]) -> id | -1 | 0 }
+{ v1.12.2: gui2.progressBar(x, y, w, h[, initial[, bgR,g,b[, fgR,g,b]]]) -> id | -1 | 0 }
+function Native_Gui2_ProgressBar(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  W: TGuiSDLWindow;
+  Widget: TGuiProgressBar;
+  X, Y, WW, HH, ID, InitVal: Integer;
+  BR, BG, BB, FR, FG, FB: Integer;
+begin
+  Result := TValue.CreateNum(0);
+  if (Args.Count < 4) or (Args.Count > 11) then
+  begin
+    GuiSetErr('progressBar: expected 4-11 args');
+    Exit;
+  end;
+  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Windows)) then
+  begin
+    GuiSetErr('progressBar: call gui2.init() first');
+    Exit;
+  end;
+  X := Trunc(TValue(Args[0]).NumVal);
+  Y := Trunc(TValue(Args[1]).NumVal);
+  WW := Trunc(TValue(Args[2]).NumVal);
+  HH := Trunc(TValue(Args[3]).NumVal);
+  InitVal := 0;
+  if (Args.Count >= 5) and (TValue(Args[4]).DataType = dtNumeric) then InitVal := Trunc(TValue(Args[4]).NumVal);
+  BR := 40; BG := 40; BB := 60;
+  FR := 80; FG := 160; FB := 240;
+  if (Args.Count >= 8) and (TValue(Args[5]).DataType = dtNumeric) then BR := Trunc(TValue(Args[5]).NumVal);
+  if (Args.Count >= 8) and (TValue(Args[6]).DataType = dtNumeric) then BG := Trunc(TValue(Args[6]).NumVal);
+  if (Args.Count >= 8) and (TValue(Args[7]).DataType = dtNumeric) then BB := Trunc(TValue(Args[7]).NumVal);
+  if (Args.Count >= 11) and (TValue(Args[8]).DataType = dtNumeric) then FR := Trunc(TValue(Args[8]).NumVal);
+  if (Args.Count >= 11) and (TValue(Args[9]).DataType = dtNumeric) then FG := Trunc(TValue(Args[9]).NumVal);
+  if (Args.Count >= 11) and (TValue(Args[10]).DataType = dtNumeric) then FB := Trunc(TValue(Args[10]).NumVal);
+  if not Assigned(GGuiSDL.Font) then
+  begin
+    GGuiSDL.LastError := 'progressBar: font not loaded, call gui2.setFont() first';
+    Exit(TValue.CreateNum(-1));
+  end;
+  W := GuiCurrentWindow;
+  if not Assigned(W) or not Assigned(W.Widgets) then
+  begin
+    GGuiSDL.LastError := 'progressBar: no window, call gui2.window() first';
+    Exit(TValue.CreateNum(-1));
+  end;
+  ID := GGuiSDL.NextWidgetID;
+  Inc(GGuiSDL.NextWidgetID);
+  Widget := TGuiProgressBar.Create(ID, W, X, Y, WW, HH, InitVal);
+  Widget.BgR := UInt8(BR); Widget.BgG := UInt8(BG); Widget.BgB := UInt8(BB);
+  Widget.FgR := UInt8(FR); Widget.FgG := UInt8(FG); Widget.FgB := UInt8(FB);
+  W.Widgets.Add(Widget);
+  Result := TValue.CreateNum(ID);
+end;
+
+{ v1.12.2: gui2.progressSetValue(id, value) -> bool }
+function Native_Gui2_ProgressSetValue(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget; V: Integer;
+begin
+  Result := TValue.CreateBool(False);
+  if Args.Count <> 2 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  if TValue(Args[1]).DataType <> dtNumeric then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  if not (W is TGuiProgressBar) then Exit;
+  V := Trunc(TValue(Args[1]).NumVal);
+  if V < 0 then V := 0;
+  if V > 100 then V := 100;
+  TGuiProgressBar(W).Value := V;
+  Result := TValue.CreateBool(True);
+end;
+
+{ v1.12.2: gui2.progressGetValue(id) -> num }
+function Native_Gui2_ProgressGetValue(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget;
+begin
+  Result := TValue.CreateNum(0);
+  if Args.Count <> 1 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  if not (W is TGuiProgressBar) then Exit;
+  Result := TValue.CreateNum(TGuiProgressBar(W).Value);
+end;
+
 function Native_Gui2_Label(Args: TObjectList; CallEnv: TSymbolTable): TValue;
 var
   W: TGuiSDLWindow;
@@ -45819,6 +45965,9 @@ begin
   Gui2Inst.Members.DefineVar('widgetGetKeyCount', TValue.CreateNative(@Native_Gui2_WidgetGetKeyCount));
   { v1.11.18: Button widget }
   Gui2Inst.Members.DefineVar('button', TValue.CreateNative(@Native_Gui2_Button));
+  Gui2Inst.Members.DefineVar('progressBar', TValue.CreateNative(@Native_Gui2_ProgressBar));
+  Gui2Inst.Members.DefineVar('progressSetValue', TValue.CreateNative(@Native_Gui2_ProgressSetValue));
+  Gui2Inst.Members.DefineVar('progressGetValue', TValue.CreateNative(@Native_Gui2_ProgressGetValue));
   Gui2Inst.Members.DefineVar('label', TValue.CreateNative(@Native_Gui2_Label));
   Gui2Inst.Members.DefineVar('labelGetText', TValue.CreateNative(@Native_Gui2_LabelGetText));
   Gui2Inst.Members.DefineVar('labelSetText', TValue.CreateNative(@Native_Gui2_LabelSetText));
