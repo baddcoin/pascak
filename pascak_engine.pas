@@ -41806,6 +41806,15 @@ begin
   Result := TValue.CreateNum(GGuiSDL.FocusedWindowID);
 end;
 
+{ v1.11.52: error helper -- writes to GGuiSDL or bootstrap fallback }
+var GuiBootstrapLastError: string = '';
+
+procedure GuiSetErr(const Msg: string);
+begin
+  if Assigned(GGuiSDL) then GGuiSDL.LastError := Msg
+  else GuiBootstrapLastError := Msg;
+end;
+
 function Native_Gui2_Window(Args: TObjectList; CallEnv: TSymbolTable): TValue;
 { Backward-compat: creates primary window. Uses NewWindow internally. }
 var InnerRet: TValue;
@@ -42548,8 +42557,8 @@ var
   Caption: string;
 begin
   Result := TValue.CreateNum(0);
-  if (Args.Count < 5) or (Args.Count > 8) then Exit;
-  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Windows)) then Exit;
+  if (Args.Count < 5) or (Args.Count > 8) then begin GuiSetErr('button: expected 5-8 args'); Exit; end;
+  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Windows)) then begin GuiSetErr('button: call gui2.init() first'); Exit; end;
   if TValue(Args[4]).DataType <> dtString then Exit;
   X := Trunc(TValue(Args[0]).NumVal);
   Y := Trunc(TValue(Args[1]).NumVal);
@@ -42680,8 +42689,8 @@ var
   Initial: string;
 begin
   Result := TValue.CreateNum(0);
-  if (Args.Count < 3) or (Args.Count > 7) then Exit;
-  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Windows)) then Exit;
+  if (Args.Count < 3) or (Args.Count > 7) then begin GuiSetErr('edit: expected 3-7 args'); Exit; end;
+  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Windows)) then begin GuiSetErr('edit: call gui2.init() first'); Exit; end;
   X := Trunc(TValue(Args[0]).NumVal);
   Y := Trunc(TValue(Args[1]).NumVal);
   WW := Trunc(TValue(Args[2]).NumVal);
@@ -42774,8 +42783,8 @@ var
   Initial: string;
 begin
   Result := TValue.CreateNum(0);
-  if (Args.Count < 4) or (Args.Count > 8) then Exit;
-  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Windows)) then Exit;
+  if (Args.Count < 4) or (Args.Count > 8) then begin GuiSetErr('memo: expected 4-8 args'); Exit; end;
+  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Windows)) then begin GuiSetErr('memo: call gui2.init() first'); Exit; end;
   X := Trunc(TValue(Args[0]).NumVal);
   Y := Trunc(TValue(Args[1]).NumVal);
   WW := Trunc(TValue(Args[2]).NumVal);
@@ -43047,8 +43056,8 @@ var
   Initial: string;
 begin
   Result := TValue.CreateNum(0);
-  if (Args.Count < 3) or (Args.Count > 7) then Exit;
-  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Windows)) then Exit;
+  if (Args.Count < 3) or (Args.Count > 7) then begin GuiSetErr('combobox: expected 3-7 args'); Exit; end;
+  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Windows)) then begin GuiSetErr('combobox: call gui2.init() first'); Exit; end;
   X := Trunc(TValue(Args[0]).NumVal);
   Y := Trunc(TValue(Args[1]).NumVal);
   WW := Trunc(TValue(Args[2]).NumVal);
@@ -43184,8 +43193,8 @@ var
   Initial: string;
 begin
   Result := TValue.CreateNum(0);
-  if (Args.Count < 4) or (Args.Count > 8) then Exit;
-  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Windows)) then Exit;
+  if (Args.Count < 4) or (Args.Count > 8) then begin GuiSetErr('listbox: expected 4-8 args'); Exit; end;
+  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Windows)) then begin GuiSetErr('listbox: call gui2.init() first'); Exit; end;
   X := Trunc(TValue(Args[0]).NumVal);
   Y := Trunc(TValue(Args[1]).NumVal);
   WW := Trunc(TValue(Args[2]).NumVal);
@@ -43309,8 +43318,8 @@ var
   Checked: Boolean;
 begin
   Result := TValue.CreateNum(0);
-  if (Args.Count < 3) or (Args.Count > 7) then Exit;
-  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Windows)) then Exit;
+  if (Args.Count < 3) or (Args.Count > 7) then begin GuiSetErr('checkbox: expected 3-7 args'); Exit; end;
+  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Windows)) then begin GuiSetErr('checkbox: call gui2.init() first'); Exit; end;
   if TValue(Args[2]).DataType <> dtString then Exit;
   X := Trunc(TValue(Args[0]).NumVal);
   Y := Trunc(TValue(Args[1]).NumVal);
@@ -43376,8 +43385,8 @@ var
   Checked: Boolean;
 begin
   Result := TValue.CreateNum(0);
-  if (Args.Count < 3) or (Args.Count > 8) then Exit;
-  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Windows)) then Exit;
+  if (Args.Count < 3) or (Args.Count > 8) then begin GuiSetErr('radio: expected 3-8 args'); Exit; end;
+  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Windows)) then begin GuiSetErr('radio: call gui2.init() first'); Exit; end;
   if TValue(Args[2]).DataType <> dtString then Exit;
   X := Trunc(TValue(Args[0]).NumVal);
   Y := Trunc(TValue(Args[1]).NumVal);
@@ -43793,7 +43802,6 @@ begin
   Result := TValue.CreateStr(GuiKeyName(Code));
 end;
 
-var GuiBootstrapLastError: string = '';
 function Native_Gui2_SetFont(Args: TObjectList; CallEnv: TSymbolTable): TValue;
 var
   Path, SafePath: string;
