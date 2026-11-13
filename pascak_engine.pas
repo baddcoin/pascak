@@ -42566,7 +42566,7 @@ begin
     Exit(TValue.CreateNum(-1));
   end;
   W := GuiCurrentWindow;
-  if not Assigned(W) or not Assigned(W.Widgets) then Exit;
+  if not Assigned(W) or not Assigned(W.Widgets) then begin GGuiSDL.LastError := 'button: no window, call gui2.window() first'; Exit(TValue.CreateNum(-1)); end;
   ID := GGuiSDL.NextWidgetID;
   Inc(GGuiSDL.NextWidgetID);
   Widget := TGuiButton.Create(ID, W,
@@ -42698,7 +42698,7 @@ begin
     Exit(TValue.CreateNum(-1));
   end;
   W := GuiCurrentWindow;
-  if not Assigned(W) or not Assigned(W.Widgets) then Exit;
+  if not Assigned(W) or not Assigned(W.Widgets) then begin GGuiSDL.LastError := 'edit: no window, call gui2.window() first'; Exit(TValue.CreateNum(-1)); end;
   ID := GGuiSDL.NextWidgetID;
   Inc(GGuiSDL.NextWidgetID);
   Widget := TGuiEdit.Create(ID, W, X, Y, WW, Initial, UInt8(R), UInt8(G), UInt8(B));
@@ -42793,7 +42793,7 @@ begin
     Exit(TValue.CreateNum(-1));
   end;
   W := GuiCurrentWindow;
-  if not Assigned(W) or not Assigned(W.Widgets) then Exit;
+  if not Assigned(W) or not Assigned(W.Widgets) then begin GGuiSDL.LastError := 'memo: no window, call gui2.window() first'; Exit(TValue.CreateNum(-1)); end;
   ID := GGuiSDL.NextWidgetID;
   Inc(GGuiSDL.NextWidgetID);
   Widget := TGuiMemo.Create(ID, W, X, Y, WW, HH, Initial, UInt8(R), UInt8(G), UInt8(B));
@@ -43065,7 +43065,7 @@ begin
     Exit(TValue.CreateNum(-1));
   end;
   W := GuiCurrentWindow;
-  if not Assigned(W) or not Assigned(W.Widgets) then Exit;
+  if not Assigned(W) or not Assigned(W.Widgets) then begin GGuiSDL.LastError := 'combobox: no window, call gui2.window() first'; Exit(TValue.CreateNum(-1)); end;
   ID := GGuiSDL.NextWidgetID;
   Inc(GGuiSDL.NextWidgetID);
   Widget := TGuiComboBox.Create(ID, W, X, Y, WW, Initial, UInt8(R), UInt8(G), UInt8(B));
@@ -43203,7 +43203,7 @@ begin
     Exit(TValue.CreateNum(-1));
   end;
   W := GuiCurrentWindow;
-  if not Assigned(W) or not Assigned(W.Widgets) then Exit;
+  if not Assigned(W) or not Assigned(W.Widgets) then begin GGuiSDL.LastError := 'listbox: no window, call gui2.window() first'; Exit(TValue.CreateNum(-1)); end;
   ID := GGuiSDL.NextWidgetID;
   Inc(GGuiSDL.NextWidgetID);
   Widget := TGuiListBox.Create(ID, W, X, Y, WW, HH, Initial, UInt8(R), UInt8(G), UInt8(B));
@@ -43328,7 +43328,7 @@ begin
     Exit(TValue.CreateNum(-1));
   end;
   W := GuiCurrentWindow;
-  if not Assigned(W) or not Assigned(W.Widgets) then Exit;
+  if not Assigned(W) or not Assigned(W.Widgets) then begin GGuiSDL.LastError := 'checkbox: no window, call gui2.window() first'; Exit(TValue.CreateNum(-1)); end;
   ID := GGuiSDL.NextWidgetID;
   Inc(GGuiSDL.NextWidgetID);
   Widget := TGuiCheckbox.Create(ID, W, X, Y, Caption, Checked, UInt8(R), UInt8(G), UInt8(B));
@@ -43398,7 +43398,7 @@ begin
     Exit(TValue.CreateNum(-1));
   end;
   W := GuiCurrentWindow;
-  if not Assigned(W) or not Assigned(W.Widgets) then Exit;
+  if not Assigned(W) or not Assigned(W.Widgets) then begin GGuiSDL.LastError := 'radio: no window, call gui2.window() first'; Exit(TValue.CreateNum(-1)); end;
   ID := GGuiSDL.NextWidgetID;
   Inc(GGuiSDL.NextWidgetID);
   Widget := TGuiRadio.Create(ID, W, X, Y, Caption, GroupId, Checked, UInt8(R), UInt8(G), UInt8(B));
