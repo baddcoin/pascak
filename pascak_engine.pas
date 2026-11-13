@@ -38449,6 +38449,16 @@ type
   { v1.11.21: Edit widget (Phase 4a) -- single-line text input.
     Phase 4a: basic typing + backspace + cursor movement.
     Phase 4b+: selection, clipboard, HOME/END, scroll. }
+  { v1.12.1: Label widget (Phase 7) -- static text display. }
+  TGuiLabel = class(TGuiWidget)
+  public
+    Caption: string;
+    Align: Integer;  { 0=left, 1=center, 2=right }
+    constructor Create(AID: Integer; AOwner: Pointer;
+      AX, AY, AW, AH: Integer; const ACaption: string; AAlign: Integer);
+    procedure Draw(GuiState: Pointer); override;
+  end;
+
   TGuiEdit = class(TGuiWidget)
   public
     EditText: string;        // UTF-8 buffer
@@ -38899,6 +38909,53 @@ procedure GuiDrawTextAt(St: TGuiSDLState; X, Y: Integer;
 procedure GuiInvokeCallback(Cb: TValue; CallEnv: TSymbolTable); forward;
 
 { v1.11.18: Button widget implementation }
+constructor TGuiLabel.Create(AID: Integer; AOwner: Pointer;
+  AX, AY, AW, AH: Integer; const ACaption: string; AAlign: Integer);
+begin
+  inherited Create(AID, AOwner);
+  X := AX; Y := AY; W := AW; H := AH;
+  Caption := ACaption;
+  Align := AAlign;
+  BgR := 0; BgG := 0; BgB := 0;
+  FgR := 240; FgG := 240; FgB := 240;
+  Focusable := False;
+end;
+
+procedure TGuiLabel.Draw(GuiState: Pointer);
+var
+  St: TGuiSDLState;
+  TW, TH: Int32;
+  DrawX, DrawY: Integer;
+  RectArr: array[0..3] of Int32;
+begin
+  if not Visible then Exit;
+  St := TGuiSDLState(GuiState);
+  if not Assigned(St) then Exit;
+  if not Assigned(St.Renderer) then Exit;
+  { Optional background (only if explicitly set) }
+  if (BgR > 0) or (BgG > 0) or (BgB > 0) then
+  begin
+    if Assigned(St.pSetRenderDrawColor) and Assigned(St.pRenderFillRect) then
+    begin
+      St.pSetRenderDrawColor(St.Renderer, BgR, BgG, BgB, 255);
+      RectArr[0] := X; RectArr[1] := Y;
+      RectArr[2] := W; RectArr[3] := H;
+      St.pRenderFillRect(St.Renderer, @RectArr[0]);
+    end;
+  end;
+  if Caption = '' then Exit;
+  if not Assigned(St.pTTF_SizeText) or not Assigned(St.Font) then Exit;
+  TW := 0; TH := 0;
+  St.pTTF_SizeText(St.Font, PAnsiChar(AnsiString(Caption)), @TW, @TH);
+  if (TW <= 0) or (TH <= 0) then Exit;
+  case Align of
+    1: begin DrawX := X + (W - TW) div 2; DrawY := Y + (H - TH) div 2; end;
+    2: begin DrawX := X + W - TW - 4; DrawY := Y + (H - TH) div 2; end;
+    else begin DrawX := X + 4; DrawY := Y + (H - TH) div 2; end;
+  end;
+  GuiDrawTextAt(St, DrawX, DrawY, Caption, FgR, FgG, FgB);
+end;
+
 constructor TGuiButton.Create(AID: Integer; AOwner: Pointer;
   AX, AY, AW, AH: Integer; const ACaption: string;
   AR, AG, AB: UInt8);
@@ -42548,6 +42605,113 @@ begin
 end;
 
 { v1.11.18: gui2.button(x, y, w, h, caption, [r], [g], [b]) -> widget id }
+{ v1.12.1: gui2.label(x, y, w, h, text[, align[, r, g, b]]) -> id | -1 | 0 }
+function Native_Gui2_Label(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  W: TGuiSDLWindow;
+  Widget: TGuiLabel;
+  X, Y, WW, HH, ID: Integer;
+  R, G, B: Integer;
+  Caption: string;
+  Align: Integer;
+begin
+  Result := TValue.CreateNum(0);
+  if (Args.Count < 5) or (Args.Count > 9) then
+  begin
+    GuiSetErr('label: expected 5-9 args');
+    Exit;
+  end;
+  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Windows)) then
+  begin
+    GuiSetErr('label: call gui2.init() first');
+    Exit;
+  end;
+  if TValue(Args[4]).DataType <> dtString then
+  begin
+    GuiSetErr('label: caption must be string');
+    Exit(TValue.CreateNum(-1));
+  end;
+  X := Trunc(TValue(Args[0]).NumVal);
+  Y := Trunc(TValue(Args[1]).NumVal);
+  WW := Trunc(TValue(Args[2]).NumVal);
+  HH := Trunc(TValue(Args[3]).NumVal);
+  Caption := TValue(Args[4]).StrVal;
+  Align := 0;
+  if (Args.Count >= 6) and (TValue(Args[5]).DataType = dtNumeric) then
+    Align := Trunc(TValue(Args[5]).NumVal);
+  R := 0; G := 0; B := 0;
+  if (Args.Count >= 7) and (TValue(Args[6]).DataType = dtNumeric) then R := Trunc(TValue(Args[6]).NumVal);
+  if (Args.Count >= 8) and (TValue(Args[7]).DataType = dtNumeric) then G := Trunc(TValue(Args[7]).NumVal);
+  if (Args.Count >= 9) and (TValue(Args[8]).DataType = dtNumeric) then B := Trunc(TValue(Args[8]).NumVal);
+  if not Assigned(GGuiSDL.Font) then
+  begin
+    GGuiSDL.LastError := 'label: font not loaded, call gui2.setFont() first';
+    Exit(TValue.CreateNum(-1));
+  end;
+  W := GuiCurrentWindow;
+  if not Assigned(W) or not Assigned(W.Widgets) then
+  begin
+    GGuiSDL.LastError := 'label: no window, call gui2.window() first';
+    Exit(TValue.CreateNum(-1));
+  end;
+  ID := GGuiSDL.NextWidgetID;
+  Inc(GGuiSDL.NextWidgetID);
+  Widget := TGuiLabel.Create(ID, W, X, Y, WW, HH, Caption, Align);
+  if (R > 0) or (G > 0) or (B > 0) then
+  begin
+    Widget.BgR := UInt8(R); Widget.BgG := UInt8(G); Widget.BgB := UInt8(B);
+  end;
+  W.Widgets.Add(Widget);
+  Result := TValue.CreateNum(ID);
+end;
+
+{ v1.12.1: gui2.labelGetText(id) -> str }
+function Native_Gui2_LabelGetText(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget;
+begin
+  Result := TValue.CreateStr('');
+  if Args.Count <> 1 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  if not (W is TGuiLabel) then Exit;
+  Result := TValue.CreateStr(TGuiLabel(W).Caption);
+end;
+
+{ v1.12.1: gui2.labelSetText(id, text) -> bool }
+function Native_Gui2_LabelSetText(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget;
+begin
+  Result := TValue.CreateBool(False);
+  if Args.Count <> 2 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  if TValue(Args[1]).DataType <> dtString then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  if not (W is TGuiLabel) then Exit;
+  TGuiLabel(W).Caption := TValue(Args[1]).StrVal;
+  Result := TValue.CreateBool(True);
+end;
+
+{ v1.12.1: gui2.labelSetColor(id, r, g, b) -> bool }
+function Native_Gui2_LabelSetColor(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget;
+begin
+  Result := TValue.CreateBool(False);
+  if Args.Count <> 4 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  if TValue(Args[1]).DataType <> dtNumeric then Exit;
+  if TValue(Args[2]).DataType <> dtNumeric then Exit;
+  if TValue(Args[3]).DataType <> dtNumeric then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  if not (W is TGuiLabel) then Exit;
+  TGuiLabel(W).BgR := UInt8(Trunc(TValue(Args[1]).NumVal));
+  TGuiLabel(W).BgG := UInt8(Trunc(TValue(Args[2]).NumVal));
+  TGuiLabel(W).BgB := UInt8(Trunc(TValue(Args[3]).NumVal));
+  Result := TValue.CreateBool(True);
+end;
+
 function Native_Gui2_Button(Args: TObjectList; CallEnv: TSymbolTable): TValue;
 var
   W: TGuiSDLWindow;
@@ -45655,6 +45819,10 @@ begin
   Gui2Inst.Members.DefineVar('widgetGetKeyCount', TValue.CreateNative(@Native_Gui2_WidgetGetKeyCount));
   { v1.11.18: Button widget }
   Gui2Inst.Members.DefineVar('button', TValue.CreateNative(@Native_Gui2_Button));
+  Gui2Inst.Members.DefineVar('label', TValue.CreateNative(@Native_Gui2_Label));
+  Gui2Inst.Members.DefineVar('labelGetText', TValue.CreateNative(@Native_Gui2_LabelGetText));
+  Gui2Inst.Members.DefineVar('labelSetText', TValue.CreateNative(@Native_Gui2_LabelSetText));
+  Gui2Inst.Members.DefineVar('labelSetColor', TValue.CreateNative(@Native_Gui2_LabelSetColor));
   Gui2Inst.Members.DefineVar('buttonSetCaption', TValue.CreateNative(@Native_Gui2_ButtonSetCaption));
   Gui2Inst.Members.DefineVar('buttonGetCaption', TValue.CreateNative(@Native_Gui2_ButtonGetCaption));
   { v1.11.20: onClick callback }
