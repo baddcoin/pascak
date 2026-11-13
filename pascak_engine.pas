@@ -38449,6 +38449,29 @@ type
   { v1.11.21: Edit widget (Phase 4a) -- single-line text input.
     Phase 4a: basic typing + backspace + cursor movement.
     Phase 4b+: selection, clipboard, HOME/END, scroll. }
+  { v1.12.5: Standalone scrollbar widget (Phase 7e) -- draggable. }
+  TGuiScrollBar = class(TGuiWidget)
+  public
+    Vertical: Boolean;
+    ContentSize: Integer;
+    ViewportSize: Integer;
+    Value: Integer;
+    Dragging: Boolean;
+    DragStartPos: Integer;
+    DragStartValue: Integer;
+    OnChange: TValue;
+    constructor Create(AID: Integer; AOwner: Pointer;
+      AX, AY, AW, AH: Integer; AVertical: Boolean;
+      AContentSize, AViewportSize: Integer);
+    destructor Destroy; override;
+    function MaxScroll: Integer;
+    function ThumbLen: Integer;
+    function ThumbPos: Integer;
+    procedure ClampValue;
+    procedure Draw(GuiState: Pointer); override;
+    function HandleMouse(MX, MY, Btn: Integer; Down: Boolean): Boolean; override;
+  end;
+
   { v1.12.2: Progress bar widget (Phase 7b) -- value 0..100. }
   TGuiProgressBar = class(TGuiWidget)
   public
@@ -39133,6 +39156,197 @@ begin
       Free;
     end;
     Result := True;
+  end;
+end;
+
+constructor TGuiScrollBar.Create(AID: Integer; AOwner: Pointer;
+  AX, AY, AW, AH: Integer; AVertical: Boolean;
+  AContentSize, AViewportSize: Integer);
+begin
+  inherited Create(AID, AOwner);
+  X := AX; Y := AY; W := AW; H := AH;
+  Vertical := AVertical;
+  ContentSize := AContentSize;
+  ViewportSize := AViewportSize;
+  Value := 0;
+  Dragging := False;
+  DragStartPos := 0;
+  DragStartValue := 0;
+  OnChange := nil;
+  BgR := 40; BgG := 40; BgB := 50;
+  FgR := 140; FgG := 140; FgB := 160;
+  Focusable := False;
+end;
+
+destructor TGuiScrollBar.Destroy;
+begin
+  if Assigned(OnChange) then
+  begin
+    OnChange.Free;
+    OnChange := nil;
+  end;
+  inherited;
+end;
+
+function TGuiScrollBar.MaxScroll: Integer;
+begin
+  Result := ContentSize - ViewportSize;
+  if Result < 0 then Result := 0;
+end;
+
+function TGuiScrollBar.ThumbLen: Integer;
+var TrackLen, Max: Integer;
+begin
+  TrackLen := H;
+  if not Vertical then TrackLen := W;
+  if TrackLen <= 0 then Exit(0);
+  if ContentSize <= 0 then Exit(TrackLen);
+  if ContentSize <= ViewportSize then Exit(TrackLen);
+  Result := (TrackLen * ViewportSize) div ContentSize;
+  if Result < 20 then Result := 20;
+  if Result > TrackLen then Result := TrackLen;
+end;
+
+function TGuiScrollBar.ThumbPos: Integer;
+var TrackLen, TLen, Max, Range: Integer;
+begin
+  TrackLen := H;
+  if not Vertical then TrackLen := W;
+  TLen := ThumbLen;
+  Max := MaxScroll;
+  if Max <= 0 then Exit(0);
+  Range := TrackLen - TLen;
+  if Range <= 0 then Exit(0);
+  Result := (Range * Value) div Max;
+end;
+
+procedure TGuiScrollBar.ClampValue;
+var Max: Integer;
+begin
+  Max := MaxScroll;
+  if Value < 0 then Value := 0;
+  if Value > Max then Value := Max;
+end;
+
+procedure TGuiScrollBar.Draw(GuiState: Pointer);
+var
+  St: TGuiSDLState;
+  RectArr: array[0..3] of Int32;
+  TLen, TPos: Integer;
+begin
+  if not Visible then Exit;
+  St := TGuiSDLState(GuiState);
+  if not Assigned(St) or not Assigned(St.Renderer) then Exit;
+  { Track }
+  if Assigned(St.pSetRenderDrawColor) and Assigned(St.pRenderFillRect) then
+  begin
+    St.pSetRenderDrawColor(St.Renderer, BgR, BgG, BgB, 255);
+    RectArr[0] := X; RectArr[1] := Y;
+    RectArr[2] := W; RectArr[3] := H;
+    St.pRenderFillRect(St.Renderer, @RectArr[0]);
+  end;
+  TLen := ThumbLen;
+  TPos := ThumbPos;
+  { Thumb }
+  if (TLen > 0) and Assigned(St.pSetRenderDrawColor) and Assigned(St.pRenderFillRect) then
+  begin
+    if Dragging then
+      St.pSetRenderDrawColor(St.Renderer, 200, 200, 220, 255)
+    else
+      St.pSetRenderDrawColor(St.Renderer, FgR, FgG, FgB, 255);
+    if Vertical then
+    begin
+      RectArr[0] := X; RectArr[1] := Y + TPos;
+      RectArr[2] := W; RectArr[3] := TLen;
+    end
+    else
+    begin
+      RectArr[0] := X + TPos; RectArr[1] := Y;
+      RectArr[2] := TLen; RectArr[3] := H;
+    end;
+    St.pRenderFillRect(St.Renderer, @RectArr[0]);
+  end;
+end;
+
+function TGuiScrollBar.HandleMouse(MX, MY, Btn: Integer; Down: Boolean): Boolean;
+var
+  TLen, TPos, TrackLen, Max, Range, Pos, NewValue: Integer;
+  InBounds, InThumb: Boolean;
+begin
+  Result := False;
+  InBounds := (MX >= X) and (MX <= X + W) and (MY >= Y) and (MY <= Y + H);
+  { Motion during drag -- Btn=0, Down=True }
+  if Dragging and (Btn = 0) and Down then
+  begin
+    Max := MaxScroll;
+    if Max <= 0 then Exit(False);
+    TrackLen := H;
+    if not Vertical then TrackLen := W;
+    Range := TrackLen - ThumbLen;
+    if Range <= 0 then Exit(False);
+    Pos := MY - DragStartPos;
+    if not Vertical then Pos := MX - DragStartPos;
+    NewValue := DragStartValue + (Pos * Max) div Range;
+    if NewValue < 0 then NewValue := 0;
+    if NewValue > Max then NewValue := Max;
+    if NewValue <> Value then
+    begin
+      Value := NewValue;
+      if Assigned(OnChange) then
+        GuiInvokeCallback(OnChange, GGuiPollCallEnv);
+    end;
+    Result := True;
+    Exit;
+  end;
+  { Mouse up -- release drag }
+  if Dragging and (not Down) then
+  begin
+    Dragging := False;
+    Result := True;
+    Exit;
+  end;
+  { Mouse down in bounds }
+  if Down and (Btn = 1) and InBounds then
+  begin
+    TLen := ThumbLen;
+    TPos := ThumbPos;
+    InThumb := False;
+    if Vertical then
+      InThumb := (MY >= Y + TPos) and (MY <= Y + TPos + TLen)
+    else
+      InThumb := (MX >= X + TPos) and (MX <= X + TPos + TLen);
+    if InThumb then
+    begin
+      Dragging := True;
+      DragStartPos := MY;
+      if not Vertical then DragStartPos := MX;
+      DragStartValue := Value;
+      Result := True;
+      Exit;
+    end;
+    { Click on track -- jump to position }
+    Max := MaxScroll;
+    if Max > 0 then
+    begin
+      TrackLen := H;
+      if not Vertical then TrackLen := W;
+      Range := TrackLen - TLen;
+      if Range > 0 then
+      begin
+        Pos := MY - Y - (TLen div 2);
+        if not Vertical then Pos := MX - X - (TLen div 2);
+        if Pos < 0 then Pos := 0;
+        if Pos > Range then Pos := Range;
+        NewValue := (Pos * Max) div Range;
+        if NewValue <> Value then
+        begin
+          Value := NewValue;
+          if Assigned(OnChange) then
+            GuiInvokeCallback(OnChange, GGuiPollCallEnv);
+        end;
+        Result := True;
+      end;
+    end;
   end;
 end;
 
@@ -42901,6 +43115,116 @@ end;
 
 { v1.11.18: gui2.button(x, y, w, h, caption, [r], [g], [b]) -> widget id }
 { v1.12.1: gui2.label(x, y, w, h, text[, align[, r, g, b]]) -> id | -1 | 0 }
+{ v1.12.5: gui2.scrollbar(x, y, w, h[, vertical[, contentSize, viewportSize]]) -> id }
+function Native_Gui2_Scrollbar(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  W: TGuiSDLWindow;
+  Widget: TGuiScrollBar;
+  X, Y, WW, HH, ID, CS, VS: Integer;
+  Vert: Boolean;
+begin
+  Result := TValue.CreateNum(0);
+  if (Args.Count < 4) or (Args.Count > 7) then
+  begin
+    GuiSetErr('scrollbar: expected 4-7 args');
+    Exit;
+  end;
+  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Windows)) then
+  begin
+    GuiSetErr('scrollbar: call gui2.init() first');
+    Exit;
+  end;
+  X := Trunc(TValue(Args[0]).NumVal);
+  Y := Trunc(TValue(Args[1]).NumVal);
+  WW := Trunc(TValue(Args[2]).NumVal);
+  HH := Trunc(TValue(Args[3]).NumVal);
+  Vert := True;
+  if (Args.Count >= 5) and (TValue(Args[4]).DataType = dtBoolean) then
+    Vert := TValue(Args[4]).BoolVal;
+  CS := 1000; VS := 200;
+  if (Args.Count >= 6) and (TValue(Args[5]).DataType = dtNumeric) then CS := Trunc(TValue(Args[5]).NumVal);
+  if (Args.Count >= 7) and (TValue(Args[6]).DataType = dtNumeric) then VS := Trunc(TValue(Args[6]).NumVal);
+  if not Assigned(GGuiSDL.Font) then
+  begin
+    GGuiSDL.LastError := 'scrollbar: font not loaded, call gui2.setFont() first';
+    Exit(TValue.CreateNum(-1));
+  end;
+  W := GuiCurrentWindow;
+  if not Assigned(W) or not Assigned(W.Widgets) then
+  begin
+    GGuiSDL.LastError := 'scrollbar: no window, call gui2.window() first';
+    Exit(TValue.CreateNum(-1));
+  end;
+  ID := GGuiSDL.NextWidgetID;
+  Inc(GGuiSDL.NextWidgetID);
+  Widget := TGuiScrollBar.Create(ID, W, X, Y, WW, HH, Vert, CS, VS);
+  W.Widgets.Add(Widget);
+  Result := TValue.CreateNum(ID);
+end;
+
+{ v1.12.5: gui2.scrollbarSetRange(id, contentSize, viewportSize) -> bool }
+function Native_Gui2_ScrollbarSetRange(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget;
+begin
+  Result := TValue.CreateBool(False);
+  if Args.Count <> 3 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  if TValue(Args[1]).DataType <> dtNumeric then Exit;
+  if TValue(Args[2]).DataType <> dtNumeric then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  if not (W is TGuiScrollBar) then Exit;
+  TGuiScrollBar(W).ContentSize := Trunc(TValue(Args[1]).NumVal);
+  TGuiScrollBar(W).ViewportSize := Trunc(TValue(Args[2]).NumVal);
+  TGuiScrollBar(W).ClampValue;
+  Result := TValue.CreateBool(True);
+end;
+
+{ v1.12.5: gui2.scrollbarSetValue(id, value) -> bool }
+function Native_Gui2_ScrollbarSetValue(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget;
+begin
+  Result := TValue.CreateBool(False);
+  if Args.Count <> 2 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  if TValue(Args[1]).DataType <> dtNumeric then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  if not (W is TGuiScrollBar) then Exit;
+  TGuiScrollBar(W).Value := Trunc(TValue(Args[1]).NumVal);
+  TGuiScrollBar(W).ClampValue;
+  Result := TValue.CreateBool(True);
+end;
+
+{ v1.12.5: gui2.scrollbarGetValue(id) -> num }
+function Native_Gui2_ScrollbarGetValue(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget;
+begin
+  Result := TValue.CreateNum(0);
+  if Args.Count <> 1 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  if not (W is TGuiScrollBar) then Exit;
+  Result := TValue.CreateNum(TGuiScrollBar(W).Value);
+end;
+
+{ v1.12.5: gui2.scrollbarOnChange(id, fn) -> bool }
+function Native_Gui2_ScrollbarOnChange(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var W: TGuiWidget;
+begin
+  Result := TValue.CreateBool(False);
+  if Args.Count <> 2 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  if TValue(Args[1]).DataType <> dtFunction then Exit;
+  W := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(W) then Exit;
+  if not (W is TGuiScrollBar) then Exit;
+  if Assigned(TGuiScrollBar(W).OnChange) then TGuiScrollBar(W).OnChange.Free;
+  TGuiScrollBar(W).OnChange := TValue(Args[1]).Clone;
+  Result := TValue.CreateBool(True);
+end;
+
 { v1.12.4: gui2.confirm(title, message, onYes, onNo) -> bool }
 function Native_Gui2_Confirm(Args: TObjectList; CallEnv: TSymbolTable): TValue;
 var
@@ -46287,6 +46611,11 @@ begin
   Gui2Inst.Members.DefineVar('widgetGetKeyCount', TValue.CreateNative(@Native_Gui2_WidgetGetKeyCount));
   { v1.11.18: Button widget }
   Gui2Inst.Members.DefineVar('button', TValue.CreateNative(@Native_Gui2_Button));
+  Gui2Inst.Members.DefineVar('scrollbar', TValue.CreateNative(@Native_Gui2_Scrollbar));
+  Gui2Inst.Members.DefineVar('scrollbarSetRange', TValue.CreateNative(@Native_Gui2_ScrollbarSetRange));
+  Gui2Inst.Members.DefineVar('scrollbarSetValue', TValue.CreateNative(@Native_Gui2_ScrollbarSetValue));
+  Gui2Inst.Members.DefineVar('scrollbarGetValue', TValue.CreateNative(@Native_Gui2_ScrollbarGetValue));
+  Gui2Inst.Members.DefineVar('scrollbarOnChange', TValue.CreateNative(@Native_Gui2_ScrollbarOnChange));
   Gui2Inst.Members.DefineVar('confirm', TValue.CreateNative(@Native_Gui2_Confirm));
   Gui2Inst.Members.DefineVar('alert', TValue.CreateNative(@Native_Gui2_Alert));
   Gui2Inst.Members.DefineVar('progressBar', TValue.CreateNative(@Native_Gui2_ProgressBar));
