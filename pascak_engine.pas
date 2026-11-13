@@ -38399,6 +38399,8 @@ type
     Hovered: Boolean;
     { v1.11.24: focus state (synced from W.FocusedWidgetID) }
     Focused: Boolean;
+    { v1.12.6: scroll container management flag (skip direct render + hit-test) }
+    ScrollManaged: Boolean;
     { v1.11.43: theming colors (base class -- all widgets inherit) }
     BgR, BgG, BgB: UInt8;
     FgR, FgG, FgB: UInt8;
@@ -38449,6 +38451,19 @@ type
   { v1.11.21: Edit widget (Phase 4a) -- single-line text input.
     Phase 4a: basic typing + backspace + cursor movement.
     Phase 4b+: selection, clipboard, HOME/END, scroll. }
+  { v1.12.6: Scroll container widget (Phase 7f) -- clips + offsets children. }
+  TGuiScrollContainer = class(TGuiWidget)
+  public
+    Children: TList;
+    ScrollX, ScrollY: Integer;
+    constructor Create(AID: Integer; AOwner: Pointer;
+      AX, AY, AW, AH: Integer);
+    destructor Destroy; override;
+    procedure AddChild(C: TGuiWidget);
+    procedure Draw(GuiState: Pointer); override;
+    function HandleMouse(MX, MY, Btn: Integer; Down: Boolean): Boolean; override;
+  end;
+
   { v1.12.5: Standalone scrollbar widget (Phase 7e) -- draggable. }
   TGuiScrollBar = class(TGuiWidget)
   public
@@ -38730,6 +38745,8 @@ type
     pRenderDrawLine: function(ren: Pointer; x1, y1, x2, y2: Int32): Int32; cdecl;
     pRenderDrawRect: function(ren: Pointer; rect: Pointer): Int32; cdecl;
     pRenderFillRect: function(ren: Pointer; rect: Pointer): Int32; cdecl;
+    { v1.12.6: clip rect for scroll container }
+    pRenderSetClipRect: function(ren: Pointer; rect: Pointer): Int32; cdecl;
     pGetMouseState: function(x, y: PInt32): UInt32; cdecl;
     pIMG_Load: function(fpath: PAnsiChar): Pointer; cdecl;
     pQueryTexture: function(tex: Pointer; fmt, access, w, h: Pointer): Int32; cdecl;
@@ -38843,6 +38860,7 @@ begin
   KeyCount := 0;
   Hovered := False;
   Focused := False;
+  ScrollManaged := False;
   { v1.11.43: theming defaults }
   BgR := 60; BgG := 60; BgB := 60;
   FgR := 255; FgG := 255; FgB := 255;
@@ -39156,6 +39174,118 @@ begin
       Free;
     end;
     Result := True;
+  end;
+end;
+
+constructor TGuiScrollContainer.Create(AID: Integer; AOwner: Pointer;
+  AX, AY, AW, AH: Integer);
+begin
+  inherited Create(AID, AOwner);
+  X := AX; Y := AY; W := AW; H := AH;
+  Children := TList.Create;
+  ScrollX := 0;
+  ScrollY := 0;
+  BgR := 0; BgG := 0; BgB := 0;
+  Focusable := False;
+end;
+
+destructor TGuiScrollContainer.Destroy;
+begin
+  if Assigned(Children) then
+  begin
+    Children.Free;  { references only -- widgets owned by Window.Widgets }
+    Children := nil;
+  end;
+  inherited;
+end;
+
+procedure TGuiScrollContainer.AddChild(C: TGuiWidget);
+begin
+  if not Assigned(Children) then Exit;
+  if not Assigned(C) then Exit;
+  C.ScrollManaged := True;  { v1.12.6: render + hit-test via container only }
+  Children.Add(C);
+end;
+
+procedure TGuiScrollContainer.Draw(GuiState: Pointer);
+var
+  St: TGuiSDLState;
+  RectArr: array[0..3] of Int32;
+  I, OrigX, OrigY: Integer;
+  Child: TGuiWidget;
+  HasClip: Boolean;
+begin
+  if not Visible then Exit;
+  St := TGuiSDLState(GuiState);
+  if not Assigned(St) or not Assigned(St.Renderer) then Exit;
+  { Optional background }
+  if (BgR > 0) or (BgG > 0) or (BgB > 0) then
+    if Assigned(St.pSetRenderDrawColor) and Assigned(St.pRenderFillRect) then
+    begin
+      St.pSetRenderDrawColor(St.Renderer, BgR, BgG, BgB, 255);
+      RectArr[0] := X; RectArr[1] := Y;
+      RectArr[2] := W; RectArr[3] := H;
+      St.pRenderFillRect(St.Renderer, @RectArr[0]);
+    end;
+  if (not Assigned(Children)) or (Children.Count = 0) then Exit;
+  { Set clip rect to container bounds }
+  HasClip := Assigned(St.pRenderSetClipRect);
+  if HasClip then
+  begin
+    RectArr[0] := X; RectArr[1] := Y;
+    RectArr[2] := W; RectArr[3] := H;
+    St.pRenderSetClipRect(St.Renderer, @RectArr[0]);
+  end;
+  { Draw children with offset }
+  for I := 0 to Children.Count - 1 do
+  begin
+    Child := TGuiWidget(Children[I]);
+    if not Assigned(Child) then Continue;
+    if not Child.Visible then Continue;
+    OrigX := Child.X;
+    OrigY := Child.Y;
+    Child.X := Child.X - ScrollX;
+    Child.Y := Child.Y - ScrollY;
+    try
+      Child.Draw(GGuiSDL);
+    finally
+      Child.X := OrigX;
+      Child.Y := OrigY;
+    end;
+  end;
+  { Reset clip rect (nil = full renderer bounds) }
+  if HasClip then
+    St.pRenderSetClipRect(St.Renderer, nil);
+end;
+
+function TGuiScrollContainer.HandleMouse(MX, MY, Btn: Integer; Down: Boolean): Boolean;
+var
+  I: Integer;
+  Child: TGuiWidget;
+  CX, CY: Integer;
+  Consumed: Boolean;
+begin
+  Result := False;
+  if not Assigned(Children) then Exit;
+  if (MX < X) or (MX > X + W) or (MY < Y) or (MY > Y + H) then Exit;
+  { Translate click into container content space (account for scroll offset) }
+  CX := MX - X + ScrollX;
+  CY := MY - Y + ScrollY;
+  { Hit-test children from top to bottom (reverse order = topmost first) }
+  for I := Children.Count - 1 downto 0 do
+  begin
+    Child := TGuiWidget(Children[I]);
+    if not Assigned(Child) then Continue;
+    if not Child.Visible or not Child.Enabled then Continue;
+    if (CX < Child.X) or (CX > Child.X + Child.W) or
+       (CY < Child.Y) or (CY > Child.Y + Child.H) then Continue;
+    { Forward event with adjusted coordinates }
+    Consumed := Child.HandleMouse(CX, CY, Btn, Down);
+    if Consumed then
+    begin
+      Result := True;
+      Exit;
+    end;
   end;
 end;
 
@@ -41892,6 +42022,8 @@ begin
   Pointer(State.pRenderDrawLine)     := GetProcAddress(State.LibHandle, 'SDL_RenderDrawLine');
   Pointer(State.pRenderDrawRect)     := GetProcAddress(State.LibHandle, 'SDL_RenderDrawRect');
   Pointer(State.pRenderFillRect)     := GetProcAddress(State.LibHandle, 'SDL_RenderFillRect');
+  { v1.12.6: clip rect for scroll container }
+  Pointer(State.pRenderSetClipRect)  := GetProcAddress(State.LibHandle, 'SDL_RenderSetClipRect');
   Pointer(State.pGetMouseState)      := GetProcAddress(State.LibHandle, 'SDL_GetMouseState');
   // v1.10.0: Hi-DPI support (SDL 2.0.4+)
   Pointer(State.pGetDisplayDPI) := GetProcAddress(State.LibHandle, 'SDL_GetDisplayDPI');
@@ -42764,10 +42896,13 @@ begin
   W := GuiCurrentWindow;
   if not Assigned(W) or not Assigned(W.Widgets) then Exit;
   { v1.11.33: two-pass -- regular draws first, then popup layer }
+  { v1.12.6: skip ScrollManaged widgets (rendered by their container) }
   for I := 0 to W.Widgets.Count - 1 do
-    TGuiWidget(W.Widgets[I]).Draw(GGuiSDL);
+    if not TGuiWidget(W.Widgets[I]).ScrollManaged then
+      TGuiWidget(W.Widgets[I]).Draw(GGuiSDL);
   for I := 0 to W.Widgets.Count - 1 do
-    TGuiWidget(W.Widgets[I]).DrawPopup(GGuiSDL);
+    if not TGuiWidget(W.Widgets[I]).ScrollManaged then
+      TGuiWidget(W.Widgets[I]).DrawPopup(GGuiSDL);
   { v1.12.3: alert modal drawn last (topmost) }
   if Assigned(GGuiSDL.ActiveAlert) then
     GGuiSDL.ActiveAlert.Draw(GGuiSDL);
@@ -42921,6 +43056,7 @@ begin
   begin
     Widget := TGuiWidget(W.Widgets[I]);
     if not Widget.Visible or not Widget.Enabled then Continue;
+    if Widget.ScrollManaged then Continue;  { v1.12.6: hit via container only }
     if (MX >= Widget.X) and (MX < Widget.X + Widget.W) and
        (MY >= Widget.Y) and (MY < Widget.Y + Widget.H) then
     begin
@@ -43115,6 +43251,102 @@ end;
 
 { v1.11.18: gui2.button(x, y, w, h, caption, [r], [g], [b]) -> widget id }
 { v1.12.1: gui2.label(x, y, w, h, text[, align[, r, g, b]]) -> id | -1 | 0 }
+{ v1.12.6: gui2.scrollContainer(x, y, w, h) -> id }
+function Native_Gui2_ScrollContainer(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  W: TGuiSDLWindow;
+  Widget: TGuiScrollContainer;
+  X, Y, WW, HH, ID: Integer;
+begin
+  Result := TValue.CreateNum(0);
+  if Args.Count <> 4 then
+  begin
+    GuiSetErr('scrollContainer: expected 4 args (x, y, w, h)');
+    Exit;
+  end;
+  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Windows)) then
+  begin
+    GuiSetErr('scrollContainer: call gui2.init() first');
+    Exit;
+  end;
+  X := Trunc(TValue(Args[0]).NumVal);
+  Y := Trunc(TValue(Args[1]).NumVal);
+  WW := Trunc(TValue(Args[2]).NumVal);
+  HH := Trunc(TValue(Args[3]).NumVal);
+  if not Assigned(GGuiSDL.Font) then
+  begin
+    GGuiSDL.LastError := 'scrollContainer: font not loaded, call gui2.setFont() first';
+    Exit(TValue.CreateNum(-1));
+  end;
+  W := GuiCurrentWindow;
+  if not Assigned(W) or not Assigned(W.Widgets) then
+  begin
+    GGuiSDL.LastError := 'scrollContainer: no window, call gui2.window() first';
+    Exit(TValue.CreateNum(-1));
+  end;
+  ID := GGuiSDL.NextWidgetID;
+  Inc(GGuiSDL.NextWidgetID);
+  Widget := TGuiScrollContainer.Create(ID, W, X, Y, WW, HH);
+  W.Widgets.Add(Widget);
+  Result := TValue.CreateNum(ID);
+end;
+
+{ v1.12.6: gui2.scrollContainerAdd(containerId, childId) -> bool }
+function Native_Gui2_ScrollContainerAdd(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  C, Child: TGuiWidget;
+begin
+  Result := TValue.CreateBool(False);
+  if Args.Count <> 2 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  if TValue(Args[1]).DataType <> dtNumeric then Exit;
+  C := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(C) then Exit;
+  if not (C is TGuiScrollContainer) then Exit;
+  Child := GuiFindWidget(Trunc(TValue(Args[1]).NumVal));
+  if not Assigned(Child) then Exit;
+  TGuiScrollContainer(C).AddChild(Child);
+  Result := TValue.CreateBool(True);
+end;
+
+{ v1.12.6: gui2.scrollContainerSetScroll(id, sx, sy) -> bool }
+function Native_Gui2_ScrollContainerSetScroll(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var C: TGuiWidget;
+begin
+  Result := TValue.CreateBool(False);
+  if Args.Count <> 3 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  if TValue(Args[1]).DataType <> dtNumeric then Exit;
+  if TValue(Args[2]).DataType <> dtNumeric then Exit;
+  C := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(C) then Exit;
+  if not (C is TGuiScrollContainer) then Exit;
+  TGuiScrollContainer(C).ScrollX := Trunc(TValue(Args[1]).NumVal);
+  TGuiScrollContainer(C).ScrollY := Trunc(TValue(Args[2]).NumVal);
+  Result := TValue.CreateBool(True);
+end;
+
+{ v1.12.6: gui2.scrollContainerGetScroll(id) -> {x, y} }
+function Native_Gui2_ScrollContainerGetScroll(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var C: TGuiWidget; D: TDictValue;
+begin
+  Result := TValue.CreateNull;
+  if Args.Count <> 1 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  C := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(C) then Exit;
+  if not (C is TGuiScrollContainer) then Exit;
+  D := TDictValue.Create;
+  try
+    D.SetValue('x', TValue.CreateNum(TGuiScrollContainer(C).ScrollX));
+    D.SetValue('y', TValue.CreateNum(TGuiScrollContainer(C).ScrollY));
+    Result := TValue.CreateDict(D);
+  except
+    D.Free;
+    raise;
+  end;
+end;
+
 { v1.12.5: gui2.scrollbar(x, y, w, h[, vertical[, contentSize, viewportSize]]) -> id }
 function Native_Gui2_Scrollbar(Args: TObjectList; CallEnv: TSymbolTable): TValue;
 var
@@ -46611,6 +46843,10 @@ begin
   Gui2Inst.Members.DefineVar('widgetGetKeyCount', TValue.CreateNative(@Native_Gui2_WidgetGetKeyCount));
   { v1.11.18: Button widget }
   Gui2Inst.Members.DefineVar('button', TValue.CreateNative(@Native_Gui2_Button));
+  Gui2Inst.Members.DefineVar('scrollContainer', TValue.CreateNative(@Native_Gui2_ScrollContainer));
+  Gui2Inst.Members.DefineVar('scrollContainerAdd', TValue.CreateNative(@Native_Gui2_ScrollContainerAdd));
+  Gui2Inst.Members.DefineVar('scrollContainerSetScroll', TValue.CreateNative(@Native_Gui2_ScrollContainerSetScroll));
+  Gui2Inst.Members.DefineVar('scrollContainerGetScroll', TValue.CreateNative(@Native_Gui2_ScrollContainerGetScroll));
   Gui2Inst.Members.DefineVar('scrollbar', TValue.CreateNative(@Native_Gui2_Scrollbar));
   Gui2Inst.Members.DefineVar('scrollbarSetRange', TValue.CreateNative(@Native_Gui2_ScrollbarSetRange));
   Gui2Inst.Members.DefineVar('scrollbarSetValue', TValue.CreateNative(@Native_Gui2_ScrollbarSetValue));
