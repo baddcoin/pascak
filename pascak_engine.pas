@@ -42559,7 +42559,7 @@ begin
   Result := TValue.CreateNum(0);
   if (Args.Count < 5) or (Args.Count > 8) then begin GuiSetErr('button: expected 5-8 args'); Exit; end;
   if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Windows)) then begin GuiSetErr('button: call gui2.init() first'); Exit; end;
-  if TValue(Args[4]).DataType <> dtString then Exit;
+  if TValue(Args[4]).DataType <> dtString then begin GuiSetErr('button: caption must be string'); Exit(TValue.CreateNum(-1)); end;
   X := Trunc(TValue(Args[0]).NumVal);
   Y := Trunc(TValue(Args[1]).NumVal);
   WW := Trunc(TValue(Args[2]).NumVal);
@@ -43320,7 +43320,7 @@ begin
   Result := TValue.CreateNum(0);
   if (Args.Count < 3) or (Args.Count > 7) then begin GuiSetErr('checkbox: expected 3-7 args'); Exit; end;
   if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Windows)) then begin GuiSetErr('checkbox: call gui2.init() first'); Exit; end;
-  if TValue(Args[2]).DataType <> dtString then Exit;
+  if TValue(Args[2]).DataType <> dtString then begin GuiSetErr('checkbox: caption must be string'); Exit(TValue.CreateNum(-1)); end;
   X := Trunc(TValue(Args[0]).NumVal);
   Y := Trunc(TValue(Args[1]).NumVal);
   Caption := TValue(Args[2]).StrVal;
@@ -43387,7 +43387,7 @@ begin
   Result := TValue.CreateNum(0);
   if (Args.Count < 3) or (Args.Count > 8) then begin GuiSetErr('radio: expected 3-8 args'); Exit; end;
   if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Windows)) then begin GuiSetErr('radio: call gui2.init() first'); Exit; end;
-  if TValue(Args[2]).DataType <> dtString then Exit;
+  if TValue(Args[2]).DataType <> dtString then begin GuiSetErr('radio: caption must be string'); Exit(TValue.CreateNum(-1)); end;
   X := Trunc(TValue(Args[0]).NumVal);
   Y := Trunc(TValue(Args[1]).NumVal);
   Caption := TValue(Args[2]).StrVal;
