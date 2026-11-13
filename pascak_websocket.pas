@@ -44,7 +44,7 @@ const
   WS_CLOSE_INTERNAL_ERR     = 1011;
 
   // Batas payload — frame lebih besar ditolak dengan close 1009
-  WS_MAX_FRAME_PAYLOAD = 16 * 1024 * 1024;   // 16 MB
+  WS_MAX_FRAME_PAYLOAD = 4 * 1024 * 1024;    // 4 MB (v1.11.54: stricter DoS cap)
 
   // Magic GUID dari RFC 6455 §1.3
   WS_MAGIC_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
