@@ -43758,6 +43758,7 @@ begin
   Result := TValue.CreateStr(GuiKeyName(Code));
 end;
 
+var GuiBootstrapLastError: string = '';
 function Native_Gui2_SetFont(Args: TObjectList; CallEnv: TSymbolTable): TValue;
 var
   Path, SafePath: string;
@@ -43765,20 +43766,20 @@ var
 begin
   Result := TValue.CreateBool(False);
   if (Args.Count < 1) or (Args.Count > 2) or
-     (TValue(Args[0]).DataType <> dtString) then Exit;
+     (TValue(Args[0]).DataType <> dtString) then begin if Assigned(GGuiSDL) then GGuiSDL.LastError := 'setFont: expected (path[, size])' else GuiBootstrapLastError := 'setFont: expected (path[, size])'; Exit; end;
   Path := TValue(Args[0]).StrVal;
   Size := 16;
   if (Args.Count = 2) and (TValue(Args[1]).DataType = dtNumeric) then
     Size := Trunc(TValue(Args[1]).NumVal);
   if Size <= 0 then Size := 16;
-  if not GuiSDLEnsureInit then Exit;
-  if not GuiSDLEnsureTTF then Exit;
+  if not GuiSDLEnsureInit then begin if Assigned(GGuiSDL) then GGuiSDL.LastError := 'setFont: SDL init failed' else GuiBootstrapLastError := 'setFont: SDL init failed'; Exit; end;
+  if not GuiSDLEnsureTTF then begin GGuiSDL.LastError := 'setFont: TTF init failed'; Exit; end;
   if (Length(Path) > 0) and (Path[1] = '/') then
     SafePath := Path
   else
   begin
     try SafePath := GetSafeSandboxedPath(Path);
-    except Exit; end;
+  except on E: Exception do begin GGuiSDL.LastError := 'setFont: sandbox reject: ' + E.Message; Exit; end; end;
   end;
   if Assigned(GGuiSDL.Font) and Assigned(GGuiSDL.pTTF_CloseFont) then
   begin
@@ -43795,6 +43796,23 @@ begin
   GGuiSDL.FontPath := SafePath;
   GGuiSDL.FontSize := Size;
   Result := TValue.CreateBool(True);
+end;
+
+{ v1.11.49: native -- read + clear gui2 last error }
+function Native_Gui2_GetLastError(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+begin
+  if GuiBootstrapLastError <> '' then
+  begin
+    Result := TValue.CreateStr(GuiBootstrapLastError);
+    GuiBootstrapLastError := '';
+  end
+  else if Assigned(GGuiSDL) then
+  begin
+    Result := TValue.CreateStr(GGuiSDL.LastError);
+    GGuiSDL.LastError := '';
+  end
+  else
+    Result := TValue.CreateStr('');
 end;
 
 { v1.11.19: helper -- draw text at position (reusable for widgets) }
@@ -45665,6 +45683,7 @@ begin
   Gui2Inst.Members.DefineVar('keyMod', TValue.CreateNative(@Native_Gui2_KeyMod));
   Gui2Inst.Members.DefineVar('keyName', TValue.CreateNative(@Native_Gui2_KeyName));
   Gui2Inst.Members.DefineVar('setFont', TValue.CreateNative(@Native_Gui2_SetFont));
+  Gui2Inst.Members.DefineVar('getLastError', TValue.CreateNative(@Native_Gui2_GetLastError));
   Gui2Inst.Members.DefineVar('text', TValue.CreateNative(@Native_Gui2_Text));
   Gui2Inst.Members.DefineVar('measureText', TValue.CreateNative(@Native_Gui2_MeasureText));
   Gui2Inst.Members.DefineVar('loadTexture', TValue.CreateNative(@Native_Gui2_LoadTexture));
