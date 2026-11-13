@@ -38628,6 +38628,21 @@ type
 
   TGuiWindowMap = specialize TFPGMap<Integer, TGuiSDLWindow>;
 
+  { v1.12.3: Alert modal dialog (Phase 7c) -- standalone, not widget }
+  TGuiAlert = class
+  public
+    Title: string;
+    Message: string;
+    OnOK: TValue;
+    OKX, OKY, OKW, OKH: Integer;
+    BoxX, BoxY, BoxW, BoxH: Integer;
+    constructor Create(const ATitle, AMessage: string; AOnOK: TValue);
+    destructor Destroy; override;
+    procedure Draw(GuiState: Pointer);
+    function HandleMouse(MX, MY, Btn: Integer; Down: Boolean): Boolean;
+    function HandleKey(const Key: string; Down: Boolean): Boolean;
+  end;
+
   TGuiSDLState = class
   public
     LibHandle: TLibHandle;
@@ -38655,6 +38670,8 @@ type
     TextInputActive: Boolean;
     { v1.11.15: widget toolkit }
     NextWidgetID: Integer;
+    { v1.12.3: active alert modal -- nil if no modal open }
+    ActiveAlert: TGuiAlert;
     { v1.10.0: Hi-DPI support }
     FDPIScale: Double;
     FAutoScale: Boolean;
@@ -38918,6 +38935,133 @@ procedure GuiDrawTextAt(St: TGuiSDLState; X, Y: Integer;
 procedure GuiInvokeCallback(Cb: TValue; CallEnv: TSymbolTable); forward;
 
 { v1.11.18: Button widget implementation }
+{ v1.12.3: TGuiAlert implementation }
+constructor TGuiAlert.Create(const ATitle, AMessage: string; AOnOK: TValue);
+begin
+  Title := ATitle;
+  Message := AMessage;
+  OnOK := AOnOK;
+  BoxW := 360; BoxH := 160;
+end;
+
+destructor TGuiAlert.Destroy;
+begin
+  if Assigned(OnOK) then
+  begin
+    OnOK.Free;
+    OnOK := nil;
+  end;
+  inherited;
+end;
+
+procedure TGuiAlert.Draw(GuiState: Pointer);
+var
+  St: TGuiSDLState;
+  RectArr: array[0..3] of Int32;
+  WinW, WinH, CX, CY: Integer;
+  TW, TH: Int32;
+begin
+  if not Assigned(GGuiSDL) then Exit;
+  St := TGuiSDLState(GuiState);
+  if not Assigned(St) or not Assigned(St.Renderer) then Exit;
+  WinW := 800; WinH := 600;
+  { Assume current window size -- use 800x600 fallback }
+  CX := (WinW - BoxW) div 2;
+  CY := (WinH - BoxH) div 2;
+  BoxX := CX; BoxY := CY;
+  OKW := 100; OKH := 32;
+  OKX := BoxX + (BoxW - OKW) div 2;
+  OKY := BoxY + BoxH - OKH - 16;
+  { Dark overlay (approximation -- full screen 0,0,WinW,WinH) }
+  if Assigned(St.pSetRenderDrawColor) and Assigned(St.pRenderFillRect) then
+  begin
+    St.pSetRenderDrawColor(St.Renderer, 0, 0, 0, 180);
+    RectArr[0] := 0; RectArr[1] := 0;
+    RectArr[2] := WinW; RectArr[3] := WinH;
+    St.pRenderFillRect(St.Renderer, @RectArr[0]);
+  end;
+  { Box background }
+  if Assigned(St.pSetRenderDrawColor) and Assigned(St.pRenderFillRect) then
+  begin
+    St.pSetRenderDrawColor(St.Renderer, 50, 50, 60, 255);
+    RectArr[0] := BoxX; RectArr[1] := BoxY;
+    RectArr[2] := BoxW; RectArr[3] := BoxH;
+    St.pRenderFillRect(St.Renderer, @RectArr[0]);
+  end;
+  { Box border }
+  if Assigned(St.pRenderDrawRect) then
+  begin
+    St.pSetRenderDrawColor(St.Renderer, 120, 120, 140, 255);
+    RectArr[0] := BoxX; RectArr[1] := BoxY;
+    RectArr[2] := BoxW; RectArr[3] := BoxH;
+    St.pRenderDrawRect(St.Renderer, @RectArr[0]);
+  end;
+  { Title (bold-ish by placing above) }
+  if (Title <> '') and Assigned(St.pTTF_SizeText) and Assigned(St.Font) then
+  begin
+    TW := 0; TH := 0;
+    St.pTTF_SizeText(St.Font, PAnsiChar(AnsiString(Title)), @TW, @TH);
+    GuiDrawTextAt(St, BoxX + (BoxW - TW) div 2, BoxY + 20, Title, 240, 240, 240);
+  end;
+  { Message (centered) }
+  if (Message <> '') and Assigned(St.pTTF_SizeText) and Assigned(St.Font) then
+  begin
+    TW := 0; TH := 0;
+    St.pTTF_SizeText(St.Font, PAnsiChar(AnsiString(Message)), @TW, @TH);
+    GuiDrawTextAt(St, BoxX + (BoxW - TW) div 2, BoxY + 60, Message, 200, 200, 200);
+  end;
+  { OK button }
+  if Assigned(St.pSetRenderDrawColor) and Assigned(St.pRenderFillRect) then
+  begin
+    St.pSetRenderDrawColor(St.Renderer, 80, 120, 200, 255);
+    RectArr[0] := OKX; RectArr[1] := OKY;
+    RectArr[2] := OKW; RectArr[3] := OKH;
+    St.pRenderFillRect(St.Renderer, @RectArr[0]);
+  end;
+  if Assigned(St.pTTF_SizeText) and Assigned(St.Font) then
+  begin
+    TW := 0; TH := 0;
+    St.pTTF_SizeText(St.Font, PAnsiChar(AnsiString('OK')), @TW, @TH);
+    GuiDrawTextAt(St, OKX + (OKW - TW) div 2, OKY + (OKH - TH) div 2, 'OK', 255, 255, 255);
+  end;
+end;
+
+function TGuiAlert.HandleMouse(MX, MY, Btn: Integer; Down: Boolean): Boolean;
+begin
+  Result := False;
+  if not Down then Exit;
+  if Btn <> 1 then Exit;  { only left-click dismisses }
+  if (MX >= OKX) and (MX <= OKX + OKW) and
+     (MY >= OKY) and (MY <= OKY + OKH) then
+  begin
+    if Assigned(OnOK) then
+      GuiInvokeCallback(OnOK, GGuiPollCallEnv);
+    if Assigned(GGuiSDL) then
+    begin
+      GGuiSDL.ActiveAlert := nil;
+      Free;
+    end;
+    Result := True;
+  end;
+end;
+
+function TGuiAlert.HandleKey(const Key: string; Down: Boolean): Boolean;
+begin
+  Result := False;
+  if not Down then Exit;
+  if (Key = 'RETURN') or (Key = 'ENTER') or (Key = 'ESCAPE') then
+  begin
+    if Assigned(OnOK) then
+      GuiInvokeCallback(OnOK, GGuiPollCallEnv);
+    if Assigned(GGuiSDL) then
+    begin
+      GGuiSDL.ActiveAlert := nil;
+      Free;
+    end;
+    Result := True;
+  end;
+end;
+
 constructor TGuiProgressBar.Create(AID: Integer; AOwner: Pointer;
   AX, AY, AW, AH: Integer; AInitialValue: Integer);
 begin
@@ -42336,6 +42480,9 @@ begin
     TGuiWidget(W.Widgets[I]).Draw(GGuiSDL);
   for I := 0 to W.Widgets.Count - 1 do
     TGuiWidget(W.Widgets[I]).DrawPopup(GGuiSDL);
+  { v1.12.3: alert modal drawn last (topmost) }
+  if Assigned(GGuiSDL.ActiveAlert) then
+    GGuiSDL.ActiveAlert.Draw(GGuiSDL);
   Result := TValue.CreateBool(True);
 end;
 
@@ -42437,6 +42584,12 @@ begin
   Idx := GGuiSDL.Windows.IndexOf(GGuiSDL.FocusedWindowID);
   if Idx < 0 then Exit;
   W := GGuiSDL.Windows.Data[Idx];
+  { v1.12.3: route all keys to alert modal if active }
+  if Assigned(GGuiSDL.ActiveAlert) then
+  begin
+    GGuiSDL.ActiveAlert.HandleKey(Key, Down);
+    Exit;
+  end;
   if not Assigned(W) or (W.FocusedWidgetID = 0) then Exit;
   Target := GuiFindWidget(W.FocusedWidgetID);
   if not Assigned(Target) then Exit;
@@ -42553,6 +42706,12 @@ begin
   if Idx < 0 then Exit;
   W := GGuiSDL.Windows.Data[Idx];
   if not Assigned(W) then Exit;
+  { v1.12.3: route all mouse events to alert modal if active }
+  if Assigned(GGuiSDL.ActiveAlert) then
+  begin
+    GGuiSDL.ActiveAlert.HandleMouse(MX, MY, Btn, Down);
+    Exit;
+  end;
   { v1.11.33: route mousemove/down to open ComboBox popup first }
   PopupCombo := nil;
   if (Btn = 0) or Down then
@@ -42668,6 +42827,43 @@ end;
 
 { v1.11.18: gui2.button(x, y, w, h, caption, [r], [g], [b]) -> widget id }
 { v1.12.1: gui2.label(x, y, w, h, text[, align[, r, g, b]]) -> id | -1 | 0 }
+{ v1.12.3: gui2.alert(title, message) -> bool (v1.12.4 will add onOK callback) }
+function Native_Gui2_Alert(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  Title, Message: string;
+begin
+  Result := TValue.CreateBool(False);
+  if (Args.Count < 2) or (Args.Count > 2) then
+  begin
+    GuiSetErr('alert: expected 2 args (title, message)');
+    Exit;
+  end;
+  if not Assigned(GGuiSDL) then
+  begin
+    GuiSetErr('alert: call gui2.init() first');
+    Exit;
+  end;
+  if TValue(Args[0]).DataType <> dtString then
+  begin
+    GuiSetErr('alert: title must be string');
+    Exit;
+  end;
+  if TValue(Args[1]).DataType <> dtString then
+  begin
+    GuiSetErr('alert: message must be string');
+    Exit;
+  end;
+  Title := TValue(Args[0]).StrVal;
+  Message := TValue(Args[1]).StrVal;
+  if Assigned(GGuiSDL.ActiveAlert) then
+  begin
+    GGuiSDL.ActiveAlert.Free;
+    GGuiSDL.ActiveAlert := nil;
+  end;
+  GGuiSDL.ActiveAlert := TGuiAlert.Create(Title, Message, nil);
+  Result := TValue.CreateBool(True);
+end;
+
 { v1.12.2: gui2.progressBar(x, y, w, h[, initial[, bgR,g,b[, fgR,g,b]]]) -> id | -1 | 0 }
 function Native_Gui2_ProgressBar(Args: TObjectList; CallEnv: TSymbolTable): TValue;
 var
@@ -45965,6 +46161,7 @@ begin
   Gui2Inst.Members.DefineVar('widgetGetKeyCount', TValue.CreateNative(@Native_Gui2_WidgetGetKeyCount));
   { v1.11.18: Button widget }
   Gui2Inst.Members.DefineVar('button', TValue.CreateNative(@Native_Gui2_Button));
+  Gui2Inst.Members.DefineVar('alert', TValue.CreateNative(@Native_Gui2_Alert));
   Gui2Inst.Members.DefineVar('progressBar', TValue.CreateNative(@Native_Gui2_ProgressBar));
   Gui2Inst.Members.DefineVar('progressSetValue', TValue.CreateNative(@Native_Gui2_ProgressSetValue));
   Gui2Inst.Members.DefineVar('progressGetValue', TValue.CreateNative(@Native_Gui2_ProgressGetValue));
