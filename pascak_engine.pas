@@ -38634,7 +38634,10 @@ type
     Title: string;
     Message: string;
     OnOK: TValue;
+    OnNo: TValue;
+    IsConfirm: Boolean;
     OKX, OKY, OKW, OKH: Integer;
+    NoX, NoY, NoW, NoH: Integer;
     BoxX, BoxY, BoxW, BoxH: Integer;
     constructor Create(const ATitle, AMessage: string; AOnOK: TValue);
     destructor Destroy; override;
@@ -38941,6 +38944,8 @@ begin
   Title := ATitle;
   Message := AMessage;
   OnOK := AOnOK;
+  OnNo := nil;
+  IsConfirm := False;
   BoxW := 360; BoxH := 160;
 end;
 
@@ -38950,6 +38955,11 @@ begin
   begin
     OnOK.Free;
     OnOK := nil;
+  end;
+  if Assigned(OnNo) then
+  begin
+    OnNo.Free;
+    OnNo := nil;
   end;
   inherited;
 end;
@@ -38970,8 +38980,19 @@ begin
   CY := (WinH - BoxH) div 2;
   BoxX := CX; BoxY := CY;
   OKW := 100; OKH := 32;
-  OKX := BoxX + (BoxW - OKW) div 2;
-  OKY := BoxY + BoxH - OKH - 16;
+  if IsConfirm then
+  begin
+    NoW := 100; NoH := 32;
+    NoX := BoxX + BoxW div 2 - NoW - 8;
+    NoY := BoxY + BoxH - NoH - 16;
+    OKX := BoxX + BoxW div 2 + 8;
+    OKY := BoxY + BoxH - OKH - 16;
+  end
+  else
+  begin
+    OKX := BoxX + (BoxW - OKW) div 2;
+    OKY := BoxY + BoxH - OKH - 16;
+  end;
   { Dark overlay (approximation -- full screen 0,0,WinW,WinH) }
   if Assigned(St.pSetRenderDrawColor) and Assigned(St.pRenderFillRect) then
   begin
@@ -39010,7 +39031,24 @@ begin
     St.pTTF_SizeText(St.Font, PAnsiChar(AnsiString(Message)), @TW, @TH);
     GuiDrawTextAt(St, BoxX + (BoxW - TW) div 2, BoxY + 60, Message, 200, 200, 200);
   end;
-  { OK button }
+  { No button (only for confirm) }
+  if IsConfirm then
+  begin
+    if Assigned(St.pSetRenderDrawColor) and Assigned(St.pRenderFillRect) then
+    begin
+      St.pSetRenderDrawColor(St.Renderer, 100, 100, 110, 255);
+      RectArr[0] := NoX; RectArr[1] := NoY;
+      RectArr[2] := NoW; RectArr[3] := NoH;
+      St.pRenderFillRect(St.Renderer, @RectArr[0]);
+    end;
+    if Assigned(St.pTTF_SizeText) and Assigned(St.Font) then
+    begin
+      TW := 0; TH := 0;
+      St.pTTF_SizeText(St.Font, PAnsiChar(AnsiString('No')), @TW, @TH);
+      GuiDrawTextAt(St, NoX + (NoW - TW) div 2, NoY + (NoH - TH) div 2, 'No', 255, 255, 255);
+    end;
+  end;
+  { Yes/OK button }
   if Assigned(St.pSetRenderDrawColor) and Assigned(St.pRenderFillRect) then
   begin
     St.pSetRenderDrawColor(St.Renderer, 80, 120, 200, 255);
@@ -39021,16 +39059,41 @@ begin
   if Assigned(St.pTTF_SizeText) and Assigned(St.Font) then
   begin
     TW := 0; TH := 0;
-    St.pTTF_SizeText(St.Font, PAnsiChar(AnsiString('OK')), @TW, @TH);
-    GuiDrawTextAt(St, OKX + (OKW - TW) div 2, OKY + (OKH - TH) div 2, 'OK', 255, 255, 255);
+    if IsConfirm then
+    begin
+      St.pTTF_SizeText(St.Font, PAnsiChar(AnsiString('Yes')), @TW, @TH);
+      GuiDrawTextAt(St, OKX + (OKW - TW) div 2, OKY + (OKH - TH) div 2, 'Yes', 255, 255, 255);
+    end
+    else
+    begin
+      St.pTTF_SizeText(St.Font, PAnsiChar(AnsiString('OK')), @TW, @TH);
+      GuiDrawTextAt(St, OKX + (OKW - TW) div 2, OKY + (OKH - TH) div 2, 'OK', 255, 255, 255);
+    end;
   end;
 end;
 
 function TGuiAlert.HandleMouse(MX, MY, Btn: Integer; Down: Boolean): Boolean;
+var
+  ClickedNo: Boolean;
 begin
   Result := False;
   if not Down then Exit;
-  if Btn <> 1 then Exit;  { only left-click dismisses }
+  if Btn <> 1 then Exit;
+  ClickedNo := IsConfirm and
+    (MX >= NoX) and (MX <= NoX + NoW) and
+    (MY >= NoY) and (MY <= NoY + NoH);
+  if ClickedNo then
+  begin
+    if Assigned(OnNo) then
+      GuiInvokeCallback(OnNo, GGuiPollCallEnv);
+    if Assigned(GGuiSDL) then
+    begin
+      GGuiSDL.ActiveAlert := nil;
+      Free;
+    end;
+    Result := True;
+    Exit;
+  end;
   if (MX >= OKX) and (MX <= OKX + OKW) and
      (MY >= OKY) and (MY <= OKY + OKH) then
   begin
@@ -39046,13 +39109,24 @@ begin
 end;
 
 function TGuiAlert.HandleKey(const Key: string; Down: Boolean): Boolean;
+var
+  UseNo: Boolean;
 begin
   Result := False;
   if not Down then Exit;
   if (Key = 'RETURN') or (Key = 'ENTER') or (Key = 'ESCAPE') then
   begin
-    if Assigned(OnOK) then
-      GuiInvokeCallback(OnOK, GGuiPollCallEnv);
+    UseNo := IsConfirm and (Key = 'ESCAPE');
+    if UseNo then
+    begin
+      if Assigned(OnNo) then
+        GuiInvokeCallback(OnNo, GGuiPollCallEnv);
+    end
+    else
+    begin
+      if Assigned(OnOK) then
+        GuiInvokeCallback(OnOK, GGuiPollCallEnv);
+    end;
     if Assigned(GGuiSDL) then
     begin
       GGuiSDL.ActiveAlert := nil;
@@ -42827,6 +42901,58 @@ end;
 
 { v1.11.18: gui2.button(x, y, w, h, caption, [r], [g], [b]) -> widget id }
 { v1.12.1: gui2.label(x, y, w, h, text[, align[, r, g, b]]) -> id | -1 | 0 }
+{ v1.12.4: gui2.confirm(title, message, onYes, onNo) -> bool }
+function Native_Gui2_Confirm(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  Title, Message: string;
+  OnYes, OnNo: TValue;
+begin
+  Result := TValue.CreateBool(False);
+  if Args.Count <> 4 then
+  begin
+    GuiSetErr('confirm: expected 4 args (title, message, onYes, onNo)');
+    Exit;
+  end;
+  if not Assigned(GGuiSDL) then
+  begin
+    GuiSetErr('confirm: call gui2.init() first');
+    Exit;
+  end;
+  if TValue(Args[0]).DataType <> dtString then
+  begin
+    GuiSetErr('confirm: title must be string');
+    Exit;
+  end;
+  if TValue(Args[1]).DataType <> dtString then
+  begin
+    GuiSetErr('confirm: message must be string');
+    Exit;
+  end;
+  OnYes := TValue(Args[2]);
+  OnNo := TValue(Args[3]);
+  if (not Assigned(OnYes)) or (OnYes.DataType <> dtFunction) then
+  begin
+    GuiSetErr('confirm: onYes must be function');
+    Exit;
+  end;
+  if (not Assigned(OnNo)) or (OnNo.DataType <> dtFunction) then
+  begin
+    GuiSetErr('confirm: onNo must be function');
+    Exit;
+  end;
+  Title := TValue(Args[0]).StrVal;
+  Message := TValue(Args[1]).StrVal;
+  if Assigned(GGuiSDL.ActiveAlert) then
+  begin
+    GGuiSDL.ActiveAlert.Free;
+    GGuiSDL.ActiveAlert := nil;
+  end;
+  GGuiSDL.ActiveAlert := TGuiAlert.Create(Title, Message, OnYes.Clone);
+  GGuiSDL.ActiveAlert.IsConfirm := True;
+  GGuiSDL.ActiveAlert.OnNo := OnNo.Clone;
+  Result := TValue.CreateBool(True);
+end;
+
 { v1.12.3: gui2.alert(title, message) -> bool (v1.12.4 will add onOK callback) }
 function Native_Gui2_Alert(Args: TObjectList; CallEnv: TSymbolTable): TValue;
 var
@@ -46161,6 +46287,7 @@ begin
   Gui2Inst.Members.DefineVar('widgetGetKeyCount', TValue.CreateNative(@Native_Gui2_WidgetGetKeyCount));
   { v1.11.18: Button widget }
   Gui2Inst.Members.DefineVar('button', TValue.CreateNative(@Native_Gui2_Button));
+  Gui2Inst.Members.DefineVar('confirm', TValue.CreateNative(@Native_Gui2_Confirm));
   Gui2Inst.Members.DefineVar('alert', TValue.CreateNative(@Native_Gui2_Alert));
   Gui2Inst.Members.DefineVar('progressBar', TValue.CreateNative(@Native_Gui2_ProgressBar));
   Gui2Inst.Members.DefineVar('progressSetValue', TValue.CreateNative(@Native_Gui2_ProgressSetValue));
