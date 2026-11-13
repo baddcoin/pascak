@@ -38805,6 +38805,7 @@ const
   SDL_MOUSEMOTION           = $400;
   SDL_MOUSEBUTTONDOWN       = $401;
   SDL_MOUSEBUTTONUP         = $402;
+  SDL_MOUSEWHEEL            = $403;
   SDLK_ESCAPE               = 27;
   KMOD_SHIFT                = $0003;
   KMOD_CTRL                 = $00C0;
@@ -44635,6 +44636,43 @@ begin
   Result := TValue.CreateBool(True);
 end;
 
+{ v1.12.7: route mouse wheel to topmost scroll container under cursor }
+procedure GuiRouteWheel(WheelDX, WheelDY: Integer);
+var
+  Idx, I: Integer;
+  W: TGuiSDLWindow;
+  Widget: TGuiWidget;
+  SC: TGuiScrollContainer;
+  MX, MY, Step: Integer;
+begin
+  if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Windows)) then Exit;
+  Idx := GGuiSDL.Windows.IndexOf(GGuiSDL.FocusedWindowID);
+  if Idx < 0 then Exit;
+  W := GGuiSDL.Windows.Data[Idx];
+  if not Assigned(W) or not Assigned(W.Widgets) then Exit;
+  MX := GGuiSDL.LastMouseX;
+  MY := GGuiSDL.LastMouseY;
+  Step := 30;  { pixels per wheel notch }
+  for I := W.Widgets.Count - 1 downto 0 do
+  begin
+    Widget := TGuiWidget(W.Widgets[I]);
+    if not (Widget is TGuiScrollContainer) then Continue;
+    if not Widget.Visible then Continue;
+    if (MX < Widget.X) or (MX > Widget.X + Widget.W) or
+       (MY < Widget.Y) or (MY > Widget.Y + Widget.H) then Continue;
+    SC := TGuiScrollContainer(Widget);
+    { wheel up (DY>0) = scroll content down = ScrollY decreases }
+    SC.ScrollY := SC.ScrollY - WheelDY * Step;
+    if SC.ScrollY < 0 then SC.ScrollY := 0;
+    if WheelDX <> 0 then
+    begin
+      SC.ScrollX := SC.ScrollX - WheelDX * Step;
+      if SC.ScrollX < 0 then SC.ScrollX := 0;
+    end;
+    Exit;
+  end;
+end;
+
 function Native_Gui2_Poll(Args: TObjectList; CallEnv: TSymbolTable): TValue;
 var
   HasEvent: Int32;
@@ -44709,6 +44747,13 @@ begin
         { v1.11.17: dispatch keyup to focused widget }
         GuiDispatchKey(KeyName, False);
         Exit(TValue.CreateStr('keyup:' + KeyName));
+      end;
+    SDL_MOUSEWHEEL:
+      begin
+        { v1.12.7: route wheel to hovered scroll container }
+        GuiRouteWheel(PInt32(PByte(GGuiSDL.EventBuf) + 16)^,
+                      PInt32(PByte(GGuiSDL.EventBuf) + 20)^);
+        Exit(TValue.CreateStr('wheel'));
       end;
     SDL_MOUSEMOTION:
       begin
