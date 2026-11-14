@@ -142,3 +142,37 @@ Section marked `{ === v1.14.1 CRYPTO NATIVE SECTION === }` at line ~46737.
 - Native RSS parser
 - Keyword scoring (port dari Python analyze_news_impact)
 
+## Trigger Phrase Next Session
+
+Lanjutkan Pascak. HEAD = d25f686 (v1.14.4).
+Baca docs/SESSION_HANDOVER_2026-11-15.md.
+
+State:
+- Trading chart production-ready (100 candle + SMA20/50)
+- HTTP gzip bug FIXED (v1.14.3) — 10x response unlock
+- Crypto native 40+ indicators working (v1.14.1)
+- 17/17 tests PASS, tree clean
+
+Next: [pilih A/B/C/D/E dari options]
+Rekomendasi: A (publish milestone) — fresh session, energy penuh.
+
+## Quick Reference — Key Files
+
+| File | Purpose |
+|---|---|
+| `pascak_engine.pas` | Monolith 54,917 lines (engine + crypto + GUI) |
+| `examples/btc_trading.pas` | Trading chart showcase (288 lines) |
+| `examples/btc_chart.pas` | Simple chart (v1.13.4, 15 candle) |
+| `docs/gui_widgets/error_handling.md` | GUI error API (v1.11.53) |
+| `ROADMAP_PERFORMANCE.md` | Perf roadmap (Phase 1-6) |
+| `docs/SESSION_HANDOVER_2026-11-15.md` | This file |
+
+## State Summary
+
+- **Fast:** 75% (function parity, top-level 4.6x disclosed)
+- **Safe:** 100% (5,604 lines audited, 0 P0/P1)
+- **Easy:** 100% (13 widget/modal + error handling)
+- **Trading:** Production-ready showcase working end-to-end
+
+**Publish ready. Ship it.**
+
