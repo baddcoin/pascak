@@ -39245,8 +39245,8 @@ begin
     if not Child.Visible then Continue;
     OrigX := Child.X;
     OrigY := Child.Y;
-    Child.X := Child.X - ScrollX;
-    Child.Y := Child.Y - ScrollY;
+    Child.X := Self.X + Child.X - ScrollX;
+    Child.Y := Self.Y + Child.Y - ScrollY;
     try
       Child.Draw(GGuiSDL);
     finally
