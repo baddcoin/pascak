@@ -46734,6 +46734,509 @@ begin
 end;
 
 
+{ === v1.14.1 CRYPTO NATIVE SECTION === }
+type
+  { v1.14.1: crypto trading types }
+  TPriceCandle = record
+    Timestamp: Int64;
+    Open, High, Low, Close, Volume, TypicalPrice: Double;
+  end;
+
+  TMarketForecast = record
+    TrendRegime: string;
+    PredictedPrice: Double;
+    UpperProbability: Double;
+    LowerProbability: Double;
+    IsSqueezeActive: Boolean;
+    BullScore: Double;
+    BearScore: Double;
+    VolatilityRatio: Double;
+    DivergenceSignal: Integer;
+  end;
+
+  TTradeSignal = record
+    Action: Integer;
+    EntryPrice: Double;
+    StopLoss: Double;
+    TakeProfit: Double;
+  end;
+
+  TOnCandleProcess = procedure(const Candle: TPriceCandle) of object;
+  TTradeState = (tsFlat, tsLong, tsShort);
+
+  TCryptoIndicators = record
+    Price: Double;
+    SMA20, SMA50, SMA200: Double;
+    EMA9, EMA20, EMA50, EMA100, EMA200: Double;
+    VolumeMA20: Double;
+    RSI: Double;
+    MACD_Line, MACD_Signal, MACD_Hist: Double;
+    Stoch_K, Stoch_D: Double;
+    CCI, Momentum10, MFI: Double;
+    BollingerUpper, BollingerMiddle, BollingerLower: Double;
+    ATR14: Double;
+    KeltnerUpper, KeltnerMiddle, KeltnerLower: Double;
+    VWAP, OBV: Double;
+    Pivot, R1, S1, R2, S2: Double;
+    SwingHigh, SwingLow: Double;
+    Fib236, Fib382, Fib500, Fib618: Double;
+    ADX, PlusDI, MinusDI: Double;
+    Supertrend: Double;
+    SupertrendDir: Integer;
+    ParabolicSAR: Double;
+    LinRegSlope: Double;
+    LinRegForecast: Double;
+  end;
+
+type
+  { v1.14.1: crypto data series — ring buffer + indicator cache }
+  TCryptoDataSeries = class
+  private
+    FBuffer: array of TPriceCandle;
+    FCapacity: Integer;
+    FHead: Integer;
+    FCount: Integer;
+    FMACD_Count: Integer;
+    FMACD_SignalSum: Double;
+    FEMA9, FEMA20, FEMA50, FEMA100, FEMA200: Double;
+    FEMA12, FEMA26, FMACD_Signal: Double;
+    FRSI_AvgGain, FRSI_AvgLoss: Double;
+    FATR10, FATR14: Double;
+    FStochK: array[0..2] of Double;
+    FOBV, FCumulativePV, FCumulativeVol: Double;
+    FRecentSwingHigh, FRecentSwingLow: Double;
+    FRSI_AtSwingHigh, FRSI_AtSwingLow: Double;
+    FPlusDM14, FMinusDM14, FTR14_ADX, FADX14: Double;
+    FST_Upper, FST_Lower: Double;
+    FST_Dir: Integer;
+    FSAR, FEP, FAF: Double;
+    FSAR_Bull, FSAR_Initialized: Boolean;
+    FCurrentInd: TCryptoIndicators;
+    FCurrentForecast: TMarketForecast;
+    function GetCandle(Offset: Integer): TPriceCandle;
+    function CalculateSMA(Period: Integer): Double;
+    function CalculateVolumeSMA(Period: Integer): Double;
+    procedure UpdateEMA(Period: Integer; var TrackedEMA: Double; CurrentPrice: Double);
+    function GetHighestHigh(Period: Integer): Double;
+    function GetLowestLow(Period: Integer): Double;
+    function CalculateStdDev(Period: Integer; SMA: Double): Double;
+    function CalculatePredictiveRegression(Period: Integer; out Slope, Forecast, StdError: Double): Boolean;
+    procedure ComputeAllIndicators;
+  public
+    constructor Create(ACapacity: Integer = 2000);
+    procedure AddCandle(ATimestamp: Int64; AOpen, AHigh, ALow, AClose, AVolume: Double); overload;
+    procedure AddCandle(AOpen, AHigh, ALow, AClose, AVolume: Double); overload;
+    procedure ResetVWAP;
+    function GetMarketForecast: TMarketForecast;
+    function GetIndicators: TCryptoIndicators;
+    function IsReady(Period: Integer): Boolean;
+    property Count: Integer read FCount;
+  end;
+
+  PTimeframeNode = ^TTimeframeNode;
+  TTimeframeNode = record
+    Name: string;
+    IntervalSeconds: Int64;
+    Series: TCryptoDataSeries;
+    CurrentCandle: TPriceCandle;
+    IsCandleOpen: Boolean;
+    NextCloseTime: Int64;
+  end;
+
+  { v1.14.1: multi-timeframe engine }
+  TMTFEngine = class
+  private
+    FTimeframes: array of TTimeframeNode;
+    FBaseSeries: TCryptoDataSeries;
+    procedure ProcessToHigherTimeframe(var TF: TTimeframeNode; const BaseCandle: TPriceCandle);
+  public
+    constructor Create;
+    destructor Destroy; override;
+    procedure AddTimeframe(const AName: string; AIntervalSeconds: Int64);
+    procedure IngestTick(const BaseCandle: TPriceCandle);
+    function GetSeries(const AName: string): TCryptoDataSeries;
+  end;
+
+  { v1.14.1: CSV backtest engine }
+  TCSVBacktestEngine = class
+  private
+    FFilePath: string;
+    FOnCandle: TOnCandleProcess;
+    FDelim: Char;
+    FHasHeader: Boolean;
+    FRowsProcessed: Int64;
+    function ParseLineFast(const LineStr: string; out CandleOut: TPriceCandle): Boolean;
+  public
+    constructor Create(const AFilePath: string; ADelimiter: Char = ','; AHasHeader: Boolean = True);
+    procedure RunStream;
+    property OnCandle: TOnCandleProcess read FOnCandle write FOnCandle;
+    property RowsProcessed: Int64 read FRowsProcessed;
+  end;
+
+  { v1.14.1: portfolio manager }
+  TPortfolioManager = class
+  private
+    FInitialBalance: Double;
+    FCurrentBalance: Double;
+    FState: TTradeState;
+    FEntryPrice: Double;
+    FPositionSize: Double;
+    FStopLoss: Double;
+    FTakeProfit: Double;
+    FTotalTrades: Integer;
+    FWinningTrades: Integer;
+    FLosingTrades: Integer;
+    FMaxDrawdown: Double;
+    FPeakBalance: Double;
+    procedure ClosePosition(ExitPrice: Double; const Reason: string);
+  public
+    constructor Create(StartBalance: Double);
+    procedure Update(Signal: TTradeSignal; CurrentCandle: TPriceCandle; CurrentSAR: Double);
+  end;
+
+  { v1.14.1: forward decl for native init }
+  procedure InitCryptoNativeCode(GEnvv: TSymbolTable); forward;
+
+{ === C2.5 STUBS BEGIN (replaced by C3-C10) === }
+
+procedure TCryptoDataSeries.AddCandle(ATimestamp: Int64; AOpen, AHigh, ALow, AClose, AVolume: Double);
+var
+  C, PrevC, PrevC2, PrevC3, PrevC4: TPriceCandle;
+  TR, Change, Gain, Loss: Double;
+  UpMove, DownMove, PlusDM, MinusDM: Double;
+  PDI, MDI, DX: Double;
+  BasicUpper, BasicLower, HH, LL: Double;
+begin
+  C.Timestamp := ATimestamp;
+  C.Open := AOpen;
+  C.High := AHigh;
+  C.Low := ALow;
+  C.Close := AClose;
+  C.Volume := AVolume;
+  C.TypicalPrice := (AHigh + ALow + AClose) / 3.0;
+  if FCount > 0 then
+  begin
+    PrevC := GetCandle(0);
+    if (PrevC.Timestamp > 0) and (ATimestamp > 0) then
+      if (PrevC.Timestamp div 86400) <> (ATimestamp div 86400) then ResetVWAP;
+  end;
+  FBuffer[FHead] := C;
+  FHead := (FHead + 1) mod FCapacity;
+  if FCount < FCapacity then Inc(FCount);
+  if FCount < 2 then Exit;
+  PrevC := GetCandle(1);
+  { EMAs }
+  UpdateEMA(9, FEMA9, C.Close);
+  UpdateEMA(20, FEMA20, C.Close);
+  UpdateEMA(50, FEMA50, C.Close);
+  UpdateEMA(100, FEMA100, C.Close);
+  UpdateEMA(200, FEMA200, C.Close);
+  { MACD }
+  UpdateEMA(12, FEMA12, C.Close);
+  UpdateEMA(26, FEMA26, C.Close);
+  if IsReady(26) then
+  begin
+    Inc(FMACD_Count);
+    if FMACD_Count < 9 then
+      FMACD_SignalSum := FMACD_SignalSum + (FEMA12 - FEMA26)
+    else if FMACD_Count = 9 then
+      FMACD_Signal := (FMACD_SignalSum + (FEMA12 - FEMA26)) / 9.0
+    else
+      FMACD_Signal := (((FEMA12 - FEMA26) - FMACD_Signal) * (2.0 / 10.0)) + FMACD_Signal;
+  end;
+  { VWAP & OBV }
+  FCumulativePV := FCumulativePV + (C.TypicalPrice * C.Volume);
+  FCumulativeVol := FCumulativeVol + C.Volume;
+  if C.Close > PrevC.Close then FOBV := FOBV + C.Volume
+  else if C.Close < PrevC.Close then FOBV := FOBV - C.Volume;
+  { RSI Wilder's }
+  Change := C.Close - PrevC.Close;
+  Gain := Max(0.0, Change);
+  Loss := Max(0.0, -Change);
+  if FCount <= 14 then
+  begin
+    FRSI_AvgGain := FRSI_AvgGain + Gain;
+    FRSI_AvgLoss := FRSI_AvgLoss + Loss;
+    if FCount = 14 then
+    begin
+      FRSI_AvgGain := FRSI_AvgGain / 14.0;
+      FRSI_AvgLoss := FRSI_AvgLoss / 14.0;
+    end;
+  end
+  else
+  begin
+    FRSI_AvgGain := ((FRSI_AvgGain * 13.0) + Gain) / 14.0;
+    FRSI_AvgLoss := ((FRSI_AvgLoss * 13.0) + Loss) / 14.0;
+  end;
+  TR := Max(C.High - C.Low, Max(Abs(C.High - PrevC.Close), Abs(C.Low - PrevC.Close)));
+  if FCount <= 10 then
+  begin
+    FATR10 := FATR10 + TR;
+    if FCount = 10 then FATR10 := FATR10 / 10.0;
+  end
+  else FATR10 := (FATR10 * 9.0 + TR) / 10.0;
+  if FCount <= 14 then
+  begin
+    FATR14 := FATR14 + TR;
+    if FCount = 14 then FATR14 := FATR14 / 14.0;
+  end
+  else FATR14 := (FATR14 * 13.0 + TR) / 14.0;
+  UpMove := C.High - PrevC.High;
+  DownMove := PrevC.Low - C.Low;
+  if (UpMove > DownMove) and (UpMove > 0) then PlusDM := UpMove else PlusDM := 0;
+  if (DownMove > UpMove) and (DownMove > 0) then MinusDM := DownMove else MinusDM := 0;
+  if FCount <= 14 then
+  begin
+    FPlusDM14 := FPlusDM14 + PlusDM;
+    FMinusDM14 := FMinusDM14 + MinusDM;
+    FTR14_ADX := FTR14_ADX + TR;
+  end
+  else
+  begin
+    FPlusDM14 := FPlusDM14 - (FPlusDM14 / 14.0) + PlusDM;
+    FMinusDM14 := FMinusDM14 - (FMinusDM14 / 14.0) + MinusDM;
+    FTR14_ADX := FTR14_ADX - (FTR14_ADX / 14.0) + TR;
+  end;
+  if FCount >= 14 then
+  begin
+    if FTR14_ADX > 0 then
+    begin
+      PDI := 100.0 * (FPlusDM14 / FTR14_ADX);
+      MDI := 100.0 * (FMinusDM14 / FTR14_ADX);
+      if (PDI + MDI) > 0 then DX := 100.0 * Abs(PDI - MDI) / (PDI + MDI) else DX := 0;
+      if FCount < 28 then FADX14 := FADX14 + DX
+      else if FCount = 28 then FADX14 := (FADX14 + DX) / 14.0
+      else FADX14 := ((FADX14 * 13.0) + DX) / 14.0;
+    end;
+  end;
+  if FCount >= 10 then
+  begin
+    BasicUpper := ((C.High + C.Low) / 2.0) + (3.0 * FATR10);
+    BasicLower := ((C.High + C.Low) / 2.0) - (3.0 * FATR10);
+    if (BasicUpper < FST_Upper) or (PrevC.Close > FST_Upper) then FST_Upper := BasicUpper;
+    if (BasicLower > FST_Lower) or (PrevC.Close < FST_Lower) then FST_Lower := BasicLower;
+    if FST_Dir = 1 then
+    begin
+      if C.Close < FST_Lower then FST_Dir := -1;
+    end
+    else
+    begin
+      if C.Close > FST_Upper then FST_Dir := 1;
+    end;
+  end;
+  if FCount >= 3 then
+  begin
+    if not FSAR_Initialized then
+    begin
+      FSAR_Bull := C.Close >= PrevC.Close;
+      if FSAR_Bull then
+      begin
+        FSAR := PrevC.Low;
+        FEP := C.High;
+      end
+      else
+      begin
+        FSAR := PrevC.High;
+        FEP := C.Low;
+      end;
+      FAF := 0.02;
+      FSAR_Initialized := True;
+    end
+    else
+    begin
+      FSAR := FSAR + FAF * (FEP - FSAR);
+      if FSAR_Bull then
+      begin
+        if C.High > FEP then
+        begin
+          FEP := C.High;
+          FAF := Min(0.2, FAF + 0.02);
+        end;
+        FSAR := Min(FSAR, Min(PrevC.Low, GetCandle(2).Low));
+        if C.Low < FSAR then
+        begin
+          FSAR_Bull := False;
+          FSAR := FEP;
+          FEP := C.Low;
+          FAF := 0.02;
+        end;
+      end
+      else
+      begin
+        if C.Low < FEP then
+        begin
+          FEP := C.Low;
+          FAF := Min(0.2, FAF + 0.02);
+        end;
+        FSAR := Max(FSAR, Max(PrevC.High, GetCandle(2).High));
+        if C.High > FSAR then
+        begin
+          FSAR_Bull := True;
+          FSAR := FEP;
+          FEP := C.High;
+          FAF := 0.02;
+        end;
+      end;
+    end;
+  end;
+  { === ADD_CANDLE_BODY === }
+  ComputeAllIndicators;
+end;
+
+function TCryptoDataSeries.CalculateSMA(Period: Integer): Double;
+begin Result := 0; end;
+
+function TCryptoDataSeries.CalculateVolumeSMA(Period: Integer): Double;
+begin Result := 0; end;
+
+procedure TCryptoDataSeries.UpdateEMA(Period: Integer; var TrackedEMA: Double; CurrentPrice: Double);
+begin end;
+
+function TCryptoDataSeries.GetHighestHigh(Period: Integer): Double;
+begin Result := 0; end;
+
+function TCryptoDataSeries.GetLowestLow(Period: Integer): Double;
+begin Result := 0; end;
+
+function TCryptoDataSeries.CalculateStdDev(Period: Integer; SMA: Double): Double;
+begin Result := 0; end;
+
+function TCryptoDataSeries.CalculatePredictiveRegression(Period: Integer; out Slope, Forecast, StdError: Double): Boolean;
+begin
+  Slope := 0; Forecast := 0; StdError := 0; Result := False;
+end;
+
+procedure TCryptoDataSeries.ComputeAllIndicators;
+begin end;
+
+constructor TMTFEngine.Create;
+begin
+  SetLength(FTimeframes, 0);
+  FBaseSeries := nil;
+end;
+
+destructor TMTFEngine.Destroy;
+var i: Integer;
+begin
+  for i := 0 to High(FTimeframes) do
+    if Assigned(FTimeframes[i].Series) then FTimeframes[i].Series.Free;
+  SetLength(FTimeframes, 0);
+  if Assigned(FBaseSeries) then FBaseSeries.Free;
+  inherited;
+end;
+
+procedure TMTFEngine.AddTimeframe(const AName: string; AIntervalSeconds: Int64);
+begin end;
+
+procedure TMTFEngine.IngestTick(const BaseCandle: TPriceCandle);
+begin end;
+
+function TMTFEngine.GetSeries(const AName: string): TCryptoDataSeries;
+begin Result := nil; end;
+
+procedure TMTFEngine.ProcessToHigherTimeframe(var TF: TTimeframeNode; const BaseCandle: TPriceCandle);
+begin end;
+
+constructor TCSVBacktestEngine.Create(const AFilePath: string; ADelimiter: Char; AHasHeader: Boolean);
+begin
+  FFilePath := AFilePath;
+  FDelim := ADelimiter;
+  FHasHeader := AHasHeader;
+end;
+
+function TCSVBacktestEngine.ParseLineFast(const LineStr: string; out CandleOut: TPriceCandle): Boolean;
+begin Result := False; end;
+
+procedure TCSVBacktestEngine.RunStream;
+begin end;
+
+constructor TPortfolioManager.Create(StartBalance: Double);
+begin
+  FInitialBalance := StartBalance;
+  FCurrentBalance := StartBalance;
+  FState := tsFlat;
+  FTotalTrades := 0;
+  FWinningTrades := 0;
+  FLosingTrades := 0;
+  FMaxDrawdown := 0;
+  FPeakBalance := StartBalance;
+end;
+
+procedure TPortfolioManager.ClosePosition(ExitPrice: Double; const Reason: string);
+begin end;
+
+procedure TPortfolioManager.Update(Signal: TTradeSignal; CurrentCandle: TPriceCandle; CurrentSAR: Double);
+begin end;
+
+procedure InitCryptoNativeCode(GEnvv: TSymbolTable);
+begin
+  { stub — real impl in C10 }
+end;
+
+{ === C2.5 STUBS END === }
+
+{ === C2-MISSING (ResetVWAP, IsReady, GetIndicators, GetMarketForecast, AddCandle-no-ts) === }
+
+procedure TCryptoDataSeries.ResetVWAP;
+begin
+  FCumulativePV := 0;
+  FCumulativeVol := 0;
+end;
+
+function TCryptoDataSeries.IsReady(Period: Integer): Boolean;
+begin
+  Result := FCount >= Period;
+end;
+
+function TCryptoDataSeries.GetIndicators: TCryptoIndicators;
+begin
+  Result := FCurrentInd;
+end;
+
+function TCryptoDataSeries.GetMarketForecast: TMarketForecast;
+begin
+  Result := FCurrentForecast;
+end;
+
+procedure TCryptoDataSeries.AddCandle(AOpen, AHigh, ALow, AClose, AVolume: Double);
+begin
+  AddCandle(0, AOpen, AHigh, ALow, AClose, AVolume);
+end;
+
+{ === C2-MISSING-2 (Create, GetCandle) === }
+
+constructor TCryptoDataSeries.Create(ACapacity: Integer);
+begin
+  if ACapacity < 250 then ACapacity := 250;
+  FCapacity := ACapacity;
+  SetLength(FBuffer, FCapacity);
+  FHead := 0;
+  FCount := 0;
+  FMACD_Count := 0;
+  FMACD_SignalSum := 0;
+  FEMA9 := 0; FEMA20 := 0; FEMA50 := 0; FEMA100 := 0; FEMA200 := 0;
+  FEMA12 := 0; FEMA26 := 0; FMACD_Signal := 0;
+  FRSI_AvgGain := 0; FRSI_AvgLoss := 0;
+  FATR10 := 0; FATR14 := 0;
+  FOBV := 0; FCumulativePV := 0; FCumulativeVol := 0;
+  FStochK[0] := 0; FStochK[1] := 0; FStochK[2] := 0;
+  FRecentSwingHigh := -1; FRecentSwingLow := 999999999;
+  FRSI_AtSwingHigh := 0; FRSI_AtSwingLow := 0;
+  FPlusDM14 := 0; FMinusDM14 := 0; FTR14_ADX := 0; FADX14 := 0;
+  FST_Upper := 0; FST_Lower := 0; FST_Dir := 1;
+  FSAR := 0; FEP := 0; FAF := 0.02;
+  FSAR_Bull := True; FSAR_Initialized := False;
+  FillChar(FCurrentInd, SizeOf(FCurrentInd), 0);
+  FillChar(FCurrentForecast, SizeOf(FCurrentForecast), 0);
+end;
+
+function TCryptoDataSeries.GetCandle(Offset: Integer): TPriceCandle;
+begin
+  Result := FBuffer[(FHead - 1 - Offset + FCapacity) mod FCapacity];
+end;
+
+{ === CRYPTO_END === }
+
 procedure initNativeCode(GEnvv: TSymbolTable);
 var
   MathDef, HardDef, TimeDef, SysDef, 
