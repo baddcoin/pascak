@@ -1,7 +1,7 @@
 # Pascak VM
 > Pascal-style scripting language. 27x faster startup than Node. Compute parity with Node/Python. Native GUI included.
 
-[![Version](https://img.shields.io/badge/version-v1.13.0-blue)]()
+[![Version](https://img.shields.io/badge/version-v1.13.3-blue)]()
 [![License](https://img.shields.io/badge/license-MIT-green)]()
 [![Platform](https://img.shields.io/badge/platform-Termux%20%7C%20Linux%20%7C%20Windows%20%7C%20macOS-lightgrey)]()
 
@@ -105,7 +105,7 @@ Full collection in `examples/` (36+ files, 2,300+ lines):
 | [docs/cookbook.md](docs/cookbook.md) | 14 production recipes |
 | [CHANGELOG.md](CHANGELOG.md) | Version history (100+ tags) |
 
-## Project Status (v1.11.54)
+## Project Status (v1.13.3)
 
 - Core VM (95%+) — function-level arith on par with Node/Python
 - Standard library (98%+)
