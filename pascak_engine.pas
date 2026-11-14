@@ -38491,6 +38491,7 @@ type
   TGuiProgressBar = class(TGuiWidget)
   public
     Value: Integer;  { 0..100 }
+    Vertical: Boolean;  { v1.13.1: orientation, default False (horizontal) }
     constructor Create(AID: Integer; AOwner: Pointer;
       AX, AY, AW, AH: Integer; AInitialValue: Integer);
     procedure Draw(GuiState: Pointer); override;
@@ -39491,6 +39492,7 @@ begin
   if Value > 100 then Value := 100;
   BgR := 40; BgG := 40; BgB := 60;
   FgR := 80; FgG := 160; FgB := 240;
+  Vertical := False;
   Focusable := False;
 end;
 
@@ -39498,7 +39500,7 @@ procedure TGuiProgressBar.Draw(GuiState: Pointer);
 var
   St: TGuiSDLState;
   RectArr: array[0..3] of Int32;
-  FillW: Integer;
+  FillW, FillH: Integer;
 begin
   if not Visible then Exit;
   St := TGuiSDLState(GuiState);
@@ -39512,17 +39514,30 @@ begin
     RectArr[2] := W; RectArr[3] := H;
     St.pRenderFillRect(St.Renderer, @RectArr[0]);
   end;
-  { Fill proportional }
-  FillW := (W * Value) div 100;
-  if FillW > 0 then
+  { Fill proportional — v1.13.1: horizontal or vertical }
+  if Vertical then
   begin
-    if Assigned(St.pSetRenderDrawColor) and Assigned(St.pRenderFillRect) then
-    begin
-      St.pSetRenderDrawColor(St.Renderer, FgR, FgG, FgB, 255);
-      RectArr[0] := X; RectArr[1] := Y;
-      RectArr[2] := FillW; RectArr[3] := H;
-      St.pRenderFillRect(St.Renderer, @RectArr[0]);
-    end;
+    FillH := (H * Value) div 100;
+    if FillH > 0 then
+      if Assigned(St.pSetRenderDrawColor) and Assigned(St.pRenderFillRect) then
+      begin
+        St.pSetRenderDrawColor(St.Renderer, FgR, FgG, FgB, 255);
+        RectArr[0] := X; RectArr[1] := Y + H - FillH;
+        RectArr[2] := W; RectArr[3] := FillH;
+        St.pRenderFillRect(St.Renderer, @RectArr[0]);
+      end;
+  end
+  else
+  begin
+    FillW := (W * Value) div 100;
+    if FillW > 0 then
+      if Assigned(St.pSetRenderDrawColor) and Assigned(St.pRenderFillRect) then
+      begin
+        St.pSetRenderDrawColor(St.Renderer, FgR, FgG, FgB, 255);
+        RectArr[0] := X; RectArr[1] := Y;
+        RectArr[2] := FillW; RectArr[3] := H;
+        St.pRenderFillRect(St.Renderer, @RectArr[0]);
+      end;
   end;
   { Border }
   if Assigned(St.pRenderDrawRect) then
@@ -43554,11 +43569,12 @@ var
   Widget: TGuiProgressBar;
   X, Y, WW, HH, ID, InitVal: Integer;
   BR, BG, BB, FR, FG, FB: Integer;
+  Vertical: Boolean;
 begin
   Result := TValue.CreateNum(0);
-  if (Args.Count < 4) or (Args.Count > 11) then
+  if (Args.Count < 4) or (Args.Count > 12) then
   begin
-    GuiSetErr('progressBar: expected 4-11 args');
+    GuiSetErr('progressBar: expected 4-12 args');
     Exit;
   end;
   if (not Assigned(GGuiSDL)) or (not Assigned(GGuiSDL.Windows)) then
@@ -43572,14 +43588,16 @@ begin
   HH := Trunc(TValue(Args[3]).NumVal);
   InitVal := 0;
   if (Args.Count >= 5) and (TValue(Args[4]).DataType = dtNumeric) then InitVal := Trunc(TValue(Args[4]).NumVal);
+  Vertical := False;
+  if (Args.Count >= 6) and (TValue(Args[5]).DataType = dtBoolean) then Vertical := TValue(Args[5]).BoolVal;
   BR := 40; BG := 40; BB := 60;
   FR := 80; FG := 160; FB := 240;
-  if (Args.Count >= 8) and (TValue(Args[5]).DataType = dtNumeric) then BR := Trunc(TValue(Args[5]).NumVal);
-  if (Args.Count >= 8) and (TValue(Args[6]).DataType = dtNumeric) then BG := Trunc(TValue(Args[6]).NumVal);
-  if (Args.Count >= 8) and (TValue(Args[7]).DataType = dtNumeric) then BB := Trunc(TValue(Args[7]).NumVal);
-  if (Args.Count >= 11) and (TValue(Args[8]).DataType = dtNumeric) then FR := Trunc(TValue(Args[8]).NumVal);
-  if (Args.Count >= 11) and (TValue(Args[9]).DataType = dtNumeric) then FG := Trunc(TValue(Args[9]).NumVal);
-  if (Args.Count >= 11) and (TValue(Args[10]).DataType = dtNumeric) then FB := Trunc(TValue(Args[10]).NumVal);
+  if (Args.Count >= 9) and (TValue(Args[6]).DataType = dtNumeric) then BR := Trunc(TValue(Args[6]).NumVal);
+  if (Args.Count >= 9) and (TValue(Args[7]).DataType = dtNumeric) then BG := Trunc(TValue(Args[7]).NumVal);
+  if (Args.Count >= 9) and (TValue(Args[8]).DataType = dtNumeric) then BB := Trunc(TValue(Args[8]).NumVal);
+  if (Args.Count >= 12) and (TValue(Args[9]).DataType = dtNumeric) then FR := Trunc(TValue(Args[9]).NumVal);
+  if (Args.Count >= 12) and (TValue(Args[10]).DataType = dtNumeric) then FG := Trunc(TValue(Args[10]).NumVal);
+  if (Args.Count >= 12) and (TValue(Args[11]).DataType = dtNumeric) then FB := Trunc(TValue(Args[11]).NumVal);
   if not Assigned(GGuiSDL.Font) then
   begin
     GGuiSDL.LastError := 'progressBar: font not loaded, call gui2.setFont() first';
@@ -43594,6 +43612,7 @@ begin
   ID := GGuiSDL.NextWidgetID;
   Inc(GGuiSDL.NextWidgetID);
   Widget := TGuiProgressBar.Create(ID, W, X, Y, WW, HH, InitVal);
+  Widget.Vertical := Vertical;
   Widget.BgR := UInt8(BR); Widget.BgG := UInt8(BG); Widget.BgB := UInt8(BB);
   Widget.FgR := UInt8(FR); Widget.FgG := UInt8(FG); Widget.FgB := UInt8(FB);
   W.Widgets.Add(Widget);
