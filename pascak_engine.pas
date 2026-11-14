@@ -47079,40 +47079,334 @@ begin
       end;
     end;
   end;
+  if FCount >= 14 then
+  begin
+    HH := GetHighestHigh(14);
+    LL := GetLowestLow(14);
+    if HH = LL then FStochK[0] := 0
+    else FStochK[0] := ((C.Close - LL) / (HH - LL)) * 100.0;
+    FStochK[2] := FStochK[1];
+    FStochK[1] := FStochK[0];
+  end;
+  if FCount >= 5 then
+  begin
+    PrevC2 := GetCandle(2);
+    PrevC3 := GetCandle(3);
+    PrevC4 := GetCandle(4);
+    if (PrevC2.High > C.High) and (PrevC2.High > PrevC.High) and
+       (PrevC2.High > PrevC3.High) and (PrevC2.High > PrevC4.High) then
+    begin
+      FRecentSwingHigh := PrevC2.High;
+      FRSI_AtSwingHigh := FCurrentInd.RSI;
+    end;
+    if (PrevC2.Low < C.Low) and (PrevC2.Low < PrevC.Low) and
+       (PrevC2.Low < PrevC3.Low) and (PrevC2.Low < PrevC4.Low) then
+    begin
+      FRecentSwingLow := PrevC2.Low;
+      FRSI_AtSwingLow := FCurrentInd.RSI;
+    end;
+  end;
   { === ADD_CANDLE_BODY === }
   ComputeAllIndicators;
 end;
 
 function TCryptoDataSeries.CalculateSMA(Period: Integer): Double;
-begin Result := 0; end;
+var i: Integer; Sum: Double;
+begin
+  if not IsReady(Period) then Exit(0.0);
+  Sum := 0.0;
+  for i := 0 to Period - 1 do Sum := Sum + GetCandle(i).Close;
+  Result := Sum / Period;
+end;
 
 function TCryptoDataSeries.CalculateVolumeSMA(Period: Integer): Double;
-begin Result := 0; end;
+var i: Integer; Sum: Double;
+begin
+  if not IsReady(Period) then Exit(0.0);
+  Sum := 0.0;
+  for i := 0 to Period - 1 do Sum := Sum + GetCandle(i).Volume;
+  Result := Sum / Period;
+end;
 
 procedure TCryptoDataSeries.UpdateEMA(Period: Integer; var TrackedEMA: Double; CurrentPrice: Double);
-begin end;
+var Multiplier: Double;
+begin
+  if FCount < Period then Exit;
+  if FCount = Period then
+  begin
+    TrackedEMA := CalculateSMA(Period);
+    Exit;
+  end;
+  Multiplier := 2.0 / (Period + 1);
+  TrackedEMA := ((CurrentPrice - TrackedEMA) * Multiplier) + TrackedEMA;
+end;
 
 function TCryptoDataSeries.GetHighestHigh(Period: Integer): Double;
-begin Result := 0; end;
+var i: Integer;
+begin
+  Result := GetCandle(0).High;
+  for i := 1 to Period - 1 do
+    Result := Max(Result, GetCandle(i).High);
+end;
 
 function TCryptoDataSeries.GetLowestLow(Period: Integer): Double;
-begin Result := 0; end;
+var i: Integer;
+begin
+  Result := GetCandle(0).Low;
+  for i := 1 to Period - 1 do
+    Result := Min(Result, GetCandle(i).Low);
+end;
 
 function TCryptoDataSeries.CalculateStdDev(Period: Integer; SMA: Double): Double;
-begin Result := 0; end;
+var i: Integer; SumSq: Double;
+begin
+  if not IsReady(Period) then Exit(0.0);
+  SumSq := 0.0;
+  for i := 0 to Period - 1 do SumSq := SumSq + Sqr(GetCandle(i).Close - SMA);
+  Result := Sqrt(SumSq / Period);
+end;
 
 function TCryptoDataSeries.CalculatePredictiveRegression(Period: Integer; out Slope, Forecast, StdError: Double): Boolean;
+var
+  i: Integer;
+  SumX, SumY, SumXY, SumX2: Double;
+  n, X, Y, Intercept, SSE, Estimate, Denominator: Double;
 begin
-  Slope := 0; Forecast := 0; StdError := 0; Result := False;
+  Slope := 0; Forecast := 0; StdError := 0;
+  if not IsReady(Period) then Exit(False);
+  SumX := 0; SumY := 0; SumXY := 0; SumX2 := 0;
+  n := Period;
+  for i := 0 to Period - 1 do
+  begin
+    X := Period - i;
+    Y := GetCandle(i).Close;
+    SumX := SumX + X;
+    SumY := SumY + Y;
+    SumXY := SumXY + (X * Y);
+    SumX2 := SumX2 + (X * X);
+  end;
+  Denominator := (n * SumX2) - (SumX * SumX);
+  if SameValue(Denominator, 0.0, 1E-12) then Exit(False);
+  Slope := (n * SumXY - SumX * SumY) / Denominator;
+  Intercept := (SumY - Slope * SumX) / n;
+  Forecast := Intercept + (Slope * (Period + 1));
+  SSE := 0;
+  for i := 0 to Period - 1 do
+  begin
+    X := Period - i;
+    Y := GetCandle(i).Close;
+    Estimate := Intercept + (Slope * X);
+    SSE := SSE + Sqr(Y - Estimate);
+  end;
+  if Period > 2 then StdError := Sqrt(SSE / (Period - 2)) else StdError := 0;
+  Result := True;
 end;
 
 procedure TCryptoDataSeries.ComputeAllIndicators;
-begin end;
+var
+  TempStdDev: Double;
+  C, PrevC: TPriceCandle;
+  RS, TP_SMA, TP_MeanDev, PosMF, NegMF, MFRatio, FibDiff: Double;
+  i: Integer;
+  Slope, Forecast, StdError, BBWidth, KCWidth, BaseScore: Double;
+begin
+  if FCount = 0 then Exit;
+  C := GetCandle(0);
+  FCurrentInd.Price := C.Close;
+  FCurrentInd.SMA20 := CalculateSMA(20);
+  FCurrentInd.SMA50 := CalculateSMA(50);
+  FCurrentInd.SMA200 := CalculateSMA(200);
+  FCurrentInd.VolumeMA20 := CalculateVolumeSMA(20);
+  FCurrentInd.EMA9 := FEMA9;
+  FCurrentInd.EMA20 := FEMA20;
+  FCurrentInd.EMA50 := FEMA50;
+  FCurrentInd.EMA100 := FEMA100;
+  FCurrentInd.EMA200 := FEMA200;
+  if IsReady(26) then
+  begin
+    FCurrentInd.MACD_Line := FEMA12 - FEMA26;
+    FCurrentInd.MACD_Signal := FMACD_Signal;
+    FCurrentInd.MACD_Hist := FCurrentInd.MACD_Line - FCurrentInd.MACD_Signal;
+  end;
+  if IsReady(14) then
+  begin
+    if FRSI_AvgLoss = 0 then
+      FCurrentInd.RSI := 100.0
+    else
+    begin
+      RS := FRSI_AvgGain / FRSI_AvgLoss;
+      FCurrentInd.RSI := 100.0 - (100.0 / (1.0 + RS));
+    end;
+  end;
+  if IsReady(14) then
+  begin
+    FCurrentInd.Stoch_K := FStochK[0];
+    FCurrentInd.Stoch_D := (FStochK[0] + FStochK[1] + FStochK[2]) / 3.0;
+  end;
+  if IsReady(20) then
+  begin
+    TP_SMA := 0;
+    for i := 0 to 19 do
+      TP_SMA := TP_SMA + GetCandle(i).TypicalPrice;
+    TP_SMA := TP_SMA / 20.0;
+    TP_MeanDev := 0;
+    for i := 0 to 19 do
+      TP_MeanDev := TP_MeanDev + Abs(GetCandle(i).TypicalPrice - TP_SMA);
+    TP_MeanDev := TP_MeanDev / 20.0;
+    if TP_MeanDev > 0 then
+      FCurrentInd.CCI := (C.TypicalPrice - TP_SMA) / (0.015 * TP_MeanDev);
+  end;
+  if IsReady(10) then
+    FCurrentInd.Momentum10 := C.Close - GetCandle(10).Close;
+  if IsReady(15) then
+  begin
+    PosMF := 0;
+    NegMF := 0;
+    for i := 0 to 13 do
+    begin
+      if GetCandle(i).TypicalPrice > GetCandle(i+1).TypicalPrice then
+        PosMF := PosMF + (GetCandle(i).TypicalPrice * GetCandle(i).Volume)
+      else
+        NegMF := NegMF + (GetCandle(i).TypicalPrice * GetCandle(i).Volume);
+    end;
+    if NegMF = 0 then
+      FCurrentInd.MFI := 100.0
+    else
+    begin
+      MFRatio := PosMF / NegMF;
+      FCurrentInd.MFI := 100.0 - (100.0 / (1.0 + MFRatio));
+    end;
+  end;
+  if IsReady(20) then
+  begin
+    FCurrentInd.BollingerMiddle := FCurrentInd.SMA20;
+    TempStdDev := CalculateStdDev(20, FCurrentInd.SMA20);
+    FCurrentInd.BollingerUpper := FCurrentInd.SMA20 + (2.0 * TempStdDev);
+    FCurrentInd.BollingerLower := FCurrentInd.SMA20 - (2.0 * TempStdDev);
+  end;
+  FCurrentInd.ATR14 := FATR14;
+  if IsReady(20) then
+  begin
+    FCurrentInd.KeltnerMiddle := FCurrentInd.EMA20;
+    FCurrentInd.KeltnerUpper := FCurrentInd.EMA20 + (1.5 * FATR10);
+    FCurrentInd.KeltnerLower := FCurrentInd.EMA20 - (1.5 * FATR10);
+  end;
+  if FCumulativeVol > 0 then
+    FCurrentInd.VWAP := FCumulativePV / FCumulativeVol;
+  FCurrentInd.OBV := FOBV;
+  if FCount > 1 then
+  begin
+    PrevC := GetCandle(1);
+    FCurrentInd.Pivot := (PrevC.High + PrevC.Low + PrevC.Close) / 3.0;
+    FCurrentInd.R1 := (2.0 * FCurrentInd.Pivot) - PrevC.Low;
+    FCurrentInd.S1 := (2.0 * FCurrentInd.Pivot) - PrevC.High;
+    FCurrentInd.R2 := FCurrentInd.Pivot + (PrevC.High - PrevC.Low);
+    FCurrentInd.S2 := FCurrentInd.Pivot - (PrevC.High - PrevC.Low);
+  end;
+  FCurrentInd.SwingHigh := FRecentSwingHigh;
+  FCurrentInd.SwingLow := FRecentSwingLow;
+  if (FRecentSwingHigh > 0) and (FRecentSwingHigh > FRecentSwingLow) then
+  begin
+    FibDiff := FRecentSwingHigh - FRecentSwingLow;
+    FCurrentInd.Fib236 := FRecentSwingHigh - (FibDiff * 0.236);
+    FCurrentInd.Fib382 := FRecentSwingHigh - (FibDiff * 0.382);
+    FCurrentInd.Fib500 := FRecentSwingHigh - (FibDiff * 0.500);
+    FCurrentInd.Fib618 := FRecentSwingHigh - (FibDiff * 0.618);
+  end;
+  if FCount >= 28 then
+  begin
+    FCurrentInd.ADX := FADX14;
+    if FTR14_ADX > 0 then
+    begin
+      FCurrentInd.PlusDI := 100.0 * (FPlusDM14 / FTR14_ADX);
+      FCurrentInd.MinusDI := 100.0 * (FMinusDM14 / FTR14_ADX);
+    end;
+  end;
+  if FCount >= 10 then
+  begin
+    FCurrentInd.SupertrendDir := FST_Dir;
+    if FST_Dir = 1 then
+      FCurrentInd.Supertrend := FST_Lower
+    else
+      FCurrentInd.Supertrend := FST_Upper;
+  end;
+  if FSAR_Initialized then
+    FCurrentInd.ParabolicSAR := FSAR;
+  if CalculatePredictiveRegression(20, Slope, Forecast, StdError) then
+  begin
+    FCurrentInd.LinRegSlope := Slope;
+    FCurrentInd.LinRegForecast := Forecast;
+  end;
+  FillChar(FCurrentForecast, SizeOf(FCurrentForecast), 0);
+  if not IsReady(200) then
+  begin
+    FCurrentForecast.TrendRegime := 'Insufficient Data';
+    Exit;
+  end;
+  FCurrentForecast.PredictedPrice := Forecast;
+  FCurrentForecast.UpperProbability := Forecast + (StdError * 2.0);
+  FCurrentForecast.LowerProbability := Forecast - (StdError * 2.0);
+  BBWidth := FCurrentInd.BollingerUpper - FCurrentInd.BollingerLower;
+  KCWidth := FCurrentInd.KeltnerUpper - FCurrentInd.KeltnerLower;
+  if KCWidth > 0 then
+    FCurrentForecast.VolatilityRatio := BBWidth / KCWidth
+  else
+    FCurrentForecast.VolatilityRatio := 1.0;
+  FCurrentForecast.IsSqueezeActive := FCurrentForecast.VolatilityRatio < 1.0;
+  if (FCurrentInd.ADX < 20.0) or (Abs(Slope) < (FCurrentInd.Price * 0.0001)) then
+    FCurrentForecast.TrendRegime := 'Sideways / Choppy'
+  else if Slope > 0 then
+    FCurrentForecast.TrendRegime := 'Bullish Phase'
+  else
+    FCurrentForecast.TrendRegime := 'Bearish Phase';
+  if FCurrentForecast.IsSqueezeActive then
+    FCurrentForecast.TrendRegime := FCurrentForecast.TrendRegime + ' (SQUEEZE)';
+  FCurrentForecast.DivergenceSignal := 0;
+  if (C.High > FRecentSwingHigh) and (FCurrentInd.RSI < FRSI_AtSwingHigh) and (FCurrentInd.RSI > 65) then
+    FCurrentForecast.DivergenceSignal := -1;
+  if (C.Low < FRecentSwingLow) and (FCurrentInd.RSI > FRSI_AtSwingLow) and (FCurrentInd.RSI < 35) then
+    FCurrentForecast.DivergenceSignal := 1;
+  BaseScore := 100.0 / 7.0;
+  if FCurrentInd.EMA50 > FCurrentInd.EMA200 then
+    FCurrentForecast.BullScore := FCurrentForecast.BullScore + BaseScore
+  else if FCurrentInd.EMA50 < FCurrentInd.EMA200 then
+    FCurrentForecast.BearScore := FCurrentForecast.BearScore + BaseScore;
+  if Slope > 0 then
+    FCurrentForecast.BullScore := FCurrentForecast.BullScore + BaseScore
+  else if Slope < 0 then
+    FCurrentForecast.BearScore := FCurrentForecast.BearScore + BaseScore;
+  if FCurrentInd.SupertrendDir = 1 then
+    FCurrentForecast.BullScore := FCurrentForecast.BullScore + BaseScore
+  else if FCurrentInd.SupertrendDir = -1 then
+    FCurrentForecast.BearScore := FCurrentForecast.BearScore + BaseScore;
+  if FCurrentInd.Price > FCurrentInd.VWAP then
+    FCurrentForecast.BullScore := FCurrentForecast.BullScore + BaseScore
+  else if FCurrentInd.Price < FCurrentInd.VWAP then
+    FCurrentForecast.BearScore := FCurrentForecast.BearScore + BaseScore;
+  if FCurrentInd.PlusDI > FCurrentInd.MinusDI then
+    FCurrentForecast.BullScore := FCurrentForecast.BullScore + BaseScore
+  else if FCurrentInd.MinusDI > FCurrentInd.PlusDI then
+    FCurrentForecast.BearScore := FCurrentForecast.BearScore + BaseScore;
+  if FCurrentInd.MACD_Hist > 0 then
+    FCurrentForecast.BullScore := FCurrentForecast.BullScore + BaseScore
+  else if FCurrentInd.MACD_Hist < 0 then
+    FCurrentForecast.BearScore := FCurrentForecast.BearScore + BaseScore;
+  if FCurrentForecast.DivergenceSignal = 1 then
+    FCurrentForecast.BullScore := FCurrentForecast.BullScore + BaseScore
+  else if FCurrentForecast.DivergenceSignal = -1 then
+    FCurrentForecast.BearScore := FCurrentForecast.BearScore + BaseScore;
+  if FCurrentInd.ADX < 20 then
+  begin
+    FCurrentForecast.BullScore := FCurrentForecast.BullScore * 0.5;
+    FCurrentForecast.BearScore := FCurrentForecast.BearScore * 0.5;
+  end;
+  { === COMPUTE_BODY === }
+end;
 
 constructor TMTFEngine.Create;
 begin
   SetLength(FTimeframes, 0);
-  FBaseSeries := nil;
+  FBaseSeries := TCryptoDataSeries.Create(2000);
 end;
 
 destructor TMTFEngine.Destroy;
@@ -47126,16 +47420,58 @@ begin
 end;
 
 procedure TMTFEngine.AddTimeframe(const AName: string; AIntervalSeconds: Int64);
-begin end;
+var Len: Integer;
+begin
+  Len := Length(FTimeframes);
+  SetLength(FTimeframes, Len + 1);
+  FTimeframes[Len].Name := AName;
+  FTimeframes[Len].IntervalSeconds := AIntervalSeconds;
+  FTimeframes[Len].Series := TCryptoDataSeries.Create(2000);
+  FTimeframes[Len].IsCandleOpen := False;
+end;
 
 procedure TMTFEngine.IngestTick(const BaseCandle: TPriceCandle);
-begin end;
+var i: Integer;
+begin
+  FBaseSeries.AddCandle(BaseCandle.Timestamp, BaseCandle.Open, BaseCandle.High, BaseCandle.Low, BaseCandle.Close, BaseCandle.Volume);
+  for i := 0 to High(FTimeframes) do
+    ProcessToHigherTimeframe(FTimeframes[i], BaseCandle);
+end;
 
 function TMTFEngine.GetSeries(const AName: string): TCryptoDataSeries;
-begin Result := nil; end;
+var i: Integer;
+begin
+  Result := nil;
+  if SameText(AName, 'base') then Exit(FBaseSeries);
+  for i := 0 to High(FTimeframes) do
+    if SameText(FTimeframes[i].Name, AName) then Exit(FTimeframes[i].Series);
+end;
 
 procedure TMTFEngine.ProcessToHigherTimeframe(var TF: TTimeframeNode; const BaseCandle: TPriceCandle);
-begin end;
+begin
+  if not TF.IsCandleOpen then
+  begin
+    TF.CurrentCandle := BaseCandle;
+    TF.IsCandleOpen := True;
+    TF.NextCloseTime := BaseCandle.Timestamp - (BaseCandle.Timestamp mod TF.IntervalSeconds) + TF.IntervalSeconds;
+  end
+  else
+  begin
+    TF.CurrentCandle.High := Max(TF.CurrentCandle.High, BaseCandle.High);
+    TF.CurrentCandle.Low := Min(TF.CurrentCandle.Low, BaseCandle.Low);
+    TF.CurrentCandle.Close := BaseCandle.Close;
+    TF.CurrentCandle.Volume := TF.CurrentCandle.Volume + BaseCandle.Volume;
+  end;
+  if BaseCandle.Timestamp >= TF.NextCloseTime then
+  begin
+    TF.Series.AddCandle(
+      TF.CurrentCandle.Timestamp,
+      TF.CurrentCandle.Open, TF.CurrentCandle.High,
+      TF.CurrentCandle.Low, TF.CurrentCandle.Close, TF.CurrentCandle.Volume
+    );
+    TF.IsCandleOpen := False;
+  end;
+end;
 
 constructor TCSVBacktestEngine.Create(const AFilePath: string; ADelimiter: Char; AHasHeader: Boolean);
 begin
@@ -47145,10 +47481,79 @@ begin
 end;
 
 function TCSVBacktestEngine.ParseLineFast(const LineStr: string; out CandleOut: TPriceCandle): Boolean;
-begin Result := False; end;
+var
+  i, StartIdx, ColIndex, Len, Code: Integer;
+  TempStr: string; FloatVal: Double;
+begin
+  Result := False;
+  Len := Length(LineStr);
+  if Len = 0 then Exit;
+  FillChar(CandleOut, SizeOf(CandleOut), 0);
+  ColIndex := 1;
+  StartIdx := 1;
+  for i := 1 to Len do
+  begin
+    if (LineStr[i] = FDelim) or (i = Len) then
+    begin
+      if i = Len then
+        TempStr := Copy(LineStr, StartIdx, (i - StartIdx) + 1)
+      else
+        TempStr := Copy(LineStr, StartIdx, i - StartIdx);
+      Val(TempStr, FloatVal, Code);
+      if Code = 0 then
+      begin
+        case ColIndex of
+          1: CandleOut.Timestamp := Trunc(FloatVal);
+          2: CandleOut.Open      := FloatVal;
+          3: CandleOut.High      := FloatVal;
+          4: CandleOut.Low       := FloatVal;
+          5: CandleOut.Close     := FloatVal;
+          6: CandleOut.Volume    := FloatVal;
+        end;
+      end;
+      StartIdx := i + 1;
+      Inc(ColIndex);
+      if ColIndex > 6 then Break;
+    end;
+  end;
+  CandleOut.TypicalPrice := (CandleOut.High + CandleOut.Low + CandleOut.Close) / 3.0;
+  Result := True;
+end;
 
 procedure TCSVBacktestEngine.RunStream;
-begin end;
+var
+  CSVFile: TextFile;
+  RawLine: string;
+  FileBuffer: array[0..65535] of Byte;
+  ParsedCandle: TPriceCandle;
+  IsFirstRow: Boolean;
+begin
+  if not SysUtils.FileExists(FFilePath) then
+    raise Exception.Create('Backtest Error: CSV tidak ditemukan.');
+  AssignFile(CSVFile, FFilePath);
+  SetTextBuf(CSVFile, FileBuffer, SizeOf(FileBuffer));
+  Reset(CSVFile);
+  try
+    FRowsProcessed := 0;
+    IsFirstRow := True;
+    while not EOF(CSVFile) do
+    begin
+      ReadLn(CSVFile, RawLine);
+      if IsFirstRow and FHasHeader then
+      begin
+        IsFirstRow := False;
+        Continue;
+      end;
+      if ParseLineFast(RawLine, ParsedCandle) then
+      begin
+        Inc(FRowsProcessed);
+        if Assigned(FOnCandle) then FOnCandle(ParsedCandle);
+      end;
+    end;
+  finally
+    CloseFile(CSVFile);
+  end;
+end;
 
 constructor TPortfolioManager.Create(StartBalance: Double);
 begin
@@ -47163,14 +47568,80 @@ begin
 end;
 
 procedure TPortfolioManager.ClosePosition(ExitPrice: Double; const Reason: string);
-begin end;
+var PnL, PnLPercent: Double;
+begin
+  if FState = tsFlat then Exit;
+  if FState = tsLong then
+    PnLPercent := (ExitPrice - FEntryPrice) / FEntryPrice
+  else
+    PnLPercent := (FEntryPrice - ExitPrice) / FEntryPrice;
+  PnLPercent := PnLPercent - 0.002;
+  PnL := FPositionSize * PnLPercent;
+  FCurrentBalance := FCurrentBalance + PnL;
+  Inc(FTotalTrades);
+  if PnL > 0 then Inc(FWinningTrades) else Inc(FLosingTrades);
+  if FCurrentBalance > FPeakBalance then FPeakBalance := FCurrentBalance;
+  if FPeakBalance > 0 then
+    FMaxDrawdown := Max(FMaxDrawdown, (FPeakBalance - FCurrentBalance) / FPeakBalance);
+  FState := tsFlat;
+  FEntryPrice := 0;
+  FPositionSize := 0;
+end;
 
 procedure TPortfolioManager.Update(Signal: TTradeSignal; CurrentCandle: TPriceCandle; CurrentSAR: Double);
-begin end;
+var RiskAmount, PriceDiff: Double;
+begin
+  if FState = tsLong then
+  begin
+    if (CurrentSAR < CurrentCandle.Close) and (CurrentSAR > FStopLoss) then
+      FStopLoss := CurrentSAR;
+    if CurrentCandle.Low <= FStopLoss then
+      ClosePosition(FStopLoss, 'SL')
+    else if CurrentCandle.High >= FTakeProfit then
+      ClosePosition(FTakeProfit, 'TP')
+    else if Signal.Action = -1 then
+      ClosePosition(CurrentCandle.Close, 'Reversal');
+    Exit;
+  end
+  else if FState = tsShort then
+  begin
+    if (CurrentSAR > CurrentCandle.Close) and (CurrentSAR < FStopLoss) then
+      FStopLoss := CurrentSAR;
+    if CurrentCandle.High >= FStopLoss then
+      ClosePosition(FStopLoss, 'SL')
+    else if CurrentCandle.Low <= FTakeProfit then
+      ClosePosition(FTakeProfit, 'TP')
+    else if Signal.Action = 1 then
+      ClosePosition(CurrentCandle.Close, 'Reversal');
+    Exit;
+  end;
+  if FState = tsFlat then
+  begin
+    if (Signal.Action = 1) or (Signal.Action = -1) then
+    begin
+      PriceDiff := Abs(Signal.EntryPrice - Signal.StopLoss);
+      if PriceDiff < 1E-8 then Exit;
+      if Signal.Action = 1 then FState := tsLong else FState := tsShort;
+      FEntryPrice := Signal.EntryPrice;
+      FStopLoss := Signal.StopLoss;
+      FTakeProfit := Signal.TakeProfit;
+      RiskAmount := FCurrentBalance * 0.02;
+      FPositionSize := RiskAmount / PriceDiff;
+    end;
+  end;
+end;
+
+function Native_CryptoCreate(Args: TObjectList; CallEnv: TSymbolTable): TValue; forward;
+function Native_CryptoAddCandle(Args: TObjectList; CallEnv: TSymbolTable): TValue; forward;
+function Native_GetForecast(Args: TObjectList; CallEnv: TSymbolTable): TValue; forward;
+function Native_CryptoFree(Args: TObjectList; CallEnv: TSymbolTable): TValue; forward;
 
 procedure InitCryptoNativeCode(GEnvv: TSymbolTable);
 begin
-  { stub — real impl in C10 }
+  GEnvv.DefineVar('cryptoCreate', TValue.CreateNative(@Native_CryptoCreate), true);
+  GEnvv.DefineVar('cryptoAdd', TValue.CreateNative(@Native_CryptoAddCandle), true);
+  GEnvv.DefineVar('getForecast', TValue.CreateNative(@Native_GetForecast), true);
+  GEnvv.DefineVar('cryptoFree', TValue.CreateNative(@Native_CryptoFree), true);
 end;
 
 { === C2.5 STUBS END === }
@@ -47235,6 +47706,90 @@ begin
   Result := FBuffer[(FHead - 1 - Offset + FCapacity) mod FCapacity];
 end;
 
+{ v1.14.1: crypto native — create series }
+function Native_CryptoCreate(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  Capacity: Integer;
+  Series: TCryptoDataSeries;
+begin
+  Capacity := 2000;
+  if (Args.Count > 0) and (TValue(Args[0]).DataType = dtNumeric) then
+    Capacity := Trunc(TValue(Args[0]).NumVal);
+  Series := TCryptoDataSeries.Create(Capacity);
+  Result := TValue.CreatePtr(Pointer(Series));
+end;
+
+{ v1.14.1: crypto native — add candle }
+function Native_CryptoAddCandle(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var Series: TCryptoDataSeries;
+begin
+  if Args.Count <> 7 then
+    raise EScriptRuntimeError.Create('cryptoAdd butuh 7 argumen');
+  if TValue(Args[0]).DataType <> dtPointer then
+    raise EScriptRuntimeError.Create('Argumen pertama cryptoAdd harus Pointer');
+  Series := TCryptoDataSeries(TValue(Args[0]).PtrVal);
+  if Assigned(Series) then
+  begin
+    Series.AddCandle(Trunc(TValue(Args[1]).NumVal),
+      TValue(Args[2]).NumVal, TValue(Args[3]).NumVal,
+      TValue(Args[4]).NumVal, TValue(Args[5]).NumVal,
+      TValue(Args[6]).NumVal);
+    Result := TValue.CreateBool(True);
+  end
+  else
+    raise EScriptRuntimeError.Create('Pointer tidak valid.');
+end;
+
+{ v1.14.1: crypto native — get forecast }
+function Native_GetForecast(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var
+  Series: TCryptoDataSeries;
+  Forecast: TMarketForecast;
+  DictObj: TDictValue;
+begin
+  if (Args.Count <> 1) or (TValue(Args[0]).DataType <> dtPointer) then
+    raise EScriptRuntimeError.Create('getForecast butuh 1 Pointer');
+  Series := TCryptoDataSeries(TValue(Args[0]).PtrVal);
+  if not Assigned(Series) then
+    raise EScriptRuntimeError.Create('Pointer tidak valid.');
+  Forecast := Series.GetMarketForecast;
+  DictObj := TDictValue.Create;
+  try
+    DictObj.SetValue('TrendRegime', TValue.CreateStr(Forecast.TrendRegime));
+    DictObj.SetValue('PredictedPrice', TValue.CreateNum(Forecast.PredictedPrice));
+    DictObj.SetValue('UpperProbability', TValue.CreateNum(Forecast.UpperProbability));
+    DictObj.SetValue('LowerProbability', TValue.CreateNum(Forecast.LowerProbability));
+    DictObj.SetValue('IsSqueezeActive', TValue.CreateBool(Forecast.IsSqueezeActive));
+    DictObj.SetValue('BullScore', TValue.CreateNum(Forecast.BullScore));
+    DictObj.SetValue('BearScore', TValue.CreateNum(Forecast.BearScore));
+    DictObj.SetValue('VolatilityRatio', TValue.CreateNum(Forecast.VolatilityRatio));
+    DictObj.SetValue('DivergenceSignal', TValue.CreateNum(Forecast.DivergenceSignal));
+    Result := TValue.CreateDict(DictObj);
+  except
+    DictObj.Free;
+    raise;
+  end;
+end;
+
+{ v1.14.1: crypto native — free series }
+function Native_CryptoFree(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var Series: TCryptoDataSeries;
+begin
+  if (Args.Count = 1) and (TValue(Args[0]).DataType = dtPointer) then
+  begin
+    Series := TCryptoDataSeries(TValue(Args[0]).PtrVal);
+    if Assigned(Series) then
+    begin
+      Series.Free;
+      Result := TValue.CreateBool(True);
+    end
+    else
+      Result := TValue.CreateBool(False);
+  end
+  else
+    raise EScriptRuntimeError.Create('cryptoFree butuh 1 Pointer');
+end;
+
 { === CRYPTO_END === }
 
 procedure initNativeCode(GEnvv: TSymbolTable);
@@ -47252,6 +47807,7 @@ var
   GuiInst, Gui2Inst, SignalInst, MetricsInst, HealthInst: TInstanceValue; 
 
 begin
+  InitCryptoNativeCode(GEnvv);
   SignalDef := TTypeDefinition.Create('SignalLib', tkClass);
   SignalDef.Methods.Add('on',    TVMFunction.Create);
   SignalDef.Methods.Add('off',   TVMFunction.Create);
