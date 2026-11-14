@@ -38456,10 +38456,13 @@ type
   public
     Children: TList;
     ScrollX, ScrollY: Integer;
+    MaxScrollX, MaxScrollY: Integer;  { v1.13.2: computed from children }
     constructor Create(AID: Integer; AOwner: Pointer;
       AX, AY, AW, AH: Integer);
     destructor Destroy; override;
     procedure AddChild(C: TGuiWidget);
+    procedure RecomputeBounds;
+    procedure ClampScroll;
     procedure Draw(GuiState: Pointer); override;
     function HandleMouse(MX, MY, Btn: Integer; Down: Boolean): Boolean; override;
   end;
@@ -39187,6 +39190,8 @@ begin
   Children := TList.Create;
   ScrollX := 0;
   ScrollY := 0;
+  MaxScrollX := 0;
+  MaxScrollY := 0;
   BgR := 0; BgG := 0; BgB := 0;
   Focusable := False;
 end;
@@ -39207,6 +39212,38 @@ begin
   if not Assigned(C) then Exit;
   C.ScrollManaged := True;  { v1.12.6: render + hit-test via container only }
   Children.Add(C);
+  RecomputeBounds;  { v1.13.2: update max scroll after adding child }
+end;
+
+procedure TGuiScrollContainer.RecomputeBounds;
+var
+  I, ChildRight, ChildBottom, MaxR, MaxB: Integer;
+  Child: TGuiWidget;
+begin
+  MaxR := 0;
+  MaxB := 0;
+  if Assigned(Children) then
+    for I := 0 to Children.Count - 1 do
+    begin
+      Child := TGuiWidget(Children[I]);
+      if not Assigned(Child) then Continue;
+      ChildRight := Child.X + Child.W;
+      ChildBottom := Child.Y + Child.H;
+      if ChildRight > MaxR then MaxR := ChildRight;
+      if ChildBottom > MaxB then MaxB := ChildBottom;
+    end;
+  MaxScrollX := MaxR - W;
+  if MaxScrollX < 0 then MaxScrollX := 0;
+  MaxScrollY := MaxB - H;
+  if MaxScrollY < 0 then MaxScrollY := 0;
+end;
+
+procedure TGuiScrollContainer.ClampScroll;
+begin
+  if ScrollX < 0 then ScrollX := 0;
+  if ScrollX > MaxScrollX then ScrollX := MaxScrollX;
+  if ScrollY < 0 then ScrollY := 0;
+  if ScrollY > MaxScrollY then ScrollY := MaxScrollY;
 end;
 
 procedure TGuiScrollContainer.Draw(GuiState: Pointer);
@@ -43325,6 +43362,42 @@ begin
   Result := TValue.CreateBool(True);
 end;
 
+{ v1.13.2: gui2.scrollContainerGetMax(id) -> {x, y} }
+function Native_Gui2_ScrollContainerGetMax(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var C: TGuiWidget; D: TDictValue;
+begin
+  Result := TValue.CreateNull;
+  if Args.Count <> 1 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  C := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(C) then Exit;
+  if not (C is TGuiScrollContainer) then Exit;
+  D := TDictValue.Create;
+  try
+    D.SetValue('x', TValue.CreateNum(TGuiScrollContainer(C).MaxScrollX));
+    D.SetValue('y', TValue.CreateNum(TGuiScrollContainer(C).MaxScrollY));
+    Result := TValue.CreateDict(D);
+  except
+    D.Free;
+    raise;
+  end;
+end;
+
+{ v1.13.2: gui2.scrollContainerRecompute(id) -> bool — after moving children }
+function Native_Gui2_ScrollContainerRecompute(Args: TObjectList; CallEnv: TSymbolTable): TValue;
+var C: TGuiWidget;
+begin
+  Result := TValue.CreateBool(False);
+  if Args.Count <> 1 then Exit;
+  if TValue(Args[0]).DataType <> dtNumeric then Exit;
+  C := GuiFindWidget(Trunc(TValue(Args[0]).NumVal));
+  if not Assigned(C) then Exit;
+  if not (C is TGuiScrollContainer) then Exit;
+  TGuiScrollContainer(C).RecomputeBounds;
+  TGuiScrollContainer(C).ClampScroll;
+  Result := TValue.CreateBool(True);
+end;
+
 { v1.12.6: gui2.scrollContainerSetScroll(id, sx, sy) -> bool }
 function Native_Gui2_ScrollContainerSetScroll(Args: TObjectList; CallEnv: TSymbolTable): TValue;
 var C: TGuiWidget;
@@ -43339,6 +43412,7 @@ begin
   if not (C is TGuiScrollContainer) then Exit;
   TGuiScrollContainer(C).ScrollX := Trunc(TValue(Args[1]).NumVal);
   TGuiScrollContainer(C).ScrollY := Trunc(TValue(Args[2]).NumVal);
+  TGuiScrollContainer(C).ClampScroll;  { v1.13.2: clamp to children bounds }
   Result := TValue.CreateBool(True);
 end;
 
@@ -44682,12 +44756,9 @@ begin
     SC := TGuiScrollContainer(Widget);
     { wheel up (DY>0) = scroll content down = ScrollY decreases }
     SC.ScrollY := SC.ScrollY - WheelDY * Step;
-    if SC.ScrollY < 0 then SC.ScrollY := 0;
     if WheelDX <> 0 then
-    begin
       SC.ScrollX := SC.ScrollX - WheelDX * Step;
-      if SC.ScrollX < 0 then SC.ScrollX := 0;
-    end;
+    SC.ClampScroll;  { v1.13.2: both min and max bounds }
     Exit;
   end;
 end;
@@ -46910,6 +46981,8 @@ begin
   Gui2Inst.Members.DefineVar('scrollContainer', TValue.CreateNative(@Native_Gui2_ScrollContainer));
   Gui2Inst.Members.DefineVar('scrollContainerAdd', TValue.CreateNative(@Native_Gui2_ScrollContainerAdd));
   Gui2Inst.Members.DefineVar('scrollContainerSetScroll', TValue.CreateNative(@Native_Gui2_ScrollContainerSetScroll));
+  Gui2Inst.Members.DefineVar('scrollContainerGetMax', TValue.CreateNative(@Native_Gui2_ScrollContainerGetMax));
+  Gui2Inst.Members.DefineVar('scrollContainerRecompute', TValue.CreateNative(@Native_Gui2_ScrollContainerRecompute));
   Gui2Inst.Members.DefineVar('scrollContainerGetScroll', TValue.CreateNative(@Native_Gui2_ScrollContainerGetScroll));
   Gui2Inst.Members.DefineVar('scrollbar', TValue.CreateNative(@Native_Gui2_Scrollbar));
   Gui2Inst.Members.DefineVar('scrollbarSetRange', TValue.CreateNative(@Native_Gui2_ScrollbarSetRange));
