@@ -29237,6 +29237,7 @@ var
   ResContentLength: Integer;
   ResConnClose: Boolean;
   ResChunked: Boolean;
+  ZeroReads: Integer;
   ChunkBody: RawByteString;
   ChunkComplete: Boolean;
   Reusable: Boolean;
@@ -29438,6 +29439,7 @@ begin
     if not Assigned(HeadersList) then
       HeadersList := TStringList.Create;
     HeadersList.Add('Connection: keep-alive');
+    HeadersList.Add('Accept-Encoding: identity');
    
     try
       RawReq := BuildHTTPRequest(Method, Path, Host, HeadersList, StrToRaw(BodyStr));
@@ -29469,13 +29471,24 @@ begin
       ChunkComplete := False;
       HeaderParsed := False; 
       
+      ZeroReads := 0;
       while True do
       begin
         if UseTLS then
           R := TLSRecv(TLSConn, 4096, Chunk)
         else
           R := NetRecvTimeout(Sock, 4096, HTTP_CLIENT_TIMEOUT, Chunk);
-        if R <= 0 then Break;
+        if R <= 0 then
+        begin
+          if HeaderParsed and (ResContentLength >= 0) then
+            if Length(RespBuf) >= HeaderEnd + 3 + ResContentLength then
+              Break;
+          Inc(ZeroReads);
+          if ZeroReads >= 5 then Break;
+          Sleep(100);
+          Continue;
+        end;
+        ZeroReads := 0;
         RespBuf := RespBuf + Chunk;
         
         // Parse headers once we have full header block
