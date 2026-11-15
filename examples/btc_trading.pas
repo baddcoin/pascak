@@ -27,8 +27,9 @@ function addBatch(series, batch) begin
 end;
 
 function warmup(series, target) begin
+  var allCandles = [];
   var latestMs = getLatestMs();
-  if latestMs == 0 then return 0;
+  if latestMs == 0 then return allCandles;
   var startMs = latestMs - (target + 2) * 60 * 1000;
   var added = 0;
   var batchStart = startMs;
@@ -39,11 +40,12 @@ function warmup(series, target) begin
     if batch == null then break;
     if len(batch) == 0 then break;
     added = added + addBatch(series, batch);
+    allCandles = allCandles + batch;
     batchStart = batchEnd + 1;
     iter = iter + 1;
     sleep(50);
   end;
-  return added;
+  return allCandles;
 end;
 
 function fetchChart() begin
@@ -52,14 +54,29 @@ function fetchChart() begin
   return jsonParse(resp.body);
 end;
 
-function drawCandles(candles, x0, y0, w, h) begin
-  var n = len(candles);
-  if n == 0 then return;
-  var minP = toFloat(candles[0][3]);
-  var maxP = toFloat(candles[0][2]);
-  var maxVol = toFloat(candles[0][5]);
-  var i = 1;
-  while i < n do begin
+function sma(candles, endIdx, period) begin
+  if endIdx < period - 1 then return 0;
+  var sum = 0.0;
+  var i = endIdx - period + 1;
+  while i <= endIdx do begin
+    sum = sum + toFloat(candles[i][4]);
+    i = i + 1;
+  end;
+  return sum / period;
+end;
+
+function drawCandles(candles, visibleCount, x0, y0, w, h) begin
+  var total = len(candles);
+  if total == 0 then return;
+  var startIdx = total - visibleCount;
+  if startIdx < 0 then startIdx = 0;
+  var n = total - startIdx;
+  if n <= 0 then return;
+  var minP = toFloat(candles[startIdx][3]);
+  var maxP = toFloat(candles[startIdx][2]);
+  var maxVol = toFloat(candles[startIdx][5]);
+  var i = startIdx + 1;
+  while i < total do begin
     var lo = toFloat(candles[i][3]);
     var hi = toFloat(candles[i][2]);
     var vol = toFloat(candles[i][5]);
@@ -85,8 +102,33 @@ function drawCandles(candles, x0, y0, w, h) begin
     gi = gi + 1;
   end;
   var cw = w / n;
-  i = 0;
-  while i < n do begin
+  var prevS20X = -1;
+  var prevS20Y = -1;
+  var prevS50X = -1;
+  var prevS50Y = -1;
+  i = startIdx;
+  while i < total do begin
+    var s20 = sma(candles, i, 20);
+    var s50 = sma(candles, i, 50);
+    var lcx = x0 + (i - startIdx) * cw + cw / 2;
+    if s20 > 0 then begin
+      var ly20 = y0 + priceH - (s20 - minP) / range * priceH;
+      if prevS20X >= 0 then
+        gui2.line(prevS20X, prevS20Y, lcx, ly20, 255, 220, 100);
+      prevS20X = lcx;
+      prevS20Y = ly20;
+    end;
+    if s50 > 0 then begin
+      var ly50 = y0 + priceH - (s50 - minP) / range * priceH;
+      if prevS50X >= 0 then
+        gui2.line(prevS50X, prevS50Y, lcx, ly50, 100, 180, 255);
+      prevS50X = lcx;
+      prevS50Y = ly50;
+    end;
+    i = i + 1;
+  end;
+  i = startIdx;
+  while i < total do begin
     var op = toFloat(candles[i][1]);
     var hi = toFloat(candles[i][2]);
     var lo = toFloat(candles[i][3]);
@@ -96,7 +138,7 @@ function drawCandles(candles, x0, y0, w, h) begin
     var yL = y0 + priceH - (lo - minP) / range * priceH;
     var yO = y0 + priceH - (op - minP) / range * priceH;
     var yC = y0 + priceH - (cl - minP) / range * priceH;
-    var cx = x0 + i * cw + cw / 2;
+    var cx = x0 + (i - startIdx) * cw + cw / 2;
     gui2.line(cx, yH, cx, yL, 140, 140, 140);
     var bTop = yO;
     var bBot = yC;
@@ -187,16 +229,14 @@ begin
   gui2.init();
   gui2.setFont("/data/data/com.termux/files/usr/share/fonts/TTF/DejaVuSans.ttf", 14);
   gui2.window("BTC Trading - Stable", 1000, 750);
-  println("=== Batched warmup (100 candles via 14x fetch) ===");
+  println("=== Batched warmup (250 candles via 17x fetch) ===");
   var series = cryptoCreate(300);
-  var total = warmup(series, 250);
-  println("Warmed: " + str(total) + " candles");
-  var chart = fetchChart();
+  var candles = warmup(series, 250);
+  println("Warmed: " + str(len(candles)) + " candles");
   var lastMs = 0;
-  if chart != null then
-    if len(chart) > 0 then
-      lastMs = toFloat(chart[len(chart) - 1][0]);
-  println("Chart loaded: " + str(len(chart)) + " candles");
+  if len(candles) > 0 then
+    lastMs = toFloat(candles[len(candles) - 1][0]);
+  println("Chart candles: " + str(len(candles)));
   var frame = 0;
   var lastRefresh = 0;
   var ev = "";
@@ -210,29 +250,28 @@ begin
           var ts = toFloat(newChart[j][0]);
           if ts > lastMs then begin
             cryptoAdd(series, ts, toFloat(newChart[j][1]), toFloat(newChart[j][2]), toFloat(newChart[j][3]), toFloat(newChart[j][4]), toFloat(newChart[j][5]));
+            candles = candles + [newChart[j]];
             lastMs = ts;
           end;
           j = j + 1;
         end;
-        chart = newChart;
       end;
       lastRefresh = frame;
     end;
     gui2.clear(15, 15, 25);
-    if chart != null then
-      if len(chart) > 0 then begin
-        drawCandles(chart, 20, 60, 960, 400);
-        var p = toFloat(chart[len(chart) - 1][4]);
-        var op = toFloat(chart[len(chart) - 1][1]);
-        if p >= op then
-          gui2.text(20, 15, "BTC/USDT 1m  " + str(p) + " USDT", 0, 220, 100)
-        else
-          gui2.text(20, 15, "BTC/USDT 1m  " + str(p) + " USDT", 220, 50, 50);
-      end;
+    if len(candles) > 0 then begin
+      drawCandles(candles, 100, 20, 60, 960, 400);
+      var p = toFloat(candles[len(candles) - 1][4]);
+      var op = toFloat(candles[len(candles) - 1][1]);
+      if p >= op then
+        gui2.text(20, 15, "BTC/USDT 1m  " + str(p) + " USDT", 0, 220, 100)
+      else
+        gui2.text(20, 15, "BTC/USDT 1m  " + str(p) + " USDT", 220, 50, 50);
+    end;
     var fc = getForecast(series);
     if fc != null then
       drawSignal(fc, 20, 490);
-    gui2.text(20, 720, "100 candles | SMA20/50 | batched fetch | ESC to quit", 130, 130, 130);
+    gui2.text(20, 720, "100 candles | SMA20 (yellow) SMA50 (blue) | batched fetch | ESC", 130, 130, 130);
     gui2.present();
     frame = frame + 1;
   end;
