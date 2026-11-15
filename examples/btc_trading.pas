@@ -224,18 +224,6 @@ function drawSignal(fc, x, y) begin
   gui2.text(x + 310, barY + 22, "Bear " + str(bep), 220, 100, 100);
 end;
 
-var WS_KLINE_CLOSED = 0;
-
-function onWsMsg(c, m) begin
-  var data = jsonParse(m);
-  if data == null then return;
-  var k = data["k"];
-  if k == null then return;
-  var closed = k["x"];
-  if closed then
-    WS_KLINE_CLOSED = WS_KLINE_CLOSED + 1;
-end;
-
 begin
   gui2.init();
   gui2.setFont("/data/data/com.termux/files/usr/share/fonts/TTF/DejaVuSans.ttf", 14);
@@ -253,19 +241,12 @@ begin
       if len(chart) > 0 then
         lastMs = toFloat(chart[len(chart) - 1][0]);
   end;
-  var wsCfg = {"onMessage": onWsMsg, "verify": false};
-  ws.connect("wss://data-stream.binance.vision/ws/btcusdt@kline_1m", wsCfg);
-  println("WS connected: real-time kline-close trigger active");
   var frame = 0;
   var lastRefresh = 0;
-  var lastKlineClosed = 0;
   var ev = "";
   while ev <> "quit" do begin
     ev = gui2.poll();
-    var timeTrigger = (frame - lastRefresh) >= 180;
-    var wsTrigger = WS_KLINE_CLOSED > lastKlineClosed;
-    if timeTrigger or wsTrigger then begin
-      lastKlineClosed = WS_KLINE_CLOSED;
+    if (frame - lastRefresh) >= 180 then begin
       var resp = http.get("https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=200");
       if resp != null then begin
         var newChart = jsonParse(resp.body);
